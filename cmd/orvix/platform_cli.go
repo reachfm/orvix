@@ -808,6 +808,12 @@ func runImports(args []string, deps platformCLIDeps, fs *flag.FlagSet) int {
 	rest := args[1:]
 	iid := fs.Int64("id", 0, "import ID")
 	iconfirm := fs.String("confirm", "", "confirmation token")
+	// H-7: an operator may assert WHICH tenant an import belongs to. When
+	// supplied it must match the import's immutable target tenant, so a
+	// lifecycle command can never act on a job owned by a different tenant
+	// than the operator intends. 0 means "not asserted" and addresses the job
+	// by id under platform authority, which is the pre-existing behaviour.
+	itenant := fs.Uint("tenant-id", 0, "assert the import's target tenant (must match if supplied)")
 	if err := fs.Parse(rest); err != nil {
 		return exitBadArgs
 	}
@@ -894,7 +900,7 @@ func runImports(args []string, deps platformCLIDeps, fs *flag.FlagSet) int {
 			fmt.Fprintln(deps.stderr, "--id is required")
 			return exitBadArgs
 		}
-		job, err := svc.Get(ctx, uint(*iid), 0, "platform")
+		job, err := svc.Get(ctx, uint(*iid), *itenant, "platform")
 		if err != nil {
 			fmt.Fprintln(deps.stderr, "import job not found")
 			return exitNotFound
@@ -912,7 +918,7 @@ func runImports(args []string, deps platformCLIDeps, fs *flag.FlagSet) int {
 			fmt.Fprintln(deps.stderr, "--id is required")
 			return exitBadArgs
 		}
-		report, cerr := svc.Validate(ctx, uint(*iid), 0, "platform")
+		report, cerr := svc.Validate(ctx, uint(*iid), *itenant, "platform")
 		if cerr != nil {
 			fmt.Fprintf(deps.stderr, "validation error: %v\n", cerr)
 			return exitInternal
@@ -936,7 +942,7 @@ func runImports(args []string, deps platformCLIDeps, fs *flag.FlagSet) int {
 			fmt.Fprintln(deps.stderr, "confirmation refused")
 			return exitConfirmRefused
 		}
-		job, cerr := svc.Get(ctx, uint(*iid), 0, "platform")
+		job, cerr := svc.Get(ctx, uint(*iid), *itenant, "platform")
 		if cerr != nil {
 			fmt.Fprintln(deps.stderr, "import job not found")
 			return exitNotFound
@@ -944,7 +950,7 @@ func runImports(args []string, deps platformCLIDeps, fs *flag.FlagSet) int {
 		// Stable deterministic idempotency key: retrying the same CLI
 		// invocation replays the original result instead of double-submitting.
 		idemKey := "cli-execute-import-" + itoaCLI(job.ID)
-		result, exerr := svc.Execute(ctx, uint(*iid), 0, "platform", idemKey, want)
+		result, exerr := svc.Execute(ctx, uint(*iid), *itenant, "platform", idemKey, want)
 		if exerr != nil {
 			fmt.Fprintf(deps.stderr, "execute error: %v\n", exerr)
 			return exitInternal
@@ -957,7 +963,7 @@ func runImports(args []string, deps platformCLIDeps, fs *flag.FlagSet) int {
 			fmt.Fprintln(deps.stderr, "--id is required")
 			return exitBadArgs
 		}
-		job, cerr := svc.Cancel(ctx, uint(*iid), 0, "platform")
+		job, cerr := svc.Cancel(ctx, uint(*iid), *itenant, "platform")
 		if cerr != nil {
 			fmt.Fprintf(deps.stderr, "error: %v\n", cerr)
 			return exitInternal
@@ -971,7 +977,7 @@ func runImports(args []string, deps platformCLIDeps, fs *flag.FlagSet) int {
 			return exitBadArgs
 		}
 		idemKey := "cli-resume-import-" + itoaCLI(uint(*iid))
-		job, rerr := svc.Resume(ctx, uint(*iid), 0, "platform", idemKey)
+		job, rerr := svc.Resume(ctx, uint(*iid), *itenant, "platform", idemKey)
 		if rerr != nil {
 			fmt.Fprintf(deps.stderr, "resume error: %v\n", rerr)
 			return exitInternal
@@ -990,7 +996,7 @@ func runImports(args []string, deps platformCLIDeps, fs *flag.FlagSet) int {
 			return exitConfirmRefused
 		}
 		idemKey := "cli-compensate-import-" + itoaCLI(uint(*iid))
-		job, cerr := svc.Compensate(ctx, uint(*iid), 0, "platform", idemKey, want)
+		job, cerr := svc.Compensate(ctx, uint(*iid), *itenant, "platform", idemKey, want)
 		if cerr != nil {
 			fmt.Fprintf(deps.stderr, "error: %v\n", cerr)
 			return exitInternal

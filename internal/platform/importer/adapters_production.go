@@ -62,11 +62,44 @@ func NewProductionAdaptersFromDB(db *sql.DB, dialect *dbdialect.Info) (*Adapters
 	})
 }
 
+// ── Tenant-ownership invariant (H-7) ──────────────────────────────────
+//
+// SECURITY INVARIANT: no tenant-owned entity may EVER be created, updated,
+// or compensated with tenant_id <= 0.
+//
+// A platform-scoped import previously carried tenant_id = 0 all the way down
+// here, so admins, domains, mailboxes, aliases, groups and memberships were
+// written with tenant_id = 0: invisible to every tenant UI, unreachable by
+// every tenant-scoped query, polluting SMTP local-domain resolution, and — for
+// users — permanently unable to log in, because a tenant-scoped role fails
+// validateAuthorizationSnapshot without tenant_id > 0.
+//
+// requireTenant is enforced HERE, at the adapter boundary, not only at the API
+// entry point. This is the single choke point every entity write passes
+// through — CLI, HTTP (tenant and platform), executor, resume and compensation
+// all funnel into these methods — so the invariant holds even if a future
+// caller forgets to validate. Entry-point validation (Service.Create and the
+// platform handler) still rejects earlier with a clearer message; this is the
+// last line that makes the orphan structurally impossible.
+//
+// tenantID is uint, so "<= 0" is exactly "== 0"; the check is written against
+// the zero value that a missing/absent tenant actually produces.
+func requireTenant(tenantID uint) error {
+	if tenantID == 0 {
+		return newImportError(CodeTenantRequired,
+			"a valid target tenant is required for tenant-owned entities")
+	}
+	return nil
+}
+
 // ── Organization ──────────────────────────────────────────────────────
 
 type prodOrgAdapter struct{ svc *organization.Service }
 
 func (a *prodOrgAdapter) CreateOrganization(ctx context.Context, name, domainName string, tenantID uint) (uint, error) {
+	if err := requireTenant(tenantID); err != nil {
+		return 0, err
+	}
 	org, err := a.svc.CreateOrganization(ctx, organization.CreateOrganizationRequest{
 		Name:   name,
 		Slug:   slugify(name),
@@ -79,10 +112,16 @@ func (a *prodOrgAdapter) CreateOrganization(ctx context.Context, name, domainNam
 }
 
 func (a *prodOrgAdapter) SoftDeleteOrganization(ctx context.Context, id, tenantID uint) error {
+	if err := requireTenant(tenantID); err != nil {
+		return err
+	}
 	return a.svc.SetOrganizationActive(ctx, id, false, "import compensation")
 }
 
 func (a *prodOrgAdapter) UpdateOrganization(ctx context.Context, id, tenantID uint, safeFields map[string]any) error {
+	if err := requireTenant(tenantID); err != nil {
+		return err
+	}
 	req := organization.UpdateOrganizationRequest{}
 	if v, ok := safeFields["name"]; ok {
 		s := v.(string)
@@ -111,6 +150,9 @@ type prodAdminAdapter struct {
 }
 
 func (a *prodAdminAdapter) CreateTenantAdmin(ctx context.Context, email, name, password, role string, tenantID uint) (uint, error) {
+	if err := requireTenant(tenantID); err != nil {
+		return 0, err
+	}
 	hash, err := auth.HashPassword(password)
 	if err != nil {
 		return 0, err
@@ -122,11 +164,17 @@ func (a *prodAdminAdapter) CreateTenantAdmin(ctx context.Context, email, name, p
 }
 
 func (a *prodAdminAdapter) SoftDeleteUser(ctx context.Context, id, tenantID uint) error {
+	if err := requireTenant(tenantID); err != nil {
+		return err
+	}
 	_, err := a.db.ExecContext(ctx, a.dialect.Rewrite(`UPDATE users SET deleted_at=? WHERE id=? AND tenant_id=?`), timeNow(), id, tenantID)
 	return err
 }
 
 func (a *prodAdminAdapter) UpdateTenantAdmin(ctx context.Context, id, tenantID uint, safeFields map[string]any) error {
+	if err := requireTenant(tenantID); err != nil {
+		return err
+	}
 	if v, ok := safeFields["name"]; ok {
 		s := v.(string)
 		res, err := a.db.ExecContext(ctx, a.dialect.Rewrite(`UPDATE users SET full_name=?, updated_at=? WHERE id=? AND tenant_id=? AND deleted_at IS NULL`), s, timeNow(), id, tenantID)
@@ -143,6 +191,9 @@ func (a *prodAdminAdapter) UpdateTenantAdmin(ctx context.Context, id, tenantID u
 type prodDomainAdapter struct{ svc *domain.Service }
 
 func (a *prodDomainAdapter) CreateDomain(ctx context.Context, name string, tenantID uint) (uint, error) {
+	if err := requireTenant(tenantID); err != nil {
+		return 0, err
+	}
 	d, err := a.svc.CreateDomain(ctx, domain.CreateDomainRequest{Name: name}, tenantID)
 	if err != nil {
 		return 0, err
@@ -151,10 +202,16 @@ func (a *prodDomainAdapter) CreateDomain(ctx context.Context, name string, tenan
 }
 
 func (a *prodDomainAdapter) SoftDeleteDomain(ctx context.Context, id, tenantID uint) error {
+	if err := requireTenant(tenantID); err != nil {
+		return err
+	}
 	return a.svc.DeleteDomain(ctx, id, tenantID)
 }
 
 func (a *prodDomainAdapter) UpdateDomain(ctx context.Context, id, tenantID uint, safeFields map[string]any) error {
+	if err := requireTenant(tenantID); err != nil {
+		return err
+	}
 	req := domain.UpdateDomainRequest{}
 	if v, ok := safeFields["description"]; ok {
 		s := v.(string)
@@ -169,6 +226,9 @@ func (a *prodDomainAdapter) UpdateDomain(ctx context.Context, id, tenantID uint,
 type prodMailboxAdapter struct{ svc *mailbox.Service }
 
 func (a *prodMailboxAdapter) CreateMailbox(ctx context.Context, email, name, password, domainName string, tenantID uint) (uint, error) {
+	if err := requireTenant(tenantID); err != nil {
+		return 0, err
+	}
 	resp, err := a.svc.CreateMailbox(ctx, mailbox.CreateMailboxRequest{Email: email, Name: name, Password: password}, tenantID)
 	if err != nil {
 		return 0, err
@@ -177,10 +237,16 @@ func (a *prodMailboxAdapter) CreateMailbox(ctx context.Context, email, name, pas
 }
 
 func (a *prodMailboxAdapter) SoftDeleteMailbox(ctx context.Context, id, tenantID uint) error {
+	if err := requireTenant(tenantID); err != nil {
+		return err
+	}
 	return a.svc.SoftDeleteMailbox(ctx, id, tenantID, "import compensation")
 }
 
 func (a *prodMailboxAdapter) UpdateMailbox(ctx context.Context, id, tenantID uint, safeFields map[string]any) error {
+	if err := requireTenant(tenantID); err != nil {
+		return err
+	}
 	req := mailbox.UpdateMailboxRequest{}
 	if v, ok := safeFields["name"]; ok {
 		s := v.(string)
@@ -201,6 +267,9 @@ type prodAliasAdapter struct {
 }
 
 func (a *prodAliasAdapter) CreateAlias(ctx context.Context, fromEmail, toEmail string, tenantID, domainID uint) (uint, error) {
+	if err := requireTenant(tenantID); err != nil {
+		return 0, err
+	}
 	if domainID == 0 {
 		var err error
 		domainID, err = resolveDomainID(ctx, a.db, a.dialect, toEmail, tenantID)
@@ -215,6 +284,9 @@ func (a *prodAliasAdapter) CreateAlias(ctx context.Context, fromEmail, toEmail s
 }
 
 func (a *prodAliasAdapter) SoftDeleteAlias(ctx context.Context, id, tenantID uint) error {
+	if err := requireTenant(tenantID); err != nil {
+		return err
+	}
 	_, err := a.db.ExecContext(ctx, a.dialect.Rewrite(`UPDATE coremail_aliases SET deleted_at=?, updated_at=? WHERE id=? AND tenant_id=?`), timeNow(), timeNow(), id, tenantID)
 	return err
 }
@@ -229,6 +301,9 @@ type prodGroupAdapter struct {
 }
 
 func (a *prodGroupAdapter) CreateGroup(ctx context.Context, name, description string, tenantID uint) (uint, error) {
+	if err := requireTenant(tenantID); err != nil {
+		return 0, err
+	}
 	now := timeNow()
 	return insertReturningID(ctx, a.db, a.dialect,
 		`INSERT INTO coremail_groups (tenant_id, name, description, created_at, updated_at) VALUES (?,?,?,?,?)`,
@@ -236,6 +311,9 @@ func (a *prodGroupAdapter) CreateGroup(ctx context.Context, name, description st
 }
 
 func (a *prodGroupAdapter) AddGroupMember(ctx context.Context, groupName, email string, tenantID uint) error {
+	if err := requireTenant(tenantID); err != nil {
+		return err
+	}
 	var groupID uint
 	if err := a.db.QueryRowContext(ctx, a.dialect.Rewrite(`SELECT id FROM coremail_groups WHERE name=? AND tenant_id=? AND deleted_at IS NULL`), groupName, tenantID).Scan(&groupID); err != nil {
 		return err
@@ -245,16 +323,25 @@ func (a *prodGroupAdapter) AddGroupMember(ctx context.Context, groupName, email 
 }
 
 func (a *prodGroupAdapter) SoftDeleteGroup(ctx context.Context, id, tenantID uint) error {
+	if err := requireTenant(tenantID); err != nil {
+		return err
+	}
 	_, err := a.db.ExecContext(ctx, a.dialect.Rewrite(`UPDATE coremail_groups SET deleted_at=?, updated_at=? WHERE id=? AND tenant_id=?`), timeNow(), timeNow(), id, tenantID)
 	return err
 }
 
 func (a *prodGroupAdapter) RemoveGroupMember(ctx context.Context, memberID, tenantID uint) error {
+	if err := requireTenant(tenantID); err != nil {
+		return err
+	}
 	_, err := a.db.ExecContext(ctx, a.dialect.Rewrite(`DELETE FROM coremail_group_members WHERE id=? AND group_id IN (SELECT id FROM coremail_groups WHERE tenant_id=?)`), memberID, tenantID)
 	return err
 }
 
 func (a *prodGroupAdapter) UpdateGroup(ctx context.Context, id, tenantID uint, safeFields map[string]any) error {
+	if err := requireTenant(tenantID); err != nil {
+		return err
+	}
 	now := timeNow()
 	if v, ok := safeFields["name"]; ok {
 		s := v.(string)

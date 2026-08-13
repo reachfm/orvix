@@ -38,6 +38,12 @@ const (
 	CodeJobsUnavailable     ErrorCode = "JOBS_UNAVAILABLE"
 	CodeIdempotencyRequired ErrorCode = "IDEMPOTENCY_KEY_REQUIRED"
 	CodeCancelled           ErrorCode = "CANCELLED"
+	// CodeTenantRequired reports a tenant-owned entity operation attempted
+	// without a valid target tenant (H-7). Every tenant-owned row must carry
+	// tenant_id > 0; a zero/absent tenant creates an orphan that no tenant UI
+	// can see, that no tenant-scoped query reaches, and — for users — that
+	// can never log in because a tenant-scoped role requires tenant_id > 0.
+	CodeTenantRequired ErrorCode = "TARGET_TENANT_REQUIRED"
 )
 
 type ImportError struct {
@@ -84,6 +90,8 @@ func ToKernelError(err *ImportError) *kernel.Error {
 		return kernel.ValidationError(err.Fields)
 	case CodeMissingParent, CodeCrossTenant, CodePlatformRoleInj:
 		return kernel.Forbidden(msg)
+	case CodeTenantRequired:
+		return kernel.ValidationError(map[string]string{"target_tenant_id": msg})
 	case CodeQuotaExceeded:
 		return kernel.QuotaExceeded(msg)
 	case CodeHashMismatch, CodeModifiedAfterImport:

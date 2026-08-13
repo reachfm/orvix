@@ -94,6 +94,20 @@ func (s *Service) EnsureSchema(ctx context.Context) error {
 func (s *Service) Create(ctx context.Context, params CreateImportParams, data []byte) (*ImportJob, error) {
 	params.normalize()
 
+	// H-7: the target tenant is validated FIRST — before any staging file is
+	// written and before any job row exists. An import that cannot legally own
+	// its entities must leave nothing behind: no staged source, no job row, no
+	// checkpoint, and above all no tenant-0 entity.
+	//
+	// The tenant recorded here is the job's IMMUTABLE target. Every later
+	// stage (validate, execute, retry, resume, compensate) reads job.TenantID
+	// from storage rather than re-deriving it from a request, so the ownership
+	// decided at creation cannot drift.
+	if params.TenantID == 0 {
+		return nil, ToKernelError(newImportError(CodeTenantRequired,
+			"a valid target tenant is required; platform-scoped imports must name an explicit target tenant"))
+	}
+
 	// Store source exactly once: temp file + fsync + atomic rename, with
 	// traversal and symlink rejection enforced by the staging service.
 	stagingID, hash, size, err := s.staging.Store(data, 0)
@@ -337,8 +351,24 @@ func (s *Service) executeDurable(ctx context.Context, job *ImportJob) (*ImportJo
 		return nil, ErrDryRunRequired
 	}
 
+	// H-7: two DIFFERENT tenant concepts must not be conflated.
+	//
+	//   - The DURABLE JOB's tenant is the control-plane owner of the queue
+	//     entry. The jobs subsystem enforces that a platform-scope job carries
+	//     TenantID 0 ("platform jobs cannot carry a tenant"), because such a
+	//     job runs under platform authority, not on behalf of a tenant.
+	//   - The IMPORT's TARGET tenant is which tenant the imported entities
+	//     will belong to. That lives on the platform_imports row and is the
+	//     immutable owner every mutation is bound to.
+	//
+	// Putting the import's target tenant into the durable job's TenantID would
+	// violate the jobs invariant; leaving the target only on the import row
+	// keeps one authoritative source. HandleImportJob reloads the import row
+	// and uses importJob.TenantID, so the worker never trusts the payload for
+	// ownership — the payload carries only the import identifier needed to
+	// find that row.
 	submission := jobs.Submission{
-		TenantID:       job.TenantID,
+		TenantID:       durableTenantFor(job),
 		Scope:          mapScope(job.Scope),
 		Actor:          job.Actor,
 		Type:           ImportJobType,
@@ -378,7 +408,10 @@ func (s *Service) executeDurable(ctx context.Context, job *ImportJob) (*ImportJo
 // durable job other than this import's own (type=platform.import with the
 // derived idempotency key). A conflicting linkage must never be activated.
 func (s *Service) verifyLinkage(ctx context.Context, job *ImportJob, durableKey string) error {
-	linked, err := s.jobSvc.Get(ctx, job.JobID, job.TenantID, mapScope(job.Scope))
+	// H-7: address the durable job by its control-plane tenant (0 for
+	// platform scope), not the import's target tenant — see the submission
+	// comment above for why the two must not be conflated.
+	linked, err := s.jobSvc.Get(ctx, job.JobID, durableTenantFor(job), mapScope(job.Scope))
 	if err != nil {
 		if errors.Is(err, jobs.ErrNotFound) {
 			return kernel.Wrap(kernel.ErrCodeInternal, "import is linked to a durable job that no longer exists", nil)
@@ -442,7 +475,7 @@ func (s *Service) Cancel(ctx context.Context, id, tenantID uint, scope string) (
 	}
 	if job.JobID > 0 && s.jobSvc != nil {
 		js := mapScope(job.Scope)
-		if _, cancelErr := s.jobSvc.RequestCancellation(ctx, job.JobID, job.TenantID, js); cancelErr != nil {
+		if _, cancelErr := s.jobSvc.RequestCancellation(ctx, job.JobID, durableTenantFor(job), js); cancelErr != nil {
 			// The import is still marked cancelled below; the durable job's
 			// cooperative cancellation is best-effort coordination. Surface
 			// the failure rather than silently dropping it.
@@ -873,6 +906,19 @@ func (p *CreateImportParams) normalize() {
 	if p.Actor == "" {
 		p.Actor = "system"
 	}
+}
+
+// durableTenantFor returns the tenant that identifies an import's DURABLE
+// job in the jobs subsystem. A platform-scope job is owned by the control
+// plane and must carry tenant 0 (the jobs service rejects anything else); a
+// tenant-scope job is owned by its tenant. This is deliberately NOT the
+// import's target tenant, which lives on the platform_imports row and is what
+// entity ownership is bound to.
+func durableTenantFor(job *ImportJob) uint {
+	if mapScope(job.Scope) == jobs.ScopePlatform {
+		return 0
+	}
+	return job.TenantID
 }
 
 func mapScope(s string) jobs.Scope {

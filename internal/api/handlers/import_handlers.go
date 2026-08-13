@@ -3,6 +3,9 @@ package handlers
 import (
 	"encoding/json"
 	"fmt"
+	"math"
+	"strconv"
+	"strings"
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/orvix/orvix/internal/platform/importer"
@@ -25,9 +28,22 @@ func (h *Handler) CreateImport(c fiber.Ctx) error {
 		return err
 	}
 	scope := importScope(c)
-	tenantID := h.tenantIDForScope(c, scope)
-	if tenantID == 0 && scope == "tenant" {
-		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "tenant context required"})
+	// H-7: resolve and VALIDATE the target tenant before anything is staged.
+	// Tenant scope derives it from the authenticated context; platform scope
+	// requires an explicit, existing, non-deleted target. Either way a job is
+	// never created with tenant 0, so no tenant-0 entity can be produced.
+	var tenantID uint
+	if scope == "platform" {
+		resolved, err := h.resolvePlatformTargetTenant(c)
+		if err != nil {
+			return err
+		}
+		tenantID = resolved
+	} else {
+		tenantID = tenantIDFromContext(c)
+		if tenantID == 0 {
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "tenant context required"})
+		}
 	}
 
 	body := c.Body()
@@ -224,11 +240,69 @@ func importScope(c fiber.Ctx) string {
 	return "tenant"
 }
 
+// tenantIDForScope resolves the tenant an import operation acts on.
+//
+// H-7 scope semantics:
+//
+//   - TENANT scope: the tenant comes ONLY from the authenticated server-side
+//     context. A tenant id in the body, CSV, query, or header is ignored —
+//     a tenant caller can never import into someone else's tenant.
+//   - PLATFORM scope: there is no ambient tenant, so the caller must name an
+//     explicit target. It previously returned 0 here, which flowed all the way
+//     into the entity writes and produced tenant-0 orphans.
+//
+// For platform scope this returns the caller-supplied target UNVALIDATED for
+// existence; platformTargetTenant performs the full validation (present,
+// numeric, > 0, exists, not deleted) and is what the create path uses.
 func (h *Handler) tenantIDForScope(c fiber.Ctx, scope string) uint {
 	if scope == "platform" {
-		return 0
+		return platformTargetTenantID(c)
 	}
 	return tenantIDFromContext(c)
+}
+
+// platformTargetTenantID reads the explicit platform target tenant from the
+// request. Accepts ?target_tenant_id= or the X-Target-Tenant-ID header.
+// Returns 0 when absent or malformed — callers must treat 0 as "reject".
+func platformTargetTenantID(c fiber.Ctx) uint {
+	raw := strings.TrimSpace(c.Query("target_tenant_id"))
+	if raw == "" {
+		raw = strings.TrimSpace(c.Get("X-Target-Tenant-ID"))
+	}
+	if raw == "" {
+		return 0
+	}
+	// Strict parse: reject negatives, "1abc", "0x1", whitespace-padded junk.
+	n, err := strconv.ParseUint(raw, 10, 64)
+	if err != nil || n == 0 || n > math.MaxUint32 {
+		return 0
+	}
+	return uint(n)
+}
+
+// resolvePlatformTargetTenant validates that a platform import's target tenant
+// exists and is not soft-deleted, so a nonexistent or deleted target is
+// rejected BEFORE staging or any mutation. Returns a stable public error; it
+// never echoes SQL or internal detail.
+func (h *Handler) resolvePlatformTargetTenant(c fiber.Ctx) (uint, error) {
+	tenantID := platformTargetTenantID(c)
+	if tenantID == 0 {
+		return 0, fiber.NewError(fiber.StatusBadRequest,
+			"platform imports require an explicit target tenant (target_tenant_id)")
+	}
+	sqlDB, err := h.db.DB()
+	if err != nil {
+		return 0, fiber.NewError(fiber.StatusServiceUnavailable, "database unavailable")
+	}
+	var exists int
+	q := "SELECT COUNT(*) FROM tenants WHERE id = " + h.sqlDialect().Placeholder(1) + " AND deleted_at IS NULL"
+	if err := sqlDB.QueryRowContext(c.Context(), q, tenantID).Scan(&exists); err != nil {
+		return 0, fiber.NewError(fiber.StatusServiceUnavailable, "unable to validate target tenant")
+	}
+	if exists == 0 {
+		return 0, fiber.NewError(fiber.StatusBadRequest, "target tenant does not exist")
+	}
+	return tenantID, nil
 }
 
 func parseImportID(c fiber.Ctx) uint {

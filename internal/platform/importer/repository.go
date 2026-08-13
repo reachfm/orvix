@@ -363,6 +363,20 @@ func (r *Repository) GetForScope(ctx context.Context, id, tenantID uint, scope s
 		args = append(args, tenantID)
 	} else if scope == "platform" {
 		query += ` AND scope='platform'`
+		// H-7: platform jobs now carry a real target tenant (they used to be
+		// tenant 0, which is why this scope had no tenant predicate at all).
+		// When a caller asserts a target tenant it MUST match the job's
+		// stored, immutable owner, so a lifecycle call can never act on a job
+		// belonging to a different tenant than the one it names.
+		//
+		// A zero tenantID means "not asserted" and preserves the existing
+		// platform-operator flow: the platform lifecycle endpoints address a
+		// job by id under platform authorization, and ownership for every
+		// mutation is read from job.TenantID rather than from this parameter.
+		if tenantID != 0 {
+			query += ` AND tenant_id=?`
+			args = append(args, tenantID)
+		}
 	}
 	job, err := scanImportJob(r.db.QueryRowContext(ctx, r.q(query), args...))
 	if err != nil {

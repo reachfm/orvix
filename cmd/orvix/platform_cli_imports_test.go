@@ -89,6 +89,10 @@ func importsTestDB(t *testing.T) (*sql.DB, *dbdialect.Info) {
 // seedPlatformImport creates an import job via the real service (with real
 // staging + real adapters) so the CLI commands operate on real rows. The
 // staging directory must match the one the CLI commands use.
+// cliImportTargetTenantID is the explicit target tenant the CLI acceptance
+// imports are created against.
+const cliImportTargetTenantID uint = 1
+
 func seedPlatformImport(t *testing.T, db *sql.DB, dial *dbdialect.Info, stagingDir string, data []byte) (uint, string) {
 	t.Helper()
 	repo := importer.NewRepository(db)
@@ -107,8 +111,11 @@ func seedPlatformImport(t *testing.T, db *sql.DB, dial *dbdialect.Info, stagingD
 		t.Fatal(err)
 	}
 	svc := importer.NewService(repo, adapters, staging, nil, nil)
+	// H-7: a platform import must name an explicit target tenant; a job can
+	// no longer be created with tenant 0 (which produced orphan entities).
 	job, err := svc.Create(contextBackdrop(), importer.CreateImportParams{
-		Scope: "platform", Actor: "cli-acceptance", SourceType: importer.SourceCSV, SourceName: "cli.csv",
+		TenantID: cliImportTargetTenantID,
+		Scope:    "platform", Actor: "cli-acceptance", SourceType: importer.SourceCSV, SourceName: "cli.csv",
 	}, data)
 	if err != nil {
 		t.Fatalf("create import: %v", err)
