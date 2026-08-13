@@ -19,11 +19,11 @@ import (
 // resource is re-verified tenant-owned through the underlying service
 // (which already scopes by tenant_id in its SQL).
 type Service struct {
-	domains  *admindomain.Service
+	domains   *admindomain.Service
 	mailboxes *adminmailbox.Service
-	repo     *Repository
-	audit    *audit.ExtendedStore
-	clock    func() time.Time
+	repo      *Repository
+	audit     *audit.ExtendedStore
+	clock     func() time.Time
 }
 
 type Ports struct {

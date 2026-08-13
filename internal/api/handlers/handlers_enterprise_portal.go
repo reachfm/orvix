@@ -160,7 +160,8 @@ func isTenantScopedPermission(p rbac.Permission) bool {
 	return false
 }
 
-func publicScopePermission(scope string) rbac.Permission {	switch scope {
+func publicScopePermission(scope string) rbac.Permission {
+	switch scope {
 	case publicv1.ScopeOrganizationRead:
 		return rbac.PermOrganizationsRead
 	case publicv1.ScopeDomainsRead:

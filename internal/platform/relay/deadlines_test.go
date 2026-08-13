@@ -27,13 +27,13 @@ type controlledWriteConn struct {
 	writeDeadline time.Time
 }
 
-func (c *controlledWriteConn) Read([]byte) (int, error)         { return 0, io.EOF }
-func (c *controlledWriteConn) Write([]byte) (int, error)        { return c.n, c.err }
-func (c *controlledWriteConn) Close() error                     { return nil }
-func (c *controlledWriteConn) LocalAddr() net.Addr              { return nil }
-func (c *controlledWriteConn) RemoteAddr() net.Addr             { return nil }
-func (c *controlledWriteConn) SetDeadline(time.Time) error      { return nil }
-func (c *controlledWriteConn) SetReadDeadline(time.Time) error  { return nil }
+func (c *controlledWriteConn) Read([]byte) (int, error)           { return 0, io.EOF }
+func (c *controlledWriteConn) Write([]byte) (int, error)          { return c.n, c.err }
+func (c *controlledWriteConn) Close() error                       { return nil }
+func (c *controlledWriteConn) LocalAddr() net.Addr                { return nil }
+func (c *controlledWriteConn) RemoteAddr() net.Addr               { return nil }
+func (c *controlledWriteConn) SetDeadline(time.Time) error        { return nil }
+func (c *controlledWriteConn) SetReadDeadline(time.Time) error    { return nil }
 func (c *controlledWriteConn) SetWriteDeadline(t time.Time) error { c.writeDeadline = t; return nil }
 
 func TestF6_PartialDataWriteIsAmbiguous(t *testing.T) {

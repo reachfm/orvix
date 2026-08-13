@@ -25,20 +25,20 @@ import "time"
 // counters and policy state. Field names match the admin service wire
 // shape so the platform handler never invents a contract.
 type PlatformDomain struct {
-	ID              uint   `json:"id"`
-	TenantID        uint   `json:"tenant_id"`
-	Name            string `json:"name"`
-	Status          string `json:"status"`
-	Plan            string `json:"plan"`
-	Description     string `json:"description,omitempty"`
-	MailboxCount    int    `json:"mailbox_count"`
-	AliasCount      int    `json:"alias_count"`
-	DKIMEnabled     bool   `json:"dkim_enabled"`
-	DKIMSelector    string `json:"dkim_selector,omitempty"`
-	DMARCEnabled    bool   `json:"dmarc_enabled"`
-	MailAccessMode  string `json:"mail_access_mode"`
-	CreatedAt       time.Time `json:"created_at"`
-	UpdatedAt       time.Time `json:"updated_at"`
+	ID             uint      `json:"id"`
+	TenantID       uint      `json:"tenant_id"`
+	Name           string    `json:"name"`
+	Status         string    `json:"status"`
+	Plan           string    `json:"plan"`
+	Description    string    `json:"description,omitempty"`
+	MailboxCount   int       `json:"mailbox_count"`
+	AliasCount     int       `json:"alias_count"`
+	DKIMEnabled    bool      `json:"dkim_enabled"`
+	DKIMSelector   string    `json:"dkim_selector,omitempty"`
+	DMARCEnabled   bool      `json:"dmarc_enabled"`
+	MailAccessMode string    `json:"mail_access_mode"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 // PlatformDomainList is the stable list envelope.
@@ -61,18 +61,18 @@ type PlatformDomainFilter struct {
 // ── Platform mailbox views ─────────────────────────────────────────
 
 type PlatformMailbox struct {
-	ID          uint   `json:"id"`
-	TenantID    uint   `json:"tenant_id"`
-	DomainID    uint   `json:"domain_id"`
-	DomainName  string `json:"domain"`
-	Email       string `json:"email"`
-	Name        string `json:"name"`
-	Status      string `json:"status"`
-	IsAdmin     bool   `json:"is_admin"`
-	QuotaMB     int64  `json:"quota_mb"`
-	UsedBytes   int64  `json:"used_bytes"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	ID         uint      `json:"id"`
+	TenantID   uint      `json:"tenant_id"`
+	DomainID   uint      `json:"domain_id"`
+	DomainName string    `json:"domain"`
+	Email      string    `json:"email"`
+	Name       string    `json:"name"`
+	Status     string    `json:"status"`
+	IsAdmin    bool      `json:"is_admin"`
+	QuotaMB    int64     `json:"quota_mb"`
+	UsedBytes  int64     `json:"used_bytes"`
+	CreatedAt  time.Time `json:"created_at"`
+	UpdatedAt  time.Time `json:"updated_at"`
 }
 
 type PlatformMailboxList struct {
@@ -94,12 +94,12 @@ type PlatformMailboxFilter struct {
 // ── Platform alias views ───────────────────────────────────────────
 
 type PlatformAlias struct {
-	ID       uint   `json:"id"`
-	TenantID uint   `json:"tenant_id"`
-	DomainID uint   `json:"domain_id"`
-	FromAddr string `json:"from_addr"`
-	ToAddr   string `json:"to_addr"`
-	Active   bool   `json:"active"`
+	ID        uint      `json:"id"`
+	TenantID  uint      `json:"tenant_id"`
+	DomainID  uint      `json:"domain_id"`
+	FromAddr  string    `json:"from_addr"`
+	ToAddr    string    `json:"to_addr"`
+	Active    bool      `json:"active"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
@@ -151,9 +151,9 @@ type PlatformGroupFilter struct {
 type BulkMailboxAction string
 
 const (
-	BulkMailboxSuspend   BulkMailboxAction = "suspend"
+	BulkMailboxSuspend    BulkMailboxAction = "suspend"
 	BulkMailboxReactivate BulkMailboxAction = "reactivate"
-	BulkMailboxDelete    BulkMailboxAction = "delete"
+	BulkMailboxDelete     BulkMailboxAction = "delete"
 )
 
 type BulkMailboxRequest struct {
@@ -165,8 +165,8 @@ type BulkMailboxRequest struct {
 }
 
 type BulkMailboxResult struct {
-	Total     int                 `json:"total"`
-	Succeeded int                 `json:"succeeded"`
+	Total     int                  `json:"total"`
+	Succeeded int                  `json:"succeeded"`
 	Failed    []BulkMailboxFailure `json:"failed,omitempty"`
 }
 
