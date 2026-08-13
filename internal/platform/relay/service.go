@@ -164,6 +164,12 @@ func (s *Service) CreateRelay(ctx context.Context, in RelayCreateInput, actor Au
 	if !in.ConnSecurity.IsValid() {
 		return nil, ErrInvalidConnSecurity
 	}
+	if in.RateLimitPerMin < 0 {
+		return nil, kernel.ValidationError(map[string]string{"rate_limit_per_min": "must be zero (unlimited) or positive"})
+	}
+	if in.Priority < 0 || in.Weight < 0 {
+		return nil, kernel.ValidationError(map[string]string{"priority": "must be zero or positive", "weight": "must be zero or positive"})
+	}
 	if in.TLSValidation == "" {
 		in.TLSValidation = TLSValidationStrict
 	}
@@ -287,6 +293,12 @@ func (s *Service) UpdateRelay(ctx context.Context, id uint, version int, in Rela
 	}
 	if !next.ConnSecurity.IsValid() {
 		return nil, ErrInvalidConnSecurity
+	}
+	if next.RateLimitPerMin < 0 {
+		return nil, kernel.ValidationError(map[string]string{"rate_limit_per_min": "must be zero (unlimited) or positive"})
+	}
+	if next.Priority < 0 || next.Weight < 0 {
+		return nil, kernel.ValidationError(map[string]string{"priority": "must be zero or positive", "weight": "must be zero or positive"})
 	}
 	if in.Password != nil {
 		if *in.Password == "" {
@@ -620,6 +632,12 @@ func (s *Service) CreateProvider(ctx context.Context, p Provider, password strin
 	if !p.ConnSecurity.IsValid() {
 		return nil, ErrInvalidConnSecurity
 	}
+	if err := ValidateRelayTarget(p.Host, p.Port); err != nil {
+		return nil, fmt.Errorf("%w: %s", ErrUnsafeTarget, err.Error())
+	}
+	if p.RateLimitPerMin < 0 {
+		return nil, kernel.ValidationError(map[string]string{"rate_limit_per_min": "must be zero (unlimited) or positive"})
+	}
 	if p.PoolID == 0 {
 		return nil, kernel.ValidationError(map[string]string{"pool_id": "a target pool is required"})
 	}
@@ -794,6 +812,12 @@ func (s *Service) CreateRoutingRule(ctx context.Context, rule RoutingRule, actor
 	return &rule, nil
 }
 
+// maxOverrideLifetime bounds how far into the future an emergency
+// override may be set (F7). An override redirects every matching
+// message; an effectively-permanent override is an accident waiting to
+// be forgotten.
+const maxOverrideLifetime = 7 * 24 * time.Hour
+
 // SetEmergencyOverride forces all matching traffic through poolID for
 // a bounded window. expiresAt must be in the future; the override
 // expires automatically (ActiveOverride never returns an
@@ -807,6 +831,13 @@ func (s *Service) SetEmergencyOverride(ctx context.Context, tenantID, poolID, ac
 	now := s.clock.Now()
 	if !expiresAt.After(now) {
 		return nil, kernel.ValidationError(map[string]string{"expires_at": "must be in the future"})
+	}
+	// F7: an emergency override is a forced re-route of ALL matching
+	// traffic; it must never be created effectively permanent. The cap
+	// (7 days) bounds the blast radius of a misconfigured or abandoned
+	// override while remaining generous for real incidents.
+	if expiresAt.Sub(now) > maxOverrideLifetime {
+		return nil, kernel.ValidationError(map[string]string{"expires_at": "override lifetime exceeds the 7-day maximum"})
 	}
 	// The override forces traffic through a specific pool; that pool must be
 	// reachable by this tenant.
