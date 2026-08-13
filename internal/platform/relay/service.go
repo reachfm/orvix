@@ -550,9 +550,16 @@ func (s *Service) SetEmergencyOverride(ctx context.Context, tenantID, poolID, ac
 // state, so the selection is a pure function of its inputs (modulo
 // the DB reads for pool/provider/circuit state).
 type RouteRequest struct {
-	TenantID        uint
-	DomainID        uint
-	SenderAddress   string
+	TenantID uint
+	DomainID uint
+	// SenderAddress is the FULL envelope sender ("local@domain"), which is
+	// what SenderPattern matches against. Callers previously passed the bare
+	// sending DOMAIN here, so no sender pattern with a local part could ever
+	// match and sender-scoped routing was silently inert.
+	SenderAddress string
+	// SenderDomain is the sending domain on its own, used for domain-scoped
+	// matching when the sending domain's row id is not known.
+	SenderDomain    string
 	RecipientDomain string
 	Classification  string
 	// SenderMailAccessMode, if MailAccessInternalOnly, means the
@@ -582,18 +589,25 @@ func (s *Service) SelectRoute(ctx context.Context, req RouteRequest) (*SelectedR
 
 	now := s.clock.Now()
 	var poolID uint
-	if override, err := s.repo.ActiveOverride(ctx, req.TenantID, now); err == nil && override != nil {
+	// (E) FAIL CLOSED on the override lookup. The previous form was
+	// `if override, err := ...; err == nil && override != nil`, so a database
+	// error silently fell through to normal rule evaluation. An emergency
+	// override exists precisely to force all mail through one pool during an
+	// incident; a transient DB error must not quietly cancel it. A lookup
+	// failure is now a retryable error, not a bypass.
+	override, oerr := s.repo.ActiveOverride(ctx, req.TenantID, now)
+	if oerr != nil {
+		return nil, kernel.Wrap(kernel.ErrCodeInternal, "active emergency override", oerr)
+	}
+	if override != nil {
 		poolID = override.PoolID
 	} else {
 		rules, err := s.repo.ListRoutingRules(ctx, req.TenantID, req.DomainID)
 		if err != nil {
 			return nil, kernel.Wrap(kernel.ErrCodeInternal, "list routing rules", err)
 		}
-		for _, rule := range rules {
-			if ruleMatches(rule, req) {
-				poolID = rule.PoolID
-				break
-			}
+		if rule, ok := matchRule(rules, req); ok {
+			poolID = rule.PoolID
 		}
 	}
 	if poolID == 0 {
@@ -626,13 +640,27 @@ func (s *Service) SelectRoute(ctx context.Context, req RouteRequest) (*SelectedR
 			// Lazily transition open->half_open on read so a stale
 			// "open" row doesn't block selection forever without a
 			// background sweep.
+			//
+			// (E) A failure to PERSIST this transition is not fatal: the
+			// in-memory resolution already reflects the correct state, and the
+			// only consequence is that the next request re-derives it. It is
+			// deliberately not a fail-closed condition because the persistence
+			// is an optimisation, not the control.
 			_ = s.repo.UpdateProviderCircuit(ctx, p.ID, resolvedState, p.CircuitFailures, p.CircuitOpenedAt, now)
 			p.CircuitState = resolvedState
 		}
 		if avail && p.RateLimitPerMin > 0 {
 			window := now.Truncate(time.Minute)
+			// (E) FAIL CLOSED on the rate-limit store. The previous form
+			// (`if rerr == nil && !ok`) left the provider AVAILABLE whenever
+			// the counter store errored — so an outage of the rate-limit
+			// backend removed every configured send-rate cap at once, which is
+			// exactly when a provider is most likely to block or blacklist the
+			// platform. A counter that cannot be consulted means the limit
+			// cannot be honoured, so the provider is treated as unavailable
+			// and the next fallback is used.
 			ok, rerr := s.repo.IncrementAndCheck(ctx, p.ID, window, p.RateLimitPerMin)
-			if rerr == nil && !ok {
+			if rerr != nil || !ok {
 				avail = false
 			}
 		}
@@ -657,17 +685,89 @@ func (s *Service) SelectRoute(ctx context.Context, req RouteRequest) (*SelectedR
 	return &primary, nil
 }
 
+// matchRule picks the single winning routing rule with DETERMINISTIC
+// precedence, independent of the order the repository happened to return.
+//
+// Precedence, most specific first:
+//  1. domain-scoped rules (DomainID != 0)
+//  2. tenant-scoped rules (TenantID != 0, DomainID == 0)
+//  3. global rules
+//
+// Within one tier: lower Priority wins; ties are broken by lower ID, so the
+// same inputs always resolve to the same rule across processes and retries.
+func matchRule(rules []RoutingRule, req RouteRequest) (RoutingRule, bool) {
+	best := RoutingRule{}
+	found := false
+	for _, rule := range rules {
+		if !ruleMatches(rule, req) {
+			continue
+		}
+		if !found || ruleMoreSpecific(rule, best) {
+			best, found = rule, true
+		}
+	}
+	return best, found
+}
+
+func ruleTier(r RoutingRule) int {
+	switch {
+	case r.DomainID != 0:
+		return 0
+	case r.TenantID != 0:
+		return 1
+	default:
+		return 2
+	}
+}
+
+// ruleMoreSpecific reports whether a should win over b.
+func ruleMoreSpecific(a, b RoutingRule) bool {
+	ta, tb := ruleTier(a), ruleTier(b)
+	if ta != tb {
+		return ta < tb
+	}
+	if a.Priority != b.Priority {
+		return a.Priority < b.Priority
+	}
+	return a.ID < b.ID
+}
+
 func ruleMatches(rule RoutingRule, req RouteRequest) bool {
-	if rule.DomainID != 0 && rule.DomainID != req.DomainID {
+	// TENANT SCOPING, checked FIRST and for every rule.
+	//
+	// The previous implementation only compared tenants when the rule was NOT
+	// domain-scoped (`if rule.DomainID == 0 && rule.TenantID != 0 && ...`), so
+	// a domain-scoped rule belonging to tenant A could route tenant B's mail
+	// as soon as the domain ids collided or a stale rule survived a domain
+	// move. A rule owned by a tenant now applies ONLY to that tenant,
+	// regardless of its other selectors. TenantID == 0 means a platform-global
+	// rule, which legitimately applies to everyone.
+	if rule.TenantID != 0 && rule.TenantID != req.TenantID {
 		return false
 	}
-	if rule.DomainID == 0 && rule.TenantID != 0 && rule.TenantID != req.TenantID {
-		return false
+
+	// DOMAIN SCOPING. A rule naming a domain requires that exact domain. A
+	// request with an UNKNOWN sending domain (DomainID == 0) must not match a
+	// domain-scoped rule: "unknown" is not "any".
+	if rule.DomainID != 0 {
+		if req.DomainID == 0 || rule.DomainID != req.DomainID {
+			return false
+		}
 	}
-	if rule.RecipientDomain != "" && rule.RecipientDomain != req.RecipientDomain {
+
+	if rule.RecipientDomain != "" && !strings.EqualFold(rule.RecipientDomain, req.RecipientDomain) {
 		return false
 	}
 	if rule.Classification != "" && rule.Classification != req.Classification {
+		return false
+	}
+
+	// SENDER PATTERN. This selector was stored, documented and exposed in the
+	// admin API but NEVER evaluated — every rule matched as though its sender
+	// pattern were empty, so an operator who scoped a rule to a specific
+	// sender silently applied it to every sender in scope. It is now enforced
+	// against the FULL envelope sender.
+	if rule.SenderPattern != "" && !senderPatternMatches(rule.SenderPattern, req.SenderAddress, req.SenderDomain) {
 		return false
 	}
 	return true
