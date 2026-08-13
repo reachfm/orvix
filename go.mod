@@ -2,7 +2,7 @@ module github.com/orvix/orvix
 
 go 1.26
 
-toolchain go1.26.5
+toolchain go1.26.6
 
 require (
 	github.com/gofiber/fiber/v3 v3.4.0
