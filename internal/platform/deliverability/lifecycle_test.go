@@ -192,7 +192,13 @@ func TestSuppressionLifecycle_TenantScopedDetailAndMutations(t *testing.T) {
 func TestSuppressionLifecycle_ListFiltersAndPagination(t *testing.T) {
 	_, svc := newConcurrentService(t)
 	ctx := context.Background()
-	now := time.Now().UTC()
+	// The filter boundary MUST come from the same clock that stamps the rows.
+	// This previously used time.Now(), which is strictly LATER than the
+	// FixedClock captured when the service was built, so `created_at >= now`
+	// matched zero rows. It only passed where timer granularity made the two
+	// wall-clock reads collide (coarse Windows timers); on Linux CI, with
+	// nanosecond resolution, it failed deterministically.
+	now := svc.clock.Now().UTC()
 	for i := 0; i < 5; i++ {
 		addr := fmt.Sprintf("user%d@domain%d.example", i, i%2)
 		reason := SuppressionManual
