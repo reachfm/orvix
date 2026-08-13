@@ -116,7 +116,7 @@ func TestDeliverRemote_SuppressionStoreFailureDefersAndNeverDelivers(t *testing.
 
 func TestDeliverRemote_RouteSelectionErrorDefersNeverDirect(t *testing.T) {
 	sel := &recordingSelector{selectErr: errors.New("provider lookup unavailable")}
-	w, _ := relayWorker(sel)
+	w, resolver := relayWorker(sel)
 
 	result := w.deliverRemote(context.Background(), testEntry())
 	if result.Success {
@@ -128,17 +128,19 @@ func TestDeliverRemote_RouteSelectionErrorDefersNeverDirect(t *testing.T) {
 	if sel.deliverCalls != 0 {
 		t.Fatal("no relay delivery may be attempted when routing failed")
 	}
-	// The decisive assertion: the direct-to-MX path was NOT taken. The fake
-	// resolver's failure message for a direct attempt is distinct from the
-	// routing deferral message.
-	if result.StatusMsg == "" || result.StatusMsg == "mx lookup failed" {
-		t.Fatalf("a routing failure must never fall through to direct MX delivery, got %q", result.StatusMsg)
+	// F4: the decisive assertion is a SIDE EFFECT, not a status string.
+	// The worker formats direct-MX failures as "mx lookup: <err>", so
+	// comparing against the literal "mx lookup failed" could never fire
+	// — a regression restoring the direct fallthrough passed the old
+	// test. A routing failure must never consult the MX resolver at all.
+	if resolver.MXLookups != 0 {
+		t.Fatalf("a routing failure must never fall through to direct MX delivery: %d MX lookups happened", resolver.MXLookups)
 	}
 }
 
 func TestDeliverRemote_NilDecisionDefersNeverDirect(t *testing.T) {
 	sel := &recordingSelector{decision: nil}
-	w, _ := relayWorker(sel)
+	w, resolver := relayWorker(sel)
 	result := w.deliverRemote(context.Background(), testEntry())
 	if result.Success || !result.TempFail {
 		t.Fatalf("an undetermined route must defer, got %+v", result)
@@ -146,13 +148,17 @@ func TestDeliverRemote_NilDecisionDefersNeverDirect(t *testing.T) {
 	if sel.deliverCalls != 0 {
 		t.Fatal("no delivery may be attempted for an undetermined route")
 	}
+	// F4: nil decision must not reach the direct-MX path either.
+	if resolver.MXLookups != 0 {
+		t.Fatalf("an undetermined route must never reach the MX resolver: %d lookups", resolver.MXLookups)
+	}
 }
 
 // TestDeliverRemote_ExplicitDirectIsTheOnlyDirectPath is the positive control:
 // direct delivery still happens when policy actually selects it.
 func TestDeliverRemote_ExplicitDirectIsTheOnlyDirectPath(t *testing.T) {
 	sel := &recordingSelector{decision: &RelayRouteDecision{Route: &RelayRoute{Direct: true}}}
-	w, _ := relayWorker(sel)
+	w, resolver := relayWorker(sel)
 	result := w.deliverRemote(context.Background(), testEntry())
 	if sel.deliverCalls != 0 {
 		t.Fatal("an explicit direct route must not use the relay path")
@@ -161,6 +167,12 @@ func TestDeliverRemote_ExplicitDirectIsTheOnlyDirectPath(t *testing.T) {
 	// than being deferred as a routing failure.
 	if !result.TempFail {
 		t.Fatalf("expected the direct MX failure path, got %+v", result)
+	}
+	// F4 positive control: an explicit Direct policy reaches the MX
+	// resolver exactly once — the side-effect counterpart to the
+	// fail-closed tests above.
+	if resolver.MXLookups != 1 {
+		t.Fatalf("explicit direct policy must consult the MX resolver exactly once, got %d", resolver.MXLookups)
 	}
 }
 
