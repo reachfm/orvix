@@ -12,6 +12,8 @@ import (
 	"github.com/orvix/orvix/internal/coremail/delivery"
 	"github.com/orvix/orvix/internal/coremail/queue"
 	"github.com/orvix/orvix/internal/models"
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
 )
 
 func postgresQueueDB(t *testing.T) *sql.DB {
@@ -38,7 +40,12 @@ func postgresQueueDB(t *testing.T) *sql.DB {
 		db.Close()
 		t.Fatalf("set search path: %v", err)
 	}
-	if err := models.MigrateAllPostgres(db); err != nil {
+	gormDB, err := gorm.Open(postgres.New(postgres.Config{Conn: db}), &gorm.Config{})
+	if err != nil {
+		db.Close()
+		t.Fatalf("wrap postgres connection with gorm: %v", err)
+	}
+	if err := models.MigrateAllPostgres(gormDB); err != nil {
 		db.Close()
 		t.Fatalf("migrate postgres: %v", err)
 	}
