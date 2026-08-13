@@ -817,6 +817,48 @@ func (r *Router) allowedOrigins() []string {
 	return origins
 }
 
+// authThrottle returns the per-IP throttle applied to every endpoint that
+// accepts credentials (login, MFA verification, signup, password reset).
+//
+// H-6: previously only /api/v1/auth/login and /api/v1/webmail/login were
+// throttled, and each call site duplicated the Redis/in-memory choice. That
+// left /admin/login, /auth/mfa/verify, /auth/signup and /auth/reset-password
+// completely unlimited. Centralising it here means a new credential endpoint
+// cannot silently ship without a limiter.
+//
+// The Redis limiter is preferred and fails CLOSED (503) when Redis is
+// unreachable, so an outage cannot silently disable throttling. The in-memory
+// fallback exists for single-node deployments; it is per-process, so a
+// multi-node deployment must run Redis to get a shared budget.
+func (r *Router) authThrottle() fiber.Handler {
+	if r.redisLimiter != nil {
+		return r.redisLimiter.LoginMiddleware()
+	}
+	// NOTE: Expiration is a time.Duration. The previous call sites passed
+	// `15 * 60 * 1000`, which is 900,000 NANOSECONDS (0.9 ms) — the window
+	// expired between consecutive attempts, so the fallback limiter never
+	// actually limited anything.
+	return limiter.New(limiter.Config{
+		Max:        authThrottleMax,
+		Expiration: authThrottleWindow,
+		LimitReached: func(c fiber.Ctx) error {
+			c.Set("Retry-After", authThrottleRetryAfter)
+			return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{
+				"error": "too many attempts, try again later",
+				"code":  "rate_limited",
+			})
+		},
+	})
+}
+
+// Throttle bounds for credential endpoints, matching the Redis limiter's
+// defaults (internal/auth.NewRedisRateLimiter) so both paths behave alike.
+const (
+	authThrottleMax        = 5
+	authThrottleWindow     = 15 * time.Minute
+	authThrottleRetryAfter = "900"
+)
+
 // isAllowedOrigin reports whether a browser request's Origin header is
 // trusted for the public CSRF bootstrap endpoint. It uses the existing
 // trusted-origin/CORS policy: the Origin must be listed in
@@ -972,30 +1014,32 @@ func (r *Router) setupRoutes() {
 	publicAPI.Post("/groups/:id/members", publicv1.RequireScope(publicv1.ScopeGroupsWrite), publicMutation, r.h.PublicAddGroupMember)
 	publicAPI.Delete("/groups/:id/members/:memberId", publicv1.RequireScope(publicv1.ScopeGroupsWrite), publicMutation, r.h.PublicDeleteGroupMember)
 
+	// authThrottle is applied to every credential-accepting endpoint below.
 	loginGroup := api.Group("/auth")
-	if r.redisLimiter != nil {
-		loginGroup.Post("/login", r.redisLimiter.LoginMiddleware(), r.h.Login)
-	} else {
-		loginGroup.Post("/login", limiter.New(limiter.Config{Max: 5, Expiration: 15 * 60 * 1000}), r.h.Login)
-	}
+	loginGroup.Post("/login", r.authThrottle(), r.h.Login)
 	loginGroup.Post("/refresh", r.h.Refresh)
 
 	// MFA login verification (public — no auth middleware).
 	// Exchanges a password-based MFA challenge token + TOTP/recovery code
 	// for real access/refresh tokens. Mounted on the public login group
 	// so MFA-enabled users can complete login without being authenticated.
-	loginGroup.Post("/mfa/verify", r.h.MFALoginVerify)
+	//
+	// H-6: this endpoint is now throttled. Without it, a stolen password plus
+	// an unbounded number of TOTP guesses inside the challenge window defeats
+	// MFA; the handler additionally caps attempts per individual challenge.
+	loginGroup.Post("/mfa/verify", r.authThrottle(), r.h.MFALoginVerify)
 
 	// Customer portal auth (public — no auth middleware).
-	loginGroup.Post("/signup", r.h.Signup)
-	if r.redisLimiter != nil {
-		loginGroup.Post("/forgot-password", r.redisLimiter.LoginMiddleware(), r.h.ForgotPassword)
-	} else {
-		loginGroup.Post("/forgot-password", limiter.New(limiter.Config{Max: 5, Expiration: 15 * 60 * 1000}), r.h.ForgotPassword)
-	}
-	loginGroup.Post("/reset-password", r.h.ResetPassword)
+	// H-6: signup is throttled to stop automated account/tenant creation.
+	loginGroup.Post("/signup", r.authThrottle(), r.h.Signup)
+	loginGroup.Post("/forgot-password", r.authThrottle(), r.h.ForgotPassword)
+	loginGroup.Post("/reset-password", r.authThrottle(), r.h.ResetPassword)
 
-	r.app.Post("/admin/login", r.h.Login)
+	// H-6: /admin/login is the admin SPA's form target. It was registered on
+	// the ROOT app, outside the API group, and so carried no limiter at all —
+	// unbounded password guessing against the highest-value accounts on the
+	// platform.
+	r.app.Post("/admin/login", r.authThrottle(), r.h.Login)
 
 	// Webmail authentication (public — no auth middleware).
 	//
@@ -1006,11 +1050,7 @@ func (r *Router) setupRoutes() {
 	// the handler runs — the gate uses that 401 as the
 	// "show the login form" signal.
 	webmailLoginGroup := api.Group("/webmail")
-	if r.redisLimiter != nil {
-		webmailLoginGroup.Post("/login", r.redisLimiter.LoginMiddleware(), r.h.WebmailLogin)
-	} else {
-		webmailLoginGroup.Post("/login", limiter.New(limiter.Config{Max: 5, Expiration: 15 * 60 * 1000}), r.h.WebmailLogin)
-	}
+	webmailLoginGroup.Post("/login", r.authThrottle(), r.h.WebmailLogin)
 
 	// Public CSRF bootstrap for the unauthenticated admin/webmail login
 	// pages. The SPA calls GET /api/v1/csrf-token BEFORE the user has any

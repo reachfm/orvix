@@ -828,9 +828,21 @@ func (h *Handler) Login(c fiber.Ctx) error {
 	// Instead return an MFA challenge token that can only be exchanged at
 	// the /auth/mfa/verify endpoint.
 	if mfaEnabled {
-		challengeToken, err := h.auth.GenerateMFAChallengeToken(userID)
+		challengeToken, jti, err := h.auth.GenerateMFAChallengeTokenWithID(userID)
 		if err != nil {
 			h.logger.Error("failed to generate MFA challenge token", zap.Error(err))
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "authentication failed"})
+		}
+		// H-6: record the challenge so verification attempts can be bounded
+		// and the challenge made single-use. Failing to record it must NOT
+		// hand out an unbounded challenge — fail closed.
+		store, serr := h.mfaChallengeStore()
+		if serr != nil {
+			h.logger.Error("mfa challenge store unavailable", zap.Error(serr))
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "authentication failed"})
+		}
+		if err := store.Issue(c.Context(), jti, userID, auth.MFAChallengeTTL); err != nil {
+			h.logger.Error("failed to record MFA challenge", zap.Error(err))
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "authentication failed"})
 		}
 		h.logger.Info("MFA challenge issued", zap.Uint("user_id", userID))

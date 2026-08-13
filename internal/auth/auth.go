@@ -895,19 +895,34 @@ func SetMFAChallengeClockForTest(now func() time.Time) func() {
 // MFA. The token MUST NOT be accepted by any protected endpoint.
 // It is only usable with the MFA verify endpoint.
 func (a *Authenticator) GenerateMFAChallengeToken(userID uint) (string, error) {
+	token, _, err := a.GenerateMFAChallengeTokenWithID(userID)
+	return token, err
+}
+
+// GenerateMFAChallengeTokenWithID is GenerateMFAChallengeToken plus the
+// challenge's unique id (jti). H-6: the id is what lets the server bound
+// verification attempts per challenge and make a challenge single-use — a
+// bare stateless JWT can be replayed and brute-forced for its whole lifetime.
+// Callers must record the id with MFAChallengeStore.Issue.
+func (a *Authenticator) GenerateMFAChallengeTokenWithID(userID uint) (string, string, error) {
 	now := mfaChallengeNow()
+	jti, err := NewChallengeID()
+	if err != nil {
+		return "", "", err
+	}
 	claims := jwt.MapClaims{
 		"sub":             fmt.Sprintf("%d", userID),
 		MFAChallengeClaim: true,
+		"jti":             jti,
 		"iat":             now.Unix(),
 		"exp":             now.Add(MFAChallengeTTL).Unix(),
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
 	tokenString, err := token.SignedString(a.privateKey)
 	if err != nil {
-		return "", fmt.Errorf("failed to sign MFA challenge token: %w", err)
+		return "", "", fmt.Errorf("failed to sign MFA challenge token: %w", err)
 	}
-	return tokenString, nil
+	return tokenString, jti, nil
 }
 
 // ValidateMFAChallengeToken validates an MFA challenge token and
@@ -1036,4 +1051,43 @@ func (a *Authenticator) ValidateMFAChallengeToken(tokenString string) (uint, err
 	var userID uint
 	fmt.Sscanf(claims["sub"].(string), "%d", &userID)
 	return userID, nil
+}
+
+// ValidateMFAChallengeTokenWithID is ValidateMFAChallengeToken plus the
+// challenge id, which the caller needs to enforce per-challenge attempt caps
+// and single-use consumption. A token with no jti is rejected: it predates
+// H-6's challenge tracking and cannot be bounded, so accepting it would
+// reopen the unlimited-guess hole.
+func (a *Authenticator) ValidateMFAChallengeTokenWithID(tokenString string) (uint, string, error) {
+	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
+		if _, ok := token.Method.(*jwt.SigningMethodRSA); !ok {
+			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+		}
+		return a.publicKey, nil
+	})
+	if err != nil || !token.Valid {
+		return 0, "", ErrTokenInvalid
+	}
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok {
+		return 0, "", ErrTokenInvalid
+	}
+	if val, _ := claims[MFAChallengeClaim].(bool); !val {
+		return 0, "", fmt.Errorf("not an MFA challenge token")
+	}
+	exp, ok := claims["exp"].(float64)
+	if ok && mfaChallengeNow().Unix() > int64(exp) {
+		return 0, "", ErrTokenExpired
+	}
+	jti, _ := claims["jti"].(string)
+	if jti == "" {
+		return 0, "", ErrTokenInvalid
+	}
+	sub, _ := claims["sub"].(string)
+	var userID uint
+	fmt.Sscanf(sub, "%d", &userID)
+	if userID == 0 {
+		return 0, "", ErrTokenInvalid
+	}
+	return userID, jti, nil
 }
