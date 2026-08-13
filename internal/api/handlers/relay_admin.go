@@ -1,13 +1,62 @@
 package handlers
 
 import (
+	"errors"
 	"strconv"
 	"time"
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/orvix/orvix/internal/auth"
+	"github.com/orvix/orvix/internal/platform/kernel"
 	"github.com/orvix/orvix/internal/platform/relay"
 )
+
+// relayActor builds the audit actor for a relay administration request from
+// authenticated request state only - never from the request body.
+func relayActor(c fiber.Ctx) relay.AuditActor {
+	id, _ := c.Locals("user_id").(uint)
+	role, _ := c.Locals("role").(string)
+	reqID, _ := c.Locals("request_id").(string)
+	return relay.AuditActor{ID: id, Role: role, RequestID: reqID, IP: c.IP(), UserAgent: c.Get("User-Agent")}
+}
+
+// relayError converts a service error into a status code and a SAFE client
+// message.
+//
+// Every relay handler previously answered `fiber.Map{"error": err.Error()}`,
+// which serialises whatever the lower layers produced straight to the client.
+// That surface reaches the browser and is trivially readable in DevTools, and
+// the wrapped errors carry driver text: SQL fragments, constraint and column
+// names, connection DSNs, and file paths. Only errors this package defines as
+// client-facing are echoed; anything else becomes a generic message, with the
+// detail left for server-side logs.
+func relayError(c fiber.Ctx, err error) error {
+	switch {
+	case errors.Is(err, relay.ErrProviderNotFound), errors.Is(err, relay.ErrPoolNotFound), errors.Is(err, relay.ErrOverrideNotFound):
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": err.Error()})
+	case errors.Is(err, relay.ErrVersionConflict):
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": err.Error()})
+	case errors.Is(err, relay.ErrRelayNameConflict):
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": err.Error()})
+	case errors.Is(err, relay.ErrCrossTenantProvider):
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": err.Error()})
+	case errors.Is(err, relay.ErrInvalidConnSecurity),
+		errors.Is(err, relay.ErrUnsafeTarget),
+		errors.Is(err, relay.ErrNameRequired),
+		errors.Is(err, relay.ErrInsecureCredentialTransport):
+		return relayError(c, err)
+	}
+	// Field-level validation errors are safe: they name request fields, not
+	// internal state.
+	var kerr *kernel.Error
+	if errors.As(err, &kerr) && kerr.Code == kernel.ErrCodeValidation {
+		if len(kerr.Fields) > 0 {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": kerr.Message, "fields": kerr.Fields})
+		}
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": kerr.Message})
+	}
+	return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "relay request failed"})
+}
 
 // PostRelayPool handles POST /admin/relay/pools.
 func (h *Handler) PostRelayPool(c fiber.Ctx) error {
@@ -26,7 +75,7 @@ func (h *Handler) PostRelayPool(c fiber.Ctx) error {
 	pool := relay.Pool{Scope: relay.Scope(req.Scope), TenantID: tenantID, DomainID: req.DomainID, Name: req.Name, Strategy: relay.SelectionStrategy(req.Strategy), DirectOnly: req.DirectOnly}
 	created, err := h.relaySvc.CreatePool(c.Context(), pool)
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+		return relayError(c, err)
 	}
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"pool": created})
 }
@@ -63,10 +112,7 @@ func (h *Handler) PostRelayProvider(c fiber.Ctx) error {
 	created, err := h.relaySvc.CreateProvider(c.Context(), p, req.Password)
 	req.Password = "" // discard local copy immediately after use
 	if err != nil {
-		if err == relay.ErrInvalidConnSecurity {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
-		}
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+		return relayError(c, err)
 	}
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"provider": relay.Redact(*created)})
 }
@@ -82,7 +128,7 @@ func (h *Handler) GetRelayPoolProviders(c fiber.Ctx) error {
 	}
 	providers, err := h.relaySvc.ListProvidersRedacted(c.Context(), uint(idVal))
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+		return relayError(c, err)
 	}
 	return c.JSON(fiber.Map{"providers": providers})
 }
@@ -99,10 +145,7 @@ func (h *Handler) PostRelayProviderTest(c fiber.Ctx) error {
 	}
 	result, err := h.relaySvc.TestConnection(c.Context(), uint(idVal))
 	if err != nil {
-		if err == relay.ErrProviderNotFound {
-			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": err.Error()})
-		}
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+		return relayError(c, err)
 	}
 	return c.JSON(fiber.Map{"result": result})
 }
@@ -115,6 +158,7 @@ func (h *Handler) PostRelayRoutingRule(c fiber.Ctx) error {
 	tenantID, _ := auth.RequireTenantID(c)
 	var req struct {
 		DomainID        uint   `json:"domain_id"`
+		SenderPattern   string `json:"sender_pattern"`
 		RecipientDomain string `json:"recipient_domain"`
 		Classification  string `json:"classification"`
 		PoolID          uint   `json:"pool_id"`
@@ -122,11 +166,12 @@ func (h *Handler) PostRelayRoutingRule(c fiber.Ctx) error {
 	}
 	c.Bind().JSON(&req)
 	rule, err := h.relaySvc.CreateRoutingRule(c.Context(), relay.RoutingRule{
-		TenantID: tenantID, DomainID: req.DomainID, RecipientDomain: req.RecipientDomain,
-		Classification: req.Classification, PoolID: req.PoolID, Priority: req.Priority,
-	})
+		TenantID: tenantID, DomainID: req.DomainID, SenderPattern: req.SenderPattern,
+		RecipientDomain: req.RecipientDomain,
+		Classification:  req.Classification, PoolID: req.PoolID, Priority: req.Priority,
+	}, relayActor(c))
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+		return relayError(c, err)
 	}
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"rule": rule})
 }
@@ -150,7 +195,7 @@ func (h *Handler) PostRelayEmergencyOverride(c fiber.Ctx) error {
 	expiresAt := time.Now().UTC().Add(time.Duration(req.ExpiresInMin) * time.Minute)
 	override, err := h.relaySvc.SetEmergencyOverride(c.Context(), tenantID, req.PoolID, actorID, req.Reason, expiresAt)
 	if err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+		return relayError(c, err)
 	}
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"override": override})
 }
