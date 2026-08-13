@@ -28,8 +28,9 @@ import (
 func TestPostgresRelay_RoutingRuleCreateReturnsRealID(t *testing.T) {
 	db, svc := newPostgresRelayService(t)
 	ctx := context.Background()
+	const tenant = uint(11)
 
-	pool, err := svc.CreatePool(ctx, Pool{Scope: ScopeGlobal, Name: uniqueName("pgpool"), Strategy: StrategyPriority}, testActor)
+	pool, err := svc.CreatePool(ctx, Pool{Scope: ScopeTenant, TenantID: tenant, Name: uniqueName("pgpool"), Strategy: StrategyPriority}, testActor)
 	if err != nil {
 		t.Fatalf("create pool: %v", err)
 	}
@@ -38,7 +39,7 @@ func TestPostgresRelay_RoutingRuleCreateReturnsRealID(t *testing.T) {
 	}
 
 	rule, err := svc.CreateRoutingRule(ctx, RoutingRule{
-		TenantID: 11, DomainID: 3, SenderPattern: "billing@acme.test",
+		TenantID: tenant, DomainID: 3, SenderPattern: "billing@acme.test",
 		RecipientDomain: "partner.test", PoolID: pool.ID, Priority: 5,
 	}, testActor)
 	if err != nil {
@@ -74,13 +75,13 @@ func TestPostgresRelay_RoutingRuleCreateReturnsRealID(t *testing.T) {
 func TestPostgresRelay_OverrideLifecycle(t *testing.T) {
 	db, svc := newPostgresRelayService(t)
 	ctx := context.Background()
+	const tenant = uint(21)
 
-	pool, err := svc.CreatePool(ctx, Pool{Scope: ScopeGlobal, Name: uniqueName("ovrpool"), Strategy: StrategyPriority}, testActor)
+	pool, err := svc.CreatePool(ctx, Pool{Scope: ScopeTenant, TenantID: tenant, Name: uniqueName("ovrpool"), Strategy: StrategyPriority}, testActor)
 	if err != nil {
 		t.Fatalf("create pool: %v", err)
 	}
 
-	const tenant = uint(21)
 	o, err := svc.SetEmergencyOverride(ctx, tenant, pool.ID, 99, "incident-4242", time.Now().UTC().Add(time.Hour))
 	if err != nil {
 		t.Fatalf("create override: %v", err)
@@ -144,12 +145,12 @@ func TestPostgresRelay_OverrideLifecycle(t *testing.T) {
 func TestPostgresRelay_OverrideExpiry(t *testing.T) {
 	_, svc := newPostgresRelayService(t)
 	ctx := context.Background()
+	const tenant = uint(31)
 
-	pool, err := svc.CreatePool(ctx, Pool{Scope: ScopeGlobal, Name: uniqueName("exppool"), Strategy: StrategyPriority}, testActor)
+	pool, err := svc.CreatePool(ctx, Pool{Scope: ScopeTenant, TenantID: tenant, Name: uniqueName("exppool"), Strategy: StrategyPriority}, testActor)
 	if err != nil {
 		t.Fatalf("create pool: %v", err)
 	}
-	const tenant = uint(31)
 	o, err := svc.SetEmergencyOverride(ctx, tenant, pool.ID, 7, "short window", time.Now().UTC().Add(2*time.Second))
 	if err != nil {
 		t.Fatalf("create override: %v", err)
@@ -182,13 +183,15 @@ func TestPostgresRelay_OverrideExpiry(t *testing.T) {
 func TestPostgresRelay_ProviderMembershipAndSelection(t *testing.T) {
 	_, svc := newPostgresRelayService(t)
 	ctx := context.Background()
+	const tenant = uint(41)
+	const domainID = uint(9)
 
-	pool, err := svc.CreatePool(ctx, Pool{Scope: ScopeGlobal, Name: uniqueName("selpool"), Strategy: StrategyPriority}, testActor)
+	pool, err := svc.CreatePool(ctx, Pool{Scope: ScopeTenant, TenantID: tenant, Name: uniqueName("selpool"), Strategy: StrategyPriority}, testActor)
 	if err != nil {
 		t.Fatalf("create pool: %v", err)
 	}
 	p, err := svc.CreateProvider(ctx, Provider{
-		PoolID: pool.ID, Scope: ScopeGlobal, Name: uniqueName("pgprov"),
+		PoolID: pool.ID, Scope: ScopeTenant, TenantID: tenant, Name: uniqueName("pgprov"),
 		Host: "smtp.provider.example.com", Port: 587,
 		ConnSecurity: ConnSecurityStartTLS, TLSValidation: TLSValidationStrict,
 		Active: true, Priority: 10, Weight: 1,
@@ -215,8 +218,6 @@ func TestPostgresRelay_ProviderMembershipAndSelection(t *testing.T) {
 		t.Fatal("the created provider must be a member of its pool on PostgreSQL")
 	}
 
-	const tenant = uint(41)
-	const domainID = uint(9)
 	// The rule selectors must be UNIQUE per run (F8): a reused database
 	// retains rules from prior runs, and identical selectors break the
 	// precedence tie by lowest ID — a leftover rule would win and point
