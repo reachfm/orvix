@@ -322,7 +322,7 @@ export default function App() {
       case "enterprise": return <EnterpriseDashboard />;
       case "mailboxes": return <MailboxList />;
       case "organizations": return <OrganizationsPage />;
-      case "platform-billing": return <PlatformBillingPage tenantId={1} />;
+      case "platform-billing": return <PlatformBillingPage />;
       case "platform-imports": return <ImportsPage />;
       case "automation-jobs": return <AutomationJobsPage />;
       case "platform-incidents": return <IncidentsPage />;

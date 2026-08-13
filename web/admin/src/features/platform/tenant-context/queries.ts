@@ -32,6 +32,10 @@ export function useSetTenantScope() {
       qc.removeQueries({ queryKey: ["platform-suppressions"] });
       qc.removeQueries({ queryKey: ["platform-deliverability"] });
       qc.removeQueries({ queryKey: ["platform-bulk-mailboxes"] });
+      // B-3: billing is tenant-scoped too. Without this, switching
+      // tenants would leave the previous customer's balance,
+      // adjustments and reconciliation on screen.
+      qc.removeQueries({ queryKey: ["platform-billing"] });
     },
   });
 }
@@ -49,6 +53,10 @@ export function useClearTenantScope() {
       qc.removeQueries({ queryKey: ["platform-suppressions"] });
       qc.removeQueries({ queryKey: ["platform-deliverability"] });
       qc.removeQueries({ queryKey: ["platform-bulk-mailboxes"] });
+      // B-3: billing is tenant-scoped too. Without this, switching
+      // tenants would leave the previous customer's balance,
+      // adjustments and reconciliation on screen.
+      qc.removeQueries({ queryKey: ["platform-billing"] });
     },
   });
 }
