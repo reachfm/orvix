@@ -60,14 +60,22 @@ type DeliveryWorker struct {
 	// queue entry, since QueueEntry alone doesn't carry a tenant ID.
 	// nil disables relay selection even if RelaySelector is set (fails
 	// safe to direct delivery, never to a misrouted relay).
-	TenantIDForRelay func(entry *queue.QueueEntry) (tenantID uint, senderMailAccessMode string)
+	//
+	// FAIL-CLOSED (F3): a non-nil error means the identity could not be
+	// established (database unavailable, timeout, malformed or
+	// inconsistent identity). The worker MUST defer — it must never
+	// fabricate tenant 0 + "internal_external" on an infrastructure
+	// failure, because that would bypass tenant-scoped relay rules and
+	// the internal-only policy during a partial outage.
+	TenantIDForRelay func(ctx context.Context, entry *queue.QueueEntry) (tenantID uint, senderMailAccessMode string, err error)
 
 	// DomainIDForRelay resolves the SENDING domain's row id for a queue
 	// entry. Domain-scoped routing rules match on this id, so without it a
 	// domain rule can never match and domain-specific routing is silently
 	// ignored. nil means "unknown" (0), which routing treats as
-	// "matches no domain-scoped rule" — never as "matches any".
-	DomainIDForRelay func(entry *queue.QueueEntry) uint
+	// "matches no domain-scoped rule" — never as "matches any". A
+	// non-nil error defers delivery (F3), same as TenantIDForRelay.
+	DomainIDForRelay func(ctx context.Context, entry *queue.QueueEntry) (uint, error)
 
 	// RelayBookkeepingFailed is invoked when circuit-breaker/attempt
 	// bookkeeping could not be persisted after a relay delivery.
@@ -218,7 +226,10 @@ func (w *DeliveryWorker) deliver(ctx context.Context, entry *queue.QueueEntry) e
 	if w.DeliverabilityRecorder != nil && !isLocal {
 		var tenantID uint
 		if w.TenantIDForRelay != nil {
-			tenantID, _ = w.TenantIDForRelay(entry)
+			// Delivery has already completed; an identity failure here only
+			// degrades metrics attribution, never blocks the outcome.
+			tid, _, _ := w.TenantIDForRelay(ctx, entry)
+			tenantID = tid
 		}
 		w.DeliverabilityRecorder.RecordOutcome(ctx, entry, tenantID, result.RemoteHost, result, attemptNumber)
 	}
@@ -378,7 +389,10 @@ func (w *DeliveryWorker) recordDeliverabilityOutcome(ctx context.Context, entry 
 	}
 	var tenantID uint
 	if w.TenantIDForRelay != nil {
-		tenantID, _ = w.TenantIDForRelay(entry)
+		// Post-outcome metrics attribution only; identity failure degrades
+		// attribution, never the already-completed delivery.
+		tid, _, _ := w.TenantIDForRelay(ctx, entry)
+		tenantID = tid
 	}
 	w.DeliverabilityRecorder.RecordOutcome(ctx, entry, tenantID, result.RemoteHost, result, attemptNumber)
 }
@@ -663,7 +677,15 @@ func (w *DeliveryWorker) deliverRemote(ctx context.Context, entry *queue.QueueEn
 	if w.SuppressionChecker != nil {
 		var tenantID uint
 		if w.TenantIDForRelay != nil {
-			tenantID, _ = w.TenantIDForRelay(entry)
+			tid, _, idErr := w.TenantIDForRelay(ctx, entry)
+			if idErr != nil {
+				// FAIL CLOSED (F3): the suppression check cannot be scoped
+				// without the sender identity. Deferring is the only safe
+				// answer — delivering "somewhere" without knowing the tenant
+				// could bypass a suppression that tenant configured.
+				return &DeliveryResult{StatusMsg: "sender identity unavailable; suppression check deferred", TempFail: true}
+			}
+			tenantID = tid
 		}
 		suppressed, serr := w.SuppressionChecker.IsSuppressed(ctx, tenantID, entry.ToAddress)
 		switch {
@@ -701,11 +723,23 @@ func (w *DeliveryWorker) deliverRemote(ctx context.Context, entry *queue.QueueEn
 	// when no selector is wired, so this integration cannot regress
 	// the no-relay-configured case.
 	if w.RelaySelector != nil && w.TenantIDForRelay != nil {
-		tenantID, accessMode := w.TenantIDForRelay(entry)
+		tenantID, accessMode, idErr := w.TenantIDForRelay(ctx, entry)
+		// FAIL CLOSED (F3): a sender identity that cannot be resolved must
+		// never fall through to direct-to-MX with an anonymous permissive
+		// default. The previous wiring returned tenant 0 + "internal_external"
+		// on every database error, which silently bypassed tenant-scoped
+		// relay rules and the internal-only policy during partial outages.
+		if idErr != nil {
+			return &DeliveryResult{StatusMsg: "sender identity unavailable; delivery deferred", TempFail: true}
+		}
 		senderDomain := extractDomainFromAddress(entry.FromAddress)
 		var domainID uint
 		if w.DomainIDForRelay != nil {
-			domainID = w.DomainIDForRelay(entry)
+			dID, dErr := w.DomainIDForRelay(ctx, entry)
+			if dErr != nil {
+				return &DeliveryResult{StatusMsg: "sender identity unavailable; delivery deferred", TempFail: true}
+			}
+			domainID = dID
 		}
 		decision, rerr := w.RelaySelector.SelectRoute(ctx, RelayRouteRequest{
 			TenantID:             tenantID,

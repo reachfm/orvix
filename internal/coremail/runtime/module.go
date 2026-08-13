@@ -487,7 +487,7 @@ func (m *Module) initCore(cfg *config.Config, sqlDB *sql.DB) error {
 	}
 	// Sending-identity resolution for relay routing.
 	//
-	// Two defects are closed here:
+	// Three defects are closed here:
 	//
 	//  1. The statement used a raw `?` placeholder. On PostgreSQL that is a
 	//     syntax error, the error was discarded by `_ = row.Scan(...)`, and
@@ -498,6 +498,15 @@ func (m *Module) initCore(cfg *config.Config, sqlDB *sql.DB) error {
 	//  2. The sending domain's row id was never resolved at all, so
 	//     domain-scoped routing rules could not match. It is selected here and
 	//     handed to the worker via DomainIDForRelay.
+	//  3. (F3) Every identity-lookup failure collapsed to tenant 0 +
+	//     "internal_external" — a permissive anonymous identity — and the
+	//     query ran under unbounded context.Background(). Identity failures
+	//     are now typed and the worker defers before any network I/O.
+	//
+	// senderIdentityQueryTimeout bounds a single identity lookup well below
+	// the queue lease (300s), so a hung or locked database cannot pin a
+	// worker goroutine indefinitely.
+	const senderIdentityQueryTimeout = 5 * time.Second
 	relayDialect, rderr := dbdialect.Detect(sqlDB)
 	if rderr != nil {
 		relayDialect = dbdialect.FromDriver("sqlite")
@@ -511,27 +520,60 @@ func (m *Module) initCore(cfg *config.Config, sqlDB *sql.DB) error {
 		domainID uint
 		mode     string
 	}
-	resolveSenderIdentity := func(entry *queue.QueueEntry) senderIdentity {
-		id := senderIdentity{mode: "internal_external"}
-		row := sqlDB.QueryRowContext(context.Background(), senderIdentityQuery, entry.FromAddress)
+	// senderIdentityError signals that a sender identity could not be
+	// established for a reason other than "the address is genuinely not
+	// a local mailbox" (which is sql.ErrNoRows). The delivery worker
+	// treats it as fail-closed: defer, never fabricate an anonymous
+	// permissive identity.
+	var errSenderIdentityUnavailable = errors.New("sender identity unavailable")
+
+	// resolveSenderIdentity FAILS CLOSED (F3): the previous form returned
+	// {tenantID: 0, mode: "internal_external"} on EVERY error, so a
+	// transient database failure silently disabled tenant-scoped relay
+	// rules and the internal-only policy — and the query ran under
+	// unbounded context.Background(). Distinctions:
+	//   - row found: identity (tenant, domain, mode) as stored;
+	//   - sql.ErrNoRows: the sender is genuinely not a local mailbox;
+	//     the caller decides policy from the enqueue origin, never from
+	//     a fabricated identity;
+	//   - any other error (database unavailable, timeout, malformed
+	//     row): a typed identity-unavailable error → the worker defers
+	//     BEFORE any direct or relay network I/O.
+	// The query runs under the delivery operation's context with a hard
+	// timeout well below the queue lease, so a hung database cannot pin
+	// a worker indefinitely.
+	resolveSenderIdentity := func(ctx context.Context, entry *queue.QueueEntry) (senderIdentity, error) {
+		qctx, cancel := context.WithTimeout(ctx, senderIdentityQueryTimeout)
+		defer cancel()
+		id := senderIdentity{}
+		row := sqlDB.QueryRowContext(qctx, senderIdentityQuery, entry.FromAddress)
 		if err := row.Scan(&id.tenantID, &id.domainID, &id.mode); err != nil {
-			// A miss is legitimate (relayed/external sender); an error is not,
-			// but neither may fabricate a tenant. Zero values flow through to
-			// the relay service, which treats an unknown domain id as
-			// "unknown" rather than "matches any".
-			if m.logger != nil && !errors.Is(err, sql.ErrNoRows) {
+			if errors.Is(err, sql.ErrNoRows) {
+				// Genuinely absent sender: not an infrastructure failure.
+				// The caller uses the enqueue origin; we never fabricate a
+				// tenant or a permissive mode from nothing.
+				return senderIdentity{}, sql.ErrNoRows
+			}
+			if m.logger != nil {
 				m.logger.Warn("relay sender identity lookup failed", zap.Error(err))
 			}
-			return senderIdentity{mode: "internal_external"}
+			return senderIdentity{}, errSenderIdentityUnavailable
 		}
-		return id
+		return id, nil
 	}
-	tenantForRelay := func(entry *queue.QueueEntry) (uint, string) {
-		id := resolveSenderIdentity(entry)
-		return id.tenantID, id.mode
+	tenantForRelay := func(ctx context.Context, entry *queue.QueueEntry) (uint, string, error) {
+		id, err := resolveSenderIdentity(ctx, entry)
+		if err != nil {
+			return 0, "", err
+		}
+		return id.tenantID, id.mode, nil
 	}
-	domainForRelay := func(entry *queue.QueueEntry) uint {
-		return resolveSenderIdentity(entry).domainID
+	domainForRelay := func(ctx context.Context, entry *queue.QueueEntry) (uint, error) {
+		id, err := resolveSenderIdentity(ctx, entry)
+		if err != nil {
+			return 0, err
+		}
+		return id.domainID, nil
 	}
 
 	// Deliverability control plane (Milestone 9) — optional, same

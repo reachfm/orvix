@@ -27,6 +27,7 @@ func (e erroringSuppressionChecker) IsSuppressed(context.Context, uint, string) 
 type recordingSelector struct {
 	decision     *RelayRouteDecision
 	selectErr    error
+	selectCalls  int
 	requests     []RelayRouteRequest
 	delivered    []uint
 	deliverFunc  func(route *RelayRoute) RelayDeliverResult
@@ -38,6 +39,7 @@ type recordingSelector struct {
 }
 
 func (r *recordingSelector) SelectRoute(_ context.Context, req RelayRouteRequest) (*RelayRouteDecision, error) {
+	r.selectCalls++
 	r.requests = append(r.requests, req)
 	return r.decision, r.selectErr
 }
@@ -68,10 +70,10 @@ func relayWorker(sel RelaySelector) (*DeliveryWorker, *FakeResolver) {
 		Resolver:      resolver,
 		WorkerID:      "test",
 		RelaySelector: sel,
-		TenantIDForRelay: func(*queue.QueueEntry) (uint, string) {
-			return 7, "internal_external"
+		TenantIDForRelay: func(context.Context, *queue.QueueEntry) (uint, string, error) {
+			return 7, "internal_external", nil
 		},
-		DomainIDForRelay: func(*queue.QueueEntry) uint { return 3 },
+		DomainIDForRelay: func(context.Context, *queue.QueueEntry) (uint, error) { return 3, nil },
 	}
 	return w, resolver
 }
@@ -317,5 +319,91 @@ func TestDeliverRemote_BookkeepingRecordsTheRealOutcome(t *testing.T) {
 	}
 	if !sel.recordedOKs[0] {
 		t.Fatal("a successful delivery must be recorded as a success")
+	}
+}
+
+// -- F3: sender-identity failure must defer, never fabricate an identity --
+
+// identityResolver builds a worker whose identity callbacks return the
+// supplied values; the resolver records whether the MX path was reached
+// (FailDomain makes the MX path produce a distinguishing error) and
+// whether the relay selector was consulted.
+func identityResolver(sel RelaySelector, tid func(context.Context, *queue.QueueEntry) (uint, string, error), did func(context.Context, *queue.QueueEntry) (uint, error)) (*DeliveryWorker, *FakeResolver, *recordingSelector) {
+	resolver := NewFakeResolver()
+	resolver.FailDomain = "test.com"
+	selRec := &recordingSelector{decision: &RelayRouteDecision{Route: &RelayRoute{Direct: true}}}
+	if sel != nil {
+		selRec = sel.(*recordingSelector)
+	}
+	w := &DeliveryWorker{
+		Resolver:          resolver,
+		WorkerID:          "f3-test",
+		RelaySelector:     selRec,
+		TenantIDForRelay:  tid,
+		DomainIDForRelay:  did,
+	}
+	return w, resolver, selRec
+}
+
+func TestF3_IdentityErrorDefersBeforeAnyNetworkIO(t *testing.T) {
+	selRec := &recordingSelector{decision: &RelayRouteDecision{Route: &RelayRoute{Direct: true}}}
+	w, resolver, _ := identityResolver(selRec,
+		func(context.Context, *queue.QueueEntry) (uint, string, error) { return 0, "", errors.New("db down") },
+		func(context.Context, *queue.QueueEntry) (uint, error) { return 0, errors.New("db down") },
+	)
+	res := w.deliverRemote(context.Background(), testEntry())
+	if res.Success || !res.TempFail {
+		t.Fatalf("identity failure must defer (temp-fail), got %+v", res)
+	}
+	if resolver.MXLookups > 0 {
+		t.Fatalf("identity failure must not reach the MX resolver, got %d lookups", resolver.MXLookups)
+	}
+	if selRec.selectCalls != 0 {
+		t.Fatalf("identity failure must not consult the relay selector, got %d calls", selRec.selectCalls)
+	}
+}
+
+func TestF3_DomainIdentityErrorDefersBeforeAnyNetworkIO(t *testing.T) {
+	selRec := &recordingSelector{decision: &RelayRouteDecision{Route: &RelayRoute{Direct: true}}}
+	w, resolver, _ := identityResolver(selRec,
+		func(context.Context, *queue.QueueEntry) (uint, string, error) { return 7, "internal_external", nil },
+		func(context.Context, *queue.QueueEntry) (uint, error) { return 0, errors.New("db down") },
+	)
+	res := w.deliverRemote(context.Background(), testEntry())
+	if res.Success || !res.TempFail {
+		t.Fatalf("domain identity failure must defer, got %+v", res)
+	}
+	if resolver.MXLookups > 0 {
+		t.Fatalf("domain identity failure must not reach the MX resolver, got %d lookups", resolver.MXLookups)
+	}
+}
+
+func TestF3_SuppressionCheckDefersWhenIdentityUnavailable(t *testing.T) {
+	w, resolver, _ := identityResolver(nil,
+		func(context.Context, *queue.QueueEntry) (uint, string, error) { return 0, "", errors.New("db down") },
+		nil,
+	)
+	w.SuppressionChecker = erroringSuppressionChecker{err: nil}
+	res := w.deliverRemote(context.Background(), testEntry())
+	if res.Success || !res.TempFail {
+		t.Fatalf("suppression path with unresolvable identity must defer, got %+v", res)
+	}
+	if resolver.MXLookups > 0 {
+		t.Fatalf("must not reach MX when identity is unresolvable, got %d lookups", resolver.MXLookups)
+	}
+}
+
+func TestF3_ResolvedIdentityStillReachesRouting(t *testing.T) {
+	selRec := &recordingSelector{decision: &RelayRouteDecision{Route: &RelayRoute{Direct: true}}}
+	w, _, _ := identityResolver(selRec,
+		func(context.Context, *queue.QueueEntry) (uint, string, error) { return 7, "internal_external", nil },
+		func(context.Context, *queue.QueueEntry) (uint, error) { return 3, nil },
+	)
+	res := w.deliverRemote(context.Background(), testEntry())
+	if res.Success {
+		t.Fatalf("direct route with no store must not report success, got %+v", res)
+	}
+	if selRec.selectCalls != 1 {
+		t.Fatalf("a resolvable identity must reach routing exactly once, got %d", selRec.selectCalls)
 	}
 }

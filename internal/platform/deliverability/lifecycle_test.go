@@ -585,7 +585,7 @@ func TestSuppressionEnforcement_RealDeliveryWorker(t *testing.T) {
 		Resolver:           resolver,
 		WorkerID:           "test-worker",
 		SuppressionChecker: adapter,
-		TenantIDForRelay:   func(e *queue.QueueEntry) (uint, string) { return e.TenantID, "internal_external" },
+		TenantIDForRelay:   func(_ context.Context, e *queue.QueueEntry) (uint, string, error) { return e.TenantID, "internal_external", nil },
 	}
 	entry := func(addr string) *queue.QueueEntry {
 		return &queue.QueueEntry{TenantID: 1, FromAddress: "sender@send.example", ToAddress: addr, RecipientDomain: "blocked.test", ID: 1}
