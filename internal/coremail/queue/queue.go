@@ -20,13 +20,31 @@ type QueueEngine struct {
 
 // NewQueueEngine creates a queue engine with default tenant fairness limits.
 func NewQueueEngine(db *sql.DB) *QueueEngine {
+	repo := NewSQLRepo(db)
 	return &QueueEngine{
 		DB:                  db,
-		Repo:                NewSQLRepo(db),
+		Repo:                repo,
 		MaxWorkersPerTenant: 4,
 		GlobalMaxWorkers:    100,
 		pendingClaims:       make(map[string]int),
 	}
+}
+
+// NewQueueEngineChecked is the production constructor. It refuses startup
+// when the SQL backend cannot be identified, preventing raw SQLite SQL from
+// reaching PostgreSQL through a silent fallback.
+func NewQueueEngineChecked(db *sql.DB) (*QueueEngine, error) {
+	repo, err := NewSQLRepoChecked(db)
+	if err != nil {
+		return nil, err
+	}
+	return &QueueEngine{
+		DB:                  db,
+		Repo:                repo,
+		MaxWorkersPerTenant: 4,
+		GlobalMaxWorkers:    100,
+		pendingClaims:       make(map[string]int),
+	}, nil
 }
 
 // BeginTx starts a new transaction.
@@ -96,6 +114,15 @@ func (qe *QueueEngine) ReleaseClaim(tenantID string) {
 // AckDelivered marks a job as delivered.
 func (qe *QueueEngine) AckDelivered(ctx context.Context, id uint) error {
 	return qe.Repo.AckDelivered(ctx, id, nil)
+}
+
+// AckDeliveredForOwner marks a job delivered ONLY if it is still
+// leased by the named worker (F6 fencing). A stale worker whose lease
+// expired and was re-claimed by another worker must not be able to
+// complete the job: the ack affects zero rows and is reported as
+// ErrLeaseLost instead of silently racing the new owner.
+func (qe *QueueEngine) AckDeliveredForOwner(ctx context.Context, id uint, owner string) error {
+	return qe.Repo.AckDeliveredForOwner(ctx, id, owner, nil)
 }
 
 // HandleDeliveryResult processes the result of a delivery attempt.

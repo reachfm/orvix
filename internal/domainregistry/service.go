@@ -114,6 +114,24 @@ func (s *Service) UpdateDomain(ctx context.Context, id uint, req *UpdateDomainRe
 	return d, nil
 }
 
+// SetStatus updates the protocol-facing status flag for a domain by
+// name, used by internal/platform/domainlifecycle to project its
+// richer admin lifecycle state onto the flag mail protocol servers
+// actually read. A missing registry row is not an error here — not
+// every lifecycle-tracked domain has been provisioned into the
+// protocol-facing registry yet.
+func (s *Service) SetStatus(ctx context.Context, name string, status DomainStatus) error {
+	d, err := s.repo.GetByName(ctx, name)
+	if err != nil {
+		return fmt.Errorf("get domain by name: %w", err)
+	}
+	if d == nil {
+		return nil
+	}
+	d.Status = status
+	return s.repo.Update(ctx, d)
+}
+
 // DeleteDomain removes a domain by ID.
 func (s *Service) DeleteDomain(ctx context.Context, id uint) error {
 	d, err := s.repo.GetByID(ctx, id)

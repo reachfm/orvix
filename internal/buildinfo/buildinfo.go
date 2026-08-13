@@ -17,6 +17,7 @@ package buildinfo
 import (
 	"fmt"
 	"runtime"
+	"runtime/debug"
 	"strings"
 	"time"
 )
@@ -65,13 +66,54 @@ type Info struct {
 
 // Get returns the resolved Info for the current process. Always returns
 // a non-nil value with safe defaults; never panics on missing ldflags.
+//
+// Precedence: explicit -ldflags values win when present (an operator
+// who bothered to inject them meant it); otherwise Get falls back to
+// the VCS metadata Go's toolchain embeds automatically via
+// runtime/debug.ReadBuildInfo() on every `go build` from a git
+// checkout (revision, commit time, dirty-tree flag) — this is what
+// closes the "deployed builds incorrectly show 0.0.0-dev when build
+// metadata exists" defect: a binary built with plain `go build` (no
+// ldflags at all) still carries real commit metadata from the Go
+// toolchain itself, and previously this package ignored it entirely.
 func Get() Info {
-	isDev := BuildTime == "development" || Commit == "not reported"
+	version, commit, buildTime := Version, Commit, BuildTime
+	if bi, ok := debug.ReadBuildInfo(); ok {
+		var vcsRevision, vcsTime string
+		var vcsModified bool
+		for _, s := range bi.Settings {
+			switch s.Key {
+			case "vcs.revision":
+				vcsRevision = s.Value
+			case "vcs.time":
+				vcsTime = s.Value
+			case "vcs.modified":
+				vcsModified = s.Value == "true"
+			}
+		}
+		if version == "0.0.0-dev" && vcsRevision != "" {
+			short := vcsRevision
+			if len(short) > 12 {
+				short = short[:12]
+			}
+			version = "0.0.0-dev+" + short
+			if vcsModified {
+				version += "-dirty"
+			}
+		}
+		if commit == "not reported" && vcsRevision != "" {
+			commit = vcsRevision
+		}
+		if buildTime == "development" && vcsTime != "" {
+			buildTime = vcsTime
+		}
+	}
+	isDev := buildTime == "development" || commit == "not reported"
 	return Info{
-		Version:   safeNonEmpty(Version, "0.0.0-dev"),
-		Commit:    safeNonEmpty(Commit, "not reported"),
+		Version:   safeNonEmpty(version, "0.0.0-dev"),
+		Commit:    safeNonEmpty(commit, "not reported"),
 		Tag:       strings.TrimSpace(Tag),
-		BuildTime: safeNonEmpty(BuildTime, "development"),
+		BuildTime: safeNonEmpty(buildTime, "development"),
 		Channel:   safeNonEmpty(Channel, "stable"),
 		GoVersion: runtime.Version(),
 		OS:        runtime.GOOS,

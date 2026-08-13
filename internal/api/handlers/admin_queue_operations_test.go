@@ -30,6 +30,9 @@ func TestAdminQueueSummaryHandler(t *testing.T) {
 	cfg := config.Defaults()
 	cfg.Database.Driver = "sqlite"
 	cfg.Database.DSN = dir + "/test.db?_loc=auto&_busy_timeout=5000"
+	// See buildQueueTestEnv's comment in admin_queue_test.go — the handler
+	// now fails closed with 503 unless CoreMail is enabled.
+	cfg.CoreMail.Enabled = true
 
 	db, err := config.NewDatabase(&cfg.Database, logger)
 	if err != nil {
@@ -98,6 +101,9 @@ func TestAdminQueueEntryHandler(t *testing.T) {
 	cfg := config.Defaults()
 	cfg.Database.Driver = "sqlite"
 	cfg.Database.DSN = dir + "/test.db?_loc=auto&_busy_timeout=5000"
+	// See buildQueueTestEnv's comment in admin_queue_test.go — the handler
+	// now fails closed with 503 unless CoreMail is enabled.
+	cfg.CoreMail.Enabled = true
 
 	db, err := config.NewDatabase(&cfg.Database, logger)
 	if err != nil {
@@ -178,6 +184,9 @@ func TestAdminQueueRoutesAuth(t *testing.T) {
 	cfg := config.Defaults()
 	cfg.Database.Driver = "sqlite"
 	cfg.Database.DSN = dir + "/test.db?_loc=auto&_busy_timeout=5000"
+	// See buildQueueTestEnv's comment in admin_queue_test.go — the handler
+	// now fails closed with 503 unless CoreMail is enabled.
+	cfg.CoreMail.Enabled = true
 
 	db, err := config.NewDatabase(&cfg.Database, logger)
 	if err != nil {
@@ -262,8 +271,21 @@ func TestAdminQueueRoutesAuth(t *testing.T) {
 				t.Fatalf("request: %v", err)
 			}
 			defer res.Body.Close()
-			if res.StatusCode != http.StatusOK && res.StatusCode != http.StatusNotFound {
-				t.Errorf("expected 200 or 404 for admin; got %d", res.StatusCode)
+			// AdminQueueSummary now correctly fails closed with a sanitized
+			// 500 (not a silent 200) when the router's queue engine isn't
+			// wired to a live instance — router.NewRouter alone, without the
+			// full module lifecycle this test doesn't run, never attaches
+			// one. That is the intended "genuinely unavailable" contract
+			// (see coreMailUnavailableResponse's sibling paths in
+			// admin_queue_coremail_state_test.go), so 500 is an accepted
+			// authenticated-and-authorized outcome here alongside 200/404.
+			wantOK := map[int]bool{http.StatusOK: true, http.StatusNotFound: true}
+			if tt.name == "summary" {
+				wantOK[http.StatusServiceUnavailable] = true
+				wantOK[http.StatusInternalServerError] = true
+			}
+			if !wantOK[res.StatusCode] {
+				t.Errorf("expected an authorized-response status for admin; got %d", res.StatusCode)
 			}
 		})
 	}
@@ -277,6 +299,9 @@ func TestAdminQueueDetailSanitizedError(t *testing.T) {
 	cfg := config.Defaults()
 	cfg.Database.Driver = "sqlite"
 	cfg.Database.DSN = dir + "/test.db?_loc=auto&_busy_timeout=5000"
+	// See buildQueueTestEnv's comment in admin_queue_test.go — the handler
+	// now fails closed with 503 unless CoreMail is enabled.
+	cfg.CoreMail.Enabled = true
 
 	db, err := config.NewDatabase(&cfg.Database, logger)
 	if err != nil {

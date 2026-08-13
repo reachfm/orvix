@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v3"
+	"github.com/orvix/orvix/internal/api/publicv1"
 	"github.com/orvix/orvix/internal/audit"
 	"github.com/orvix/orvix/internal/auth"
 	rbac "github.com/orvix/orvix/internal/auth/rbac"
@@ -116,12 +117,74 @@ func validateAPIKeyScopes(scopes []string, role auth.Role) error {
 			return fmt.Errorf("duplicate scope: %s", s)
 		}
 		seen[s] = true
-		// Validate against known permissions.
-		if !rbac.HasPermission(role, rbac.Permission(s)) {
+		permission := publicScopePermission(s)
+		isPublicScope := permission != ""
+		if permission == "" {
+			permission = rbac.Permission(s)
+		}
+		// Public scopes are tenant-scoped: a key minted with one binds
+		// to a tenant's resource set. The platform super admin has no
+		// tenant and must never mint tenant-scoped keys, even though it
+		// holds the underlying canonical permissions for platform
+		// routes. This boundary is deliberate (see apikey_scope_test.go).
+		if role == auth.RolePlatformSuperAdmin && (isPublicScope || isTenantScopedPermission(permission)) {
+			return fmt.Errorf("scope %s is tenant-scoped and cannot be granted by a platform role", s)
+		}
+		if !rbac.HasPermission(role, permission) {
 			return fmt.Errorf("scope %s exceeds caller permissions or is unknown", s)
 		}
 	}
 	return nil
+}
+
+// isTenantScopedPermission reports whether a canonical permission
+// protects tenant-resource routes (domains, mailboxes, aliases, groups,
+// users, invitations, organizations, api keys, billing). The platform
+// super admin holds some of these for the /platform/* control-plane
+// surface, but that authority is platform-scoped and must never be
+// minted into tenant-scoped API keys.
+func isTenantScopedPermission(p rbac.Permission) bool {
+	switch p {
+	case rbac.PermDomainsRead, rbac.PermDomainsWrite,
+		rbac.PermMailboxesRead, rbac.PermMailboxesWrite,
+		rbac.PermAliasesRead, rbac.PermAliasesWrite,
+		rbac.PermGroupsRead, rbac.PermGroupsWrite,
+		rbac.PermUsersRead, rbac.PermUsersWrite,
+		rbac.PermInvitationsRead, rbac.PermInvitationsWrite,
+		rbac.PermOrganizationsRead, rbac.PermOrganizationsWrite,
+		rbac.PermOwnershipTransfer,
+		rbac.PermAPIKeysRead, rbac.PermAPIKeysWrite,
+		rbac.PermBillingRead, rbac.PermBillingWrite:
+		return true
+	}
+	return false
+}
+
+func publicScopePermission(scope string) rbac.Permission {
+	switch scope {
+	case publicv1.ScopeOrganizationRead:
+		return rbac.PermOrganizationsRead
+	case publicv1.ScopeDomainsRead:
+		return rbac.PermDomainsRead
+	case publicv1.ScopeDomainsWrite:
+		return rbac.PermDomainsWrite
+	case publicv1.ScopeMailboxesRead:
+		return rbac.PermMailboxesRead
+	case publicv1.ScopeMailboxesWrite:
+		return rbac.PermMailboxesWrite
+	case publicv1.ScopeAliasesRead:
+		return rbac.PermAliasesRead
+	case publicv1.ScopeAliasesWrite:
+		return rbac.PermAliasesWrite
+	case publicv1.ScopeGroupsRead:
+		return rbac.PermGroupsRead
+	case publicv1.ScopeGroupsWrite:
+		return rbac.PermGroupsWrite
+	case publicv1.ScopeUsageRead:
+		return rbac.PermBillingRead
+	default:
+		return ""
+	}
 }
 
 func parseScopes(s string) []string {

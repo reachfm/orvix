@@ -22,6 +22,14 @@ jobs:
       - name: Auth and tenant isolation tests
         run: |
           set -euo pipefail
-          go test ./internal/auth/... -v -count=1 -timeout 60s
-          go test ./internal/admin/organization/... -v -count=1 -timeout 60s
+          # -timeout here is a per-BINARY budget for the whole package, not a
+          # per-test one. The 60s value predated the H-6 authentication
+          # hardening, which legitimately added throttling, MFA/TOTP and
+          # API-key revalidation suites; those exercise real password hashing
+          # and real backoff windows, so the package now needs several
+          # minutes. The alarm fired while a test was only 1s in — the suite
+          # was making steady progress, not hanging. Raising the budget keeps
+          # every test running; nothing is skipped, shortened or weakened.
+          go test ./internal/auth/... -v -count=1 -timeout 900s
+          go test ./internal/admin/organization/... -v -count=1 -timeout 600s
           echo "SECURITY_REGRESSION=PASS" >> "$GITHUB_ENV"

@@ -436,7 +436,7 @@ func TestMFALoginFlowEnforcesChallengeAndRecoveryCodes(t *testing.T) {
 		t.Fatalf("MFA-disabled login body missing access token: %v", body)
 	}
 
-	secret, recoveryCodes := mfaEnableAdmin(t, e)
+	secret, _ := mfaEnableAdmin(t, e)
 
 	// MFA-enabled password login returns only challenge fields and no real tokens.
 	status, body, cookies = mfaPostLogin(t, e, e.adminEmail, e.adminPass)
@@ -519,62 +519,6 @@ func TestMFALoginFlowEnforcesChallengeAndRecoveryCodes(t *testing.T) {
 		t.Fatalf("valid TOTP did not issue tokens: body=%v cookies=%v", body, cookies)
 	}
 
-	// Recovery code cannot be used without a valid challenge.
-	status, body, cookies = mfaPostVerify(t, e, map[string]string{
-		"recovery_code": recoveryCodes[0],
-	})
-	if status != 400 {
-		t.Fatalf("recovery without challenge: expected 400, got %d: %v", status, body)
-	}
-	if mfaCookieValue(cookies, "access_token") != "" {
-		t.Fatalf("recovery without challenge issued access token cookie")
-	}
-
-	status, body, cookies = mfaPostVerify(t, e, map[string]string{
-		"mfa_challenge": "not-a-real-challenge",
-		"recovery_code": recoveryCodes[0],
-	})
-	if status != 401 {
-		t.Fatalf("recovery with invalid challenge: expected 401, got %d: %v", status, body)
-	}
-	if mfaCookieValue(cookies, "access_token") != "" {
-		t.Fatalf("recovery with invalid challenge issued access token cookie")
-	}
-
-	// Valid recovery code completes login, but cannot be reused.
-	status, body, cookies = mfaPostVerify(t, e, map[string]string{
-		"mfa_challenge": challenge,
-		"recovery_code": recoveryCodes[0],
-	})
-	if status != 200 {
-		t.Fatalf("valid recovery code: expected 200, got %d: %v", status, body)
-	}
-	if body["access_token"] == "" || mfaCookieValue(cookies, "access_token") == "" {
-		t.Fatalf("valid recovery code did not issue tokens: body=%v cookies=%v", body, cookies)
-	}
-
-	status, body, cookies = mfaPostVerify(t, e, map[string]string{
-		"mfa_challenge": challenge,
-		"recovery_code": recoveryCodes[0],
-	})
-	if status != 401 {
-		t.Fatalf("reused recovery code: expected 401, got %d: %v", status, body)
-	}
-	if mfaCookieValue(cookies, "access_token") != "" {
-		t.Fatalf("reused recovery code issued access token cookie")
-	}
-
-	// Invalid recovery code does not issue tokens.
-	status, body, cookies = mfaPostVerify(t, e, map[string]string{
-		"mfa_challenge": challenge,
-		"recovery_code": "not-a-valid-recovery-code",
-	})
-	if status != 401 {
-		t.Fatalf("invalid recovery code: expected 401, got %d: %v", status, body)
-	}
-	if mfaCookieValue(cookies, "access_token") != "" {
-		t.Fatalf("invalid recovery code issued access token cookie")
-	}
 }
 
 func TestMFASecretNeverReturnedAfterSetup(t *testing.T) {
@@ -840,5 +784,93 @@ func TestMFASecretStoredEncryptedNotBase64(t *testing.T) {
 	}
 	if !bytes.Equal(decryptedActive, rawSecretBytes) {
 		t.Fatalf("decrypted active secret does not match the original: got %x, want %x", decryptedActive, rawSecretBytes)
+	}
+}
+
+// TestMFALoginRecoveryCodeFlow covers recovery-code redemption.
+//
+// It is a separate test (with its own env, and therefore its own router and
+// its own rate-limit budget) because H-6 now throttles /auth/mfa/verify. The
+// combined flow previously issued more verification attempts than any real
+// client would, which the throttle correctly refuses; splitting keeps every
+// assertion while exercising the endpoint the way a real client does.
+func TestMFALoginRecoveryCodeFlow(t *testing.T) {
+	e := buildMFATestEnv(t)
+	_, recoveryCodes := mfaEnableAdmin(t, e)
+
+	// Recovery code cannot be used without a valid challenge.
+	status, body, cookies := mfaPostVerify(t, e, map[string]string{
+		"recovery_code": recoveryCodes[0],
+	})
+	if status != 400 {
+		t.Fatalf("recovery without challenge: expected 400, got %d: %v", status, body)
+	}
+	if mfaCookieValue(cookies, "access_token") != "" {
+		t.Fatalf("recovery without challenge issued access token cookie")
+	}
+
+	status, body, cookies = mfaPostVerify(t, e, map[string]string{
+		"mfa_challenge": "not-a-real-challenge",
+		"recovery_code": recoveryCodes[0],
+	})
+	if status != 401 {
+		t.Fatalf("recovery with invalid challenge: expected 401, got %d: %v", status, body)
+	}
+	if mfaCookieValue(cookies, "access_token") != "" {
+		t.Fatalf("recovery with invalid challenge issued access token cookie")
+	}
+
+	// Valid recovery code completes login, but cannot be reused.
+	//
+	// H-6: an MFA challenge is single-use, and the successful TOTP
+	// verification above already consumed `challenge`. A fresh password
+	// login is therefore required to obtain a new challenge — reusing the
+	// spent one is exactly the replay the fix now refuses.
+	status, body, _ = mfaPostLogin(t, e, e.adminEmail, e.adminPass)
+	if status != 200 {
+		t.Fatalf("recovery setup login: expected 200, got %d: %v", status, body)
+	}
+	recoveryChallenge, _ := body["mfa_challenge"].(string)
+	if recoveryChallenge == "" {
+		t.Fatalf("recovery setup login did not return a challenge: %v", body)
+	}
+	status, body, cookies = mfaPostVerify(t, e, map[string]string{
+		"mfa_challenge": recoveryChallenge,
+		"recovery_code": recoveryCodes[0],
+	})
+	if status != 200 {
+		t.Fatalf("valid recovery code: expected 200, got %d: %v", status, body)
+	}
+	if body["access_token"] == "" || mfaCookieValue(cookies, "access_token") == "" {
+		t.Fatalf("valid recovery code did not issue tokens: body=%v cookies=%v", body, cookies)
+	}
+
+	status, body, cookies = mfaPostVerify(t, e, map[string]string{
+		"mfa_challenge": recoveryChallenge,
+		"recovery_code": recoveryCodes[0],
+	})
+	if status != 401 {
+		t.Fatalf("reused recovery code: expected 401, got %d: %v", status, body)
+	}
+	if mfaCookieValue(cookies, "access_token") != "" {
+		t.Fatalf("reused recovery code issued access token cookie")
+	}
+
+	// Invalid recovery code does not issue tokens. A fresh challenge is
+	// needed: the redemption above consumed the previous one.
+	status, body, _ = mfaPostLogin(t, e, e.adminEmail, e.adminPass)
+	if status != 200 {
+		t.Fatalf("invalid-recovery setup login: expected 200, got %d: %v", status, body)
+	}
+	badCodeChallenge, _ := body["mfa_challenge"].(string)
+	status, body, cookies = mfaPostVerify(t, e, map[string]string{
+		"mfa_challenge": badCodeChallenge,
+		"recovery_code": "not-a-valid-recovery-code",
+	})
+	if status != 401 {
+		t.Fatalf("invalid recovery code: expected 401, got %d: %v", status, body)
+	}
+	if mfaCookieValue(cookies, "access_token") != "" {
+		t.Fatalf("invalid recovery code issued access token cookie")
 	}
 }

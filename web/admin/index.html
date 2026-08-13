@@ -6,8 +6,12 @@
     <meta name="description" content="Orvix Admin Console" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <title>Orvix Admin Console</title>
+    <!-- Pre-paint theme init, kept as an external file (not inlined) —
+         the admin page's CSP is script-src 'self' with no inline-script
+         allowance. See public/theme-init.js / src/shared/theme/theme.ts. -->
+    <script src="/admin/theme-init.js"></script>
   </head>
-  <body class="bg-[#0C0E12] text-[#E8EAF0]">
+  <body class="bg-[var(--bg-base)] text-[var(--text-primary)]">
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

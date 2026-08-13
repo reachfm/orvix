@@ -41,6 +41,10 @@ func buildQueueTestEnv(t *testing.T) *queueTestEnv {
 	cfg := config.Defaults()
 	cfg.Database.Driver = "sqlite"
 	cfg.Database.DSN = filepath.Join(t.TempDir(), "queue_test.db") + "?_loc=auto&_busy_timeout=5000&_txlock=immediate"
+	// The queue-admin endpoints fail closed with 503 COREMAIL_DISABLED when
+	// this is false (config.Defaults()'s zero value) — this suite exercises
+	// the enabled path, matching a real CoreMail-enabled deployment.
+	cfg.CoreMail.Enabled = true
 	db, err := config.NewDatabase(&cfg.Database, logger)
 	if err != nil {
 		t.Fatalf("database: %v", err)
@@ -177,6 +181,12 @@ func getQueueCSRFCookie(t *testing.T, router *api.Router, bearer string) string 
 }
 
 func queueRequest(t *testing.T, e *queueTestEnv, method, path string, body string, token, csrf string) (*http.Response, []byte) {
+	return queueRequestConfirm(t, e, method, path, body, token, csrf, "")
+}
+
+// queueRequestConfirm is queueRequest plus an optional X-Confirm typed
+// confirmation header (required for bounce/cancel).
+func queueRequestConfirm(t *testing.T, e *queueTestEnv, method, path string, body string, token, csrf, confirm string) (*http.Response, []byte) {
 	t.Helper()
 	var reader io.Reader
 	if body != "" {
@@ -192,6 +202,9 @@ func queueRequest(t *testing.T, e *queueTestEnv, method, path string, body strin
 	if csrf != "" {
 		req.Header.Set("Cookie", "csrf_token="+csrf)
 		req.Header.Set("X-CSRF-Token", csrf)
+	}
+	if confirm != "" {
+		req.Header.Set("X-Confirm", confirm)
 	}
 	resp, err := e.router.App().Test(req, fiber.TestConfig{Timeout: 0})
 	if err != nil {
@@ -414,9 +427,17 @@ func TestAdminQueueBounce(t *testing.T) {
 
 	id := seedQueueEntry(t, e, "pending", "bounce@test.com", "bounce-to@test.com")
 
-	resp, body := queueRequest(t, e, "POST",
+	// Bounce without typed confirmation is rejected.
+	resp0, _ := queueRequest(t, e, "POST",
 		"/api/v1/admin/queue/messages/"+strconv.FormatUint(uint64(id), 10)+"/bounce",
 		`{"reason":"test bounce"}`, e.adminToken, e.csrfToken)
+	if resp0.StatusCode != http.StatusPreconditionRequired {
+		t.Fatalf("bounce without confirmation: expected 428, got %d", resp0.StatusCode)
+	}
+
+	resp, body := queueRequestConfirm(t, e, "POST",
+		"/api/v1/admin/queue/messages/"+strconv.FormatUint(uint64(id), 10)+"/bounce",
+		`{"reason":"test bounce"}`, e.adminToken, e.csrfToken, "BOUNCE-QUEUE-"+strconv.FormatUint(uint64(id), 10))
 	if resp.StatusCode != 200 {
 		t.Fatalf("bounce: expected 200, got %d: %s", resp.StatusCode, string(body))
 	}
@@ -437,9 +458,9 @@ func TestAdminQueueBounce(t *testing.T) {
 
 	// Bounce with no reason (default).
 	id2 := seedQueueEntry(t, e, "pending", "bounce2@test.com", "bounce2-to@test.com")
-	resp2, _ := queueRequest(t, e, "POST",
+	resp2, _ := queueRequestConfirm(t, e, "POST",
 		"/api/v1/admin/queue/messages/"+strconv.FormatUint(uint64(id2), 10)+"/bounce",
-		`{}`, e.adminToken, e.csrfToken)
+		`{}`, e.adminToken, e.csrfToken, "BOUNCE-QUEUE-"+strconv.FormatUint(uint64(id2), 10))
 	if resp2.StatusCode != 200 {
 		t.Fatalf("bounce default: expected 200, got %d", resp2.StatusCode)
 	}
@@ -461,9 +482,17 @@ func TestAdminQueueCancel(t *testing.T) {
 
 	id := seedQueueEntry(t, e, "pending", "cancel@test.com", "cancel-to@test.com")
 
-	resp, body := queueRequest(t, e, "POST",
+	// Cancel without typed confirmation is rejected.
+	resp0, _ := queueRequest(t, e, "POST",
 		"/api/v1/admin/queue/messages/"+strconv.FormatUint(uint64(id), 10)+"/cancel",
 		"", e.adminToken, e.csrfToken)
+	if resp0.StatusCode != http.StatusPreconditionRequired {
+		t.Fatalf("cancel without confirmation: expected 428, got %d", resp0.StatusCode)
+	}
+
+	resp, body := queueRequestConfirm(t, e, "POST",
+		"/api/v1/admin/queue/messages/"+strconv.FormatUint(uint64(id), 10)+"/cancel",
+		"", e.adminToken, e.csrfToken, "CANCEL-QUEUE-"+strconv.FormatUint(uint64(id), 10))
 	if resp.StatusCode != 200 {
 		t.Fatalf("cancel: expected 200, got %d: %s", resp.StatusCode, string(body))
 	}
@@ -506,9 +535,16 @@ func TestAdminQueueActionsRejectLeasedEntries(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			id := seedQueueEntry(t, e, "leased", tt.name+"@test.com", tt.name+"-to@test.com")
-			resp, body := queueRequest(t, e, "POST",
+			confirm := ""
+			if tt.action == "bounce" {
+				confirm = "BOUNCE-QUEUE-" + strconv.FormatUint(uint64(id), 10)
+			}
+			if tt.action == "cancel" {
+				confirm = "CANCEL-QUEUE-" + strconv.FormatUint(uint64(id), 10)
+			}
+			resp, body := queueRequestConfirm(t, e, "POST",
 				"/api/v1/admin/queue/messages/"+strconv.FormatUint(uint64(id), 10)+"/"+tt.action,
-				tt.body, e.adminToken, e.csrfToken)
+				tt.body, e.adminToken, e.csrfToken, confirm)
 			if resp.StatusCode != 400 {
 				t.Fatalf("%s leased: expected 400, got %d: %s", tt.action, resp.StatusCode, string(body))
 			}
@@ -575,17 +611,17 @@ func TestAdminQueueAudit(t *testing.T) {
 	}
 
 	// Bounce.
-	resp2, _ := queueRequest(t, e, "POST",
+	resp2, _ := queueRequestConfirm(t, e, "POST",
 		"/api/v1/admin/queue/messages/"+strconv.FormatUint(uint64(id1), 10)+"/bounce",
-		`{"reason":"test audit"}`, e.adminToken, e.csrfToken)
+		`{"reason":"test audit"}`, e.adminToken, e.csrfToken, "BOUNCE-QUEUE-"+strconv.FormatUint(uint64(id1), 10))
 	if resp2.StatusCode != 200 {
 		t.Fatalf("bounce for audit: %d", resp2.StatusCode)
 	}
 
 	// Cancel.
-	resp3, _ := queueRequest(t, e, "POST",
+	resp3, _ := queueRequestConfirm(t, e, "POST",
 		"/api/v1/admin/queue/messages/"+strconv.FormatUint(uint64(id3), 10)+"/cancel",
-		"", e.adminToken, e.csrfToken)
+		"", e.adminToken, e.csrfToken, "CANCEL-QUEUE-"+strconv.FormatUint(uint64(id3), 10))
 	if resp3.StatusCode != 200 {
 		t.Fatalf("cancel for audit: %d", resp3.StatusCode)
 	}
@@ -603,5 +639,139 @@ func TestAdminQueueAudit(t *testing.T) {
 		if !strings.Contains(bodyStr, `"`+action+`"`) {
 			t.Errorf("audit log missing action %q: %s", action, bodyStr)
 		}
+	}
+}
+
+func TestAdminQueueBulkAction_PerMessageResults(t *testing.T) {
+	e := buildQueueTestEnv(t)
+
+	retryable := seedQueueEntry(t, e, "deferred", "bulk1@test.com", "bulk1-to@test.com")
+	notEligible := seedQueueEntry(t, e, "leased", "bulk2@test.com", "bulk2-to@test.com")
+	missing := uint(999999)
+
+	body := `{"ids":[` +
+		strconv.FormatUint(uint64(retryable), 10) + `,` +
+		strconv.FormatUint(uint64(notEligible), 10) + `,` +
+		strconv.FormatUint(uint64(missing), 10) +
+		`],"action":"retry"}`
+	resp, respBody := queueRequest(t, e, "POST", "/api/v1/admin/queue/messages/bulk-action", body, e.adminToken, e.csrfToken)
+	if resp.StatusCode != 200 {
+		t.Fatalf("bulk action: expected 200, got %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var result struct {
+		Total     int `json:"total"`
+		Succeeded int `json:"succeeded"`
+		Results   []struct {
+			ID      uint   `json:"id"`
+			Success bool   `json:"success"`
+			Code    string `json:"code,omitempty"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if result.Total != 3 || result.Succeeded != 1 {
+		t.Fatalf("expected total=3 succeeded=1, got total=%d succeeded=%d: %s", result.Total, result.Succeeded, string(respBody))
+	}
+	byID := map[uint]struct {
+		Success bool
+		Code    string
+	}{}
+	for _, r := range result.Results {
+		byID[r.ID] = struct {
+			Success bool
+			Code    string
+		}{r.Success, r.Code}
+	}
+	if !byID[retryable].Success {
+		t.Errorf("expected the deferred entry to succeed")
+	}
+	if byID[notEligible].Success || byID[notEligible].Code != "invalid_state_transition" {
+		t.Errorf("expected the leased entry to fail with invalid_state_transition, got %+v", byID[notEligible])
+	}
+	if byID[missing].Success || byID[missing].Code != "not_found" {
+		t.Errorf("expected the missing entry to fail with not_found, got %+v", byID[missing])
+	}
+
+	// The eligible row must actually have transitioned; the ineligible
+	// and missing ones must be untouched.
+	var retriedStatus, leasedStatus string
+	e.sqlDB.QueryRow("SELECT status FROM coremail_queue WHERE id = ?", retryable).Scan(&retriedStatus)
+	e.sqlDB.QueryRow("SELECT status FROM coremail_queue WHERE id = ?", notEligible).Scan(&leasedStatus)
+	if retriedStatus != "pending" {
+		t.Errorf("expected retryable entry to become pending, got %s", retriedStatus)
+	}
+	if leasedStatus != "leased" {
+		t.Errorf("expected the leased entry to remain untouched, got %s", leasedStatus)
+	}
+}
+
+func TestAdminQueueBulkAction_RejectsUnknownAction(t *testing.T) {
+	e := buildQueueTestEnv(t)
+	id := seedQueueEntry(t, e, "pending", "bulkbad@test.com", "bulkbad-to@test.com")
+	resp, _ := queueRequest(t, e, "POST", "/api/v1/admin/queue/messages/bulk-action",
+		`{"ids":[`+strconv.FormatUint(uint64(id), 10)+`],"action":"explode"}`, e.adminToken, e.csrfToken)
+	if resp.StatusCode != 400 {
+		t.Fatalf("expected 400 for an unknown action, got %d", resp.StatusCode)
+	}
+}
+
+func TestAdminQueueBulkAction_RequiresPlatformAdmin(t *testing.T) {
+	e := buildQueueTestEnv(t)
+	id := seedQueueEntry(t, e, "pending", "bulkrbac@test.com", "bulkrbac-to@test.com")
+	resp, _ := queueRequest(t, e, "POST", "/api/v1/admin/queue/messages/bulk-action",
+		`{"ids":[`+strconv.FormatUint(uint64(id), 10)+`],"action":"cancel"}`, e.userToken, e.csrfToken)
+	if resp.StatusCode != 403 {
+		t.Fatalf("expected 403 for a non-platform-admin, got %d", resp.StatusCode)
+	}
+}
+
+func TestAdminQueueExport_RedactsAddresses(t *testing.T) {
+	e := buildQueueTestEnv(t)
+	seedQueueEntry(t, e, "pending", "secret.person@customer.test", "another.secret@other.test")
+
+	resp, body := queueRequest(t, e, "GET", "/api/v1/admin/queue/export", "", e.adminToken, "")
+	if resp.StatusCode != 200 {
+		t.Fatalf("export: expected 200, got %d: %s", resp.StatusCode, string(body))
+	}
+	csv := string(body)
+	if strings.Contains(csv, "secret.person") || strings.Contains(csv, "another.secret") {
+		t.Fatalf("export must never contain the unredacted local part: %s", csv)
+	}
+	if !strings.Contains(csv, "***@customer.test") || !strings.Contains(csv, "***@other.test") {
+		t.Fatalf("expected redacted domain-only addresses in export: %s", csv)
+	}
+}
+
+func TestAdminQueueExport_RequiresPlatformAdmin(t *testing.T) {
+	e := buildQueueTestEnv(t)
+	resp, _ := queueRequest(t, e, "GET", "/api/v1/admin/queue/export", "", e.userToken, "")
+	if resp.StatusCode != 403 {
+		t.Fatalf("expected 403 for a non-platform-admin, got %d", resp.StatusCode)
+	}
+}
+
+// TestAdminQueueHistory_UnwiredHistoryRepoReturnsTypedUnavailable
+// proves the typed "queue_unavailable" capability-state contract: this
+// lightweight test harness (buildQueueTestEnv) never calls
+// SetAttemptHistoryRepo — matching a real deployment where the
+// delivery-history table exists but the repo wasn't wired for some
+// reason — and the handler must report that distinctly (503 +
+// queue_unavailable), never a raw 500 or a falsely-empty 200.
+func TestAdminQueueHistory_UnwiredHistoryRepoReturnsTypedUnavailable(t *testing.T) {
+	e := buildQueueTestEnv(t)
+	resp, body := queueRequest(t, e, "GET", "/api/v1/admin/queue/history", "", e.adminToken, "")
+	if resp.StatusCode != 503 {
+		t.Fatalf("expected 503, got %d: %s", resp.StatusCode, string(body))
+	}
+	var result struct {
+		Code string `json:"code"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if result.Code != "queue_unavailable" {
+		t.Fatalf("expected code=queue_unavailable, got %q", result.Code)
 	}
 }

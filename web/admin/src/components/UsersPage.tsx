@@ -22,44 +22,44 @@ export default function UsersPage() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["platform-users"] }),
   });
 
-  if (isLoading) return <p className="text-[#8B92A8]">Loading...</p>;
-  if (error) return <p className="text-[#F87171]">Failed to load users: {(error as Error).message}</p>;
+  if (isLoading) return <p className="text-[var(--text-secondary)]">Loading...</p>;
+  if (error) return <p className="text-[var(--danger)]">Failed to load users: {(error as Error).message}</p>;
 
   const users = data || [];
 
   return (
     <div>
-      <h2 className="text-2xl font-semibold mb-6 text-[#E8EAF0]">User Management</h2>
+      <h2 className="text-2xl font-semibold mb-6 text-[var(--text-primary)]">User Management</h2>
 
       {users.length === 0 ? (
-        <div className="bg-[#13161C] border border-[#2A2F3E] rounded-xl p-8 text-center text-[#8B92A8]">
+        <div className="bg-[var(--bg-surface)] border border-[var(--border)] rounded-xl p-8 text-center text-[var(--text-secondary)]">
           No users found.
         </div>
       ) : (
-        <div className="bg-[#13161C] border border-[#2A2F3E] rounded-xl overflow-hidden">
+        <div className="bg-[var(--bg-surface)] border border-[var(--border)] rounded-xl overflow-hidden">
           <table className="w-full text-sm">
             <thead>
-              <tr className="border-b border-[#2A2F3E]">
-                <th className="text-left p-4 text-[#8B92A8] font-medium">Email</th>
-                <th className="text-left p-4 text-[#8B92A8] font-medium">Role</th>
-                <th className="text-left p-4 text-[#8B92A8] font-medium">Status</th>
-                <th className="text-right p-4 text-[#8B92A8] font-medium">Actions</th>
+              <tr className="border-b border-[var(--border)]">
+                <th className="text-left p-4 text-[var(--text-secondary)] font-medium">Email</th>
+                <th className="text-left p-4 text-[var(--text-secondary)] font-medium">Role</th>
+                <th className="text-left p-4 text-[var(--text-secondary)] font-medium">Status</th>
+                <th className="text-right p-4 text-[var(--text-secondary)] font-medium">Actions</th>
               </tr>
             </thead>
             <tbody>
               {users.map((u) => (
-                <tr key={u.email} className="border-b border-[#2A2F3E] hover:bg-[#1A1E26]">
-                  <td className="p-4 text-[#E8EAF0]">{u.email}</td>
+                <tr key={u.email} className="border-b border-[var(--border)] hover:bg-[var(--bg-elevated)]">
+                  <td className="p-4 text-[var(--text-primary)]">{u.email}</td>
                   <td className="p-4">
-                    <span className="px-2 py-1 text-xs rounded-full bg-[#4F7CFF]/10 text-[#4F7CFF]">
+                    <span className="px-2 py-1 text-xs rounded-full bg-[var(--accent)]/10 text-[var(--accent)]">
                       {u.role}
                     </span>
                   </td>
                   <td className="p-4">
                     <span className={`px-2 py-1 text-xs rounded-full ${
-                      u.status === "active" ? "bg-[#34D399]/10 text-[#34D399]" :
-                      u.status === "suspended" ? "bg-[#F87171]/10 text-[#F87171]" :
-                      "bg-[#8B92A8]/10 text-[#8B92A8]"
+                      u.status === "active" ? "bg-[var(--success)]/10 text-[var(--success)]" :
+                      u.status === "suspended" ? "bg-[var(--danger)]/10 text-[var(--danger)]" :
+                      "bg-[var(--text-secondary)]/10 text-[var(--text-secondary)]"
                     }`}>
                       {u.status}
                     </span>
@@ -73,7 +73,7 @@ export default function UsersPage() {
                           }
                         }}
                         disabled={deleteUser.isPending}
-                        className="text-[#F87171] hover:underline text-xs disabled:opacity-50"
+                        className="text-[var(--danger)] hover:underline text-xs disabled:opacity-50"
                       >
                         Delete
                       </button>
@@ -86,7 +86,7 @@ export default function UsersPage() {
         </div>
       )}
       {deleteUser.isError && (
-        <p className="text-[#F87171] text-sm mt-2">Failed to delete user: {(deleteUser.error as Error).message}</p>
+        <p className="text-[var(--danger)] text-sm mt-2">Failed to delete user: {(deleteUser.error as Error).message}</p>
       )}
     </div>
   );

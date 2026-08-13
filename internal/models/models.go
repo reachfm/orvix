@@ -675,7 +675,9 @@ func MigrateAllRaw(db *gorm.DB) error {
 			scopes TEXT NOT NULL DEFAULT '',
 			active INTEGER NOT NULL DEFAULT 1,
 			last_used_at DATETIME,
-			expires_at DATETIME
+			expires_at DATETIME,
+			allowed_ips TEXT NOT NULL DEFAULT '',
+			owner_token_version INTEGER NOT NULL DEFAULT 0
 		)`,
 		// CoreMail tables
 		`CREATE TABLE IF NOT EXISTS coremail_domains (
@@ -698,6 +700,7 @@ func MigrateAllRaw(db *gorm.DB) error {
 			abuse_contact TEXT NOT NULL DEFAULT '',
 			labels TEXT NOT NULL DEFAULT '',
 			mailbox_count INTEGER NOT NULL DEFAULT 0,
+			mail_access_mode TEXT NOT NULL DEFAULT 'internal_external',
 			created_at DATETIME NOT NULL,
 			updated_at DATETIME NOT NULL,
 			deleted_at DATETIME
@@ -1381,6 +1384,7 @@ func migrateCoremailDomainSchema(ctx context.Context, db *sql.DB) error {
 		sql  string
 	}{
 		{"default_mailbox_quota_mb", "ALTER TABLE coremail_domains ADD COLUMN default_mailbox_quota_mb INTEGER NOT NULL DEFAULT 0"},
+		{"mail_access_mode", "ALTER TABLE coremail_domains ADD COLUMN mail_access_mode TEXT NOT NULL DEFAULT 'internal_external'"},
 	}
 
 	for _, addition := range additions {
@@ -1497,6 +1501,21 @@ func migrateAPIKeysSchema(ctx context.Context, db *sql.DB) error {
 		{"tenant_id", "ALTER TABLE api_keys ADD COLUMN tenant_id INTEGER NOT NULL DEFAULT 0"},
 		{"role", "ALTER TABLE api_keys ADD COLUMN role TEXT NOT NULL DEFAULT 'user'"},
 		{"scopes", "ALTER TABLE api_keys ADD COLUMN scopes TEXT NOT NULL DEFAULT ''"},
+		// allowed_ips: comma-separated CIDRs an issued key may be used
+		// from; empty means unrestricted. Did not exist at all before
+		// this change, so every previously-issued key was structurally
+		// unrestricted (Feature 4/19's "IP restrictions where configured").
+		{"allowed_ips", "ALTER TABLE api_keys ADD COLUMN allowed_ips TEXT NOT NULL DEFAULT ''"},
+		// owner_token_version: the users.token_version captured when the key
+		// was minted (H-2). Authentication rejects a key whose recorded
+		// version no longer matches the owner's current one, so password
+		// reset / global revocation / forced logout invalidates outstanding
+		// keys through the same token-version mechanism JWTs already use.
+		// Keys issued before this column existed default to 0, which still
+		// matches a never-revoked user (token_version 0); the first
+		// revocation event for that user invalidates them, so no key retains
+		// authority across a revocation.
+		{"owner_token_version", "ALTER TABLE api_keys ADD COLUMN owner_token_version INTEGER NOT NULL DEFAULT 0"},
 	}
 	for _, addition := range additions {
 		if columns[addition.name] {

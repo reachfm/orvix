@@ -58,8 +58,43 @@ describe("Platform Administration shell (portal=platform)", () => {
   beforeEach(() => {
     installFetchMock({
       "/api/v1/me": PLATFORM_ME,
-      "/platform/organizations": [],
+      "/platform/dashboard": { total_organizations: 1, active_organizations: 1, total_domains: 1, total_mailboxes: 1, quota_used_bytes: 0, recent_audit_entries: [] },
+      "/platform/organizations": { organizations: [], total: 0 },
+      "/admin/backups/schedule": {},
+      "/admin/backups/metrics": {},
+      "/admin/backups/health": { status: "ok" },
       "/admin/backups": [],
+      "/updates/check": { available: false },
+      "/updates/changelog": {},
+      "/update/status": { status: "up-to-date" },
+      "/update/history": [],
+      "/update/preflight": { ready: true },
+      "/monitoring/alerts": [],
+      "/monitoring/capacity": {},
+      "/monitoring/snapshot": {},
+      "/monitoring/alert-providers": {},
+      "/monitoring/alert-deliveries": [],
+      "/admin/storage/volumes": [],
+      "/admin/cluster/status": { nodes: [] },
+      "/admin/runtime": {},
+      "/admin/queue/summary": { metrics: { pending: 0, leased: 0, delivering: 0, deferred: 0, delivered: 0, bounced: 0, dead_letter: 0, cancelled: 0, total: 0, avg_attempts: 0 } },
+      "/admin/queue/messages": { messages: [], total: 0, limit: 50, offset: 0 },
+      "/audit/logs": [],
+      "/admin/ssl/certificates": { runtime: [], uploaded: [], expiry_warnings: [], expiry_cutoff_days: 30, config_path: "", config_key_path: "" },
+      "/admin/ssl/expiry-warnings": { warnings: [] },
+      "/admin/ssl/acme/status": { acme_enabled: false, issuing_certificates: false, acme_provider: "none", manual_paths: [], script_helper: "", on_disk_candidates: [], honest_notes: [] },
+      "/admin/security/antivirus": {
+        engine: "clamav", engine_configured: true, engine_reachable: true, engine_active: true,
+        runtime_enforced: false, clamav_host: "localhost", clamav_port: 3310, clamav_response: "PONG",
+        policy_on_infected: "reject", policy_on_scanner_unavailable: "fail_closed", last_error: "",
+        counts: { scanned: 0, infected: 0, rejected: 0, quarantined: 0, tagged: 0, fail_open: 0, fail_closed: 0 },
+        honest_notes: [],
+      },
+      "/guardian/logs": [],
+      "/heal/history": [],
+      "/admin/log-rules": { rules: [] },
+      "/admin/settings": {},
+      "/feature-flags": [],
       "/firewall/rules": [],
       "/firewall/logs": [],
       "/modules": [],
@@ -74,7 +109,6 @@ describe("Platform Administration shell (portal=platform)", () => {
         recent_activity: [],
         top_domains: [],
       },
-      "/license": { status: "valid", tier: "enterprise" },
     });
   });
 
@@ -93,17 +127,28 @@ describe("Platform Administration shell (portal=platform)", () => {
   it("never renders tenant-only navigation items", async () => {
     render(<Wrapper><App /></Wrapper>);
     await waitFor(() => expect(screen.getByText("Platform Administration")).toBeInTheDocument());
-    for (const label of ["Aliases", "Groups", "Invitations", "Ownership", "Invoices"]) {
+    // Tenant-family-only items must never appear in the platform shell.
+    for (const label of ["Invitations", "Ownership", "Invoices", "Usage"]) {
       expect(screen.queryByRole("button", { name: new RegExp(`^${label}$`, "i") })).not.toBeInTheDocument();
+    }
+    // Platform mail-control items ARE present (backed by /platform/* routes).
+    for (const label of ["Domains", "Mailboxes", "Aliases", "Groups", "Relays"]) {
+      expect(screen.getAllByRole("button", { name: new RegExp(`^${label}$`, "i") }).length).toBeGreaterThan(0);
     }
   });
 
   it("shows exactly the final verified platform navigation set", async () => {
     render(<Wrapper><App /></Wrapper>);
     await waitFor(() => expect(screen.getByText("Platform Administration")).toBeInTheDocument());
-    for (const label of ["Organizations", "Summary", "Backups", "Health", "Firewall", "Modules", "License"]) {
+    for (const label of ["Organizations", "Summary", "Mail Queue", "Domains", "Mailboxes", "Aliases", "Groups", "Relays", "Suppressions", "Deliverability", "Bulk Mailboxes", "Reliability", "Health", "Security", "Modules", "Configuration"]) {
       expect(screen.getAllByRole("button", { name: new RegExp(`^${label}$`, "i") }).length).toBeGreaterThan(0);
     }
+  });
+
+  it("never renders a License nav item — Orvix is hosted SaaS, not a licensed self-hosted product", async () => {
+    render(<Wrapper><App /></Wrapper>);
+    await waitFor(() => expect(screen.getByText("Platform Administration")).toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: /^License$/i })).not.toBeInTheDocument();
   });
 
   // PLATFORM-SHELL-2 Phase 3: table-driven proof that every visible platform
@@ -112,11 +157,20 @@ describe("Platform Administration shell (portal=platform)", () => {
   const PLATFORM_NAV_CASES: { label: string; expectHeading: string | RegExp }[] = [
     { label: "Organizations", expectHeading: /organizations/i },
     { label: "Summary", expectHeading: "Platform Summary" },
-    { label: "Backups", expectHeading: /backup/i },
+    { label: "Mail Queue", expectHeading: /mail operations/i },
+    { label: "Domains", expectHeading: /platform domains/i },
+    { label: "Mailboxes", expectHeading: /platform mailboxes/i },
+    { label: "Aliases", expectHeading: /platform aliases/i },
+    { label: "Groups", expectHeading: /platform groups/i },
+    { label: "Relays", expectHeading: /platform relays/i },
+    { label: "Suppressions", expectHeading: /suppression management/i },
+    { label: "Deliverability", expectHeading: /deliverability/i },
+    { label: "Bulk Mailboxes", expectHeading: /bulk mailbox operations/i },
+    { label: "Reliability", expectHeading: /reliability/i },
     { label: "Health", expectHeading: /health|runtime|system/i },
-    { label: "Firewall", expectHeading: /firewall/i },
+    { label: "Security", expectHeading: /security/i },
     { label: "Modules", expectHeading: /modules/i },
-    { label: "License", expectHeading: "License" },
+    { label: "Configuration", expectHeading: /configuration/i },
   ];
   for (const c of PLATFORM_NAV_CASES) {
     it(`platform nav item "${c.label}" renders its intended component with no tenant call`, async () => {
@@ -212,6 +266,22 @@ describe("Customer Portal shell (portal=organization) — unchanged", () => {
     render(<Wrapper><App /></Wrapper>);
     await waitFor(() => expect(screen.getByText("Orvix Admin")).toBeInTheDocument());
     expect(screen.getByRole("button", { name: /logout/i })).toBeInTheDocument();
+  });
+
+  it("never calls any platform-owned endpoint during bootstrap", async () => {
+    render(<Wrapper><App /></Wrapper>);
+    await waitFor(() => expect(screen.getByText("Orvix Admin")).toBeInTheDocument());
+    await new Promise((r) => setTimeout(r, 20));
+    const PLATFORM_ONLY_SUFFIXES = [
+      "/platform/dashboard", "/platform/organizations", "/admin/summary", "/admin/backups",
+      "/admin/queue/summary", "/queue", "/audit/logs", "/admin/ssl/certificates",
+      "/admin/security/antivirus", "/guardian/logs", "/heal/history", "/admin/log-rules",
+      "/admin/settings", "/feature-flags", "/updates/check", "/monitoring/alerts",
+      "/admin/storage/volumes", "/admin/cluster/status",
+    ];
+    for (const suffix of PLATFORM_ONLY_SUFFIXES) {
+      expect(requestedPaths.some((p) => p.endsWith(suffix))).toBe(false);
+    }
   });
 });
 

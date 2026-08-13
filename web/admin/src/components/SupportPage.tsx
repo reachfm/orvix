@@ -55,25 +55,25 @@ export default function SupportPage() {
 
   return (
     <div className="space-y-6">
-      <h2 className="text-xl font-semibold text-white">Support</h2>
+      <h2 className="text-xl font-semibold text-[var(--text-primary)]">Support</h2>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <div className="bg-[#1A1D24] border border-[#262A33] rounded-lg p-6">
+        <div className="bg-[var(--bg-elevated)] border border-[var(--bg-subtle)] rounded-lg p-6">
           <div className="flex items-center gap-3 mb-4">
-            <MessageSquare className="w-5 h-5 text-[#4F7CFF]" />
-            <h3 className="text-lg font-medium text-white">Contact Support</h3>
+            <MessageSquare className="w-5 h-5 text-[var(--accent)]" />
+            <h3 className="text-lg font-medium text-[var(--text-primary)]">Contact Support</h3>
           </div>
 
           {referenceId ? (
             <div className="text-center py-6">
-              <Check size={32} className="text-[#34D399] mx-auto mb-3" />
-              <p className="text-white font-medium">Request Submitted</p>
-              <p className="text-sm text-[#8B92A8] mt-1">
-                Reference ID: <span className="text-[#4F7CFF] font-mono">{referenceId}</span>
+              <Check size={32} className="text-[var(--success)] mx-auto mb-3" />
+              <p className="text-[var(--text-primary)] font-medium">Request Submitted</p>
+              <p className="text-sm text-[var(--text-secondary)] mt-1">
+                Reference ID: <span className="text-[var(--accent)] font-mono">{referenceId}</span>
               </p>
-              <p className="text-sm text-[#8B92A8] mt-1">We'll get back to you soon.</p>
+              <p className="text-sm text-[var(--text-secondary)] mt-1">We'll get back to you soon.</p>
               <button onClick={handleReset}
-                className="mt-4 text-sm text-[#4F7CFF] hover:underline">Send another request</button>
+                className="mt-4 text-sm text-[var(--accent)] hover:underline">Send another request</button>
             </div>
           ) : (
             <form
@@ -81,27 +81,27 @@ export default function SupportPage() {
               className="space-y-3"
             >
               <div>
-                <label className="block text-sm text-gray-400 mb-1">Category</label>
+                <label className="block text-sm text-[var(--text-secondary)] mb-1">Category</label>
                 <select value={category} onChange={(e) => setCategory(e.target.value)}
-                  className="w-full px-3 py-2 bg-[#0C0E12] border border-[#2A2F3E] rounded text-white text-sm">
+                  className="w-full px-3 py-2 bg-[var(--bg-base)] border border-[var(--border)] rounded text-[var(--text-primary)] text-sm">
                   {categories.map((c) => (
                     <option key={c.value} value={c.value}>{c.label}</option>
                   ))}
                 </select>
               </div>
               <div>
-                <label className="block text-sm text-gray-400 mb-1">Subject</label>
+                <label className="block text-sm text-[var(--text-secondary)] mb-1">Subject</label>
                 <input required value={subject} onChange={(e) => setSubject(e.target.value)}
-                  className="w-full px-3 py-2 bg-[#0C0E12] border border-[#2A2F3E] rounded text-white text-sm" />
+                  className="w-full px-3 py-2 bg-[var(--bg-base)] border border-[var(--border)] rounded text-[var(--text-primary)] text-sm" />
               </div>
               <div>
-                <label className="block text-sm text-gray-400 mb-1">Message</label>
+                <label className="block text-sm text-[var(--text-secondary)] mb-1">Message</label>
                 <textarea required rows={4} value={message} onChange={(e) => setMessage(e.target.value)}
-                  className="w-full px-3 py-2 bg-[#0C0E12] border border-[#2A2F3E] rounded text-white text-sm resize-none" />
+                  className="w-full px-3 py-2 bg-[var(--bg-base)] border border-[var(--border)] rounded text-[var(--text-primary)] text-sm resize-none" />
               </div>
               <button type="submit"
                 disabled={submitRequest.isPending}
-                className="flex items-center gap-2 bg-[#4F7CFF] text-white rounded px-4 py-2 text-sm hover:bg-[#3D6AE8] disabled:opacity-50">
+                className="flex items-center gap-2 bg-[var(--accent)] text-white rounded px-4 py-2 text-sm hover:bg-[var(--accent-hover)] disabled:opacity-50">
                 {submitRequest.isPending ? (
                   <><Loader2 className="w-4 h-4 animate-spin" /> Submitting...</>
                 ) : (
@@ -109,55 +109,55 @@ export default function SupportPage() {
                 )}
               </button>
               {submitRequest.error && (
-                <p className="text-[#F87171] text-sm">{(submitRequest.error as any)?.message || "Failed to submit request"}</p>
+                <p className="text-[var(--danger)] text-sm">{(submitRequest.error as any)?.message || "Failed to submit request"}</p>
               )}
             </form>
           )}
         </div>
 
         <div className="space-y-6">
-          <div className="bg-[#1A1D24] border border-[#262A33] rounded-lg p-6">
+          <div className="bg-[var(--bg-elevated)] border border-[var(--bg-subtle)] rounded-lg p-6">
             <div className="flex items-center gap-3 mb-4">
-              <BookOpen className="w-5 h-5 text-[#4F7CFF]" />
-              <h3 className="text-lg font-medium text-white">Documentation</h3>
+              <BookOpen className="w-5 h-5 text-[var(--accent)]" />
+              <h3 className="text-lg font-medium text-[var(--text-primary)]">Documentation</h3>
             </div>
             <div className="space-y-2">
               {docs.map((doc) => (
                 <a key={doc.label} href={doc.url} target="_blank" rel="noopener noreferrer"
-                  className="flex items-center justify-between p-3 bg-[#0C0E12] rounded hover:bg-[#1A1E26] transition-colors group">
-                  <span className="text-sm text-[#E8EAF0]">{doc.label}</span>
-                  <ExternalLink size={14} className="text-[#555D73] group-hover:text-[#4F7CFF] transition-colors" />
+                  className="flex items-center justify-between p-3 bg-[var(--bg-base)] rounded hover:bg-[var(--bg-elevated)] transition-colors group">
+                  <span className="text-sm text-[var(--text-primary)]">{doc.label}</span>
+                  <ExternalLink size={14} className="text-[var(--text-muted)] group-hover:text-[var(--accent)] transition-colors" />
                 </a>
               ))}
             </div>
           </div>
 
-          <div className="bg-[#1A1D24] border border-[#262A33] rounded-lg p-6">
+          <div className="bg-[var(--bg-elevated)] border border-[var(--bg-subtle)] rounded-lg p-6">
             <div className="flex items-center gap-3 mb-4">
-              <HeartPulse className="w-5 h-5 text-[#4F7CFF]" />
-              <h3 className="text-lg font-medium text-white">System Status</h3>
+              <HeartPulse className="w-5 h-5 text-[var(--accent)]" />
+              <h3 className="text-lg font-medium text-[var(--text-primary)]">System Status</h3>
             </div>
-            <p className="text-sm text-[#8B92A8]">System status information is not available.</p>
-            <p className="text-xs text-[#555D73] mt-1">
+            <p className="text-sm text-[var(--text-secondary)]">System status information is not available.</p>
+            <p className="text-xs text-[var(--text-muted)] mt-1">
               If you experience issues, please submit a support request using the form.
             </p>
           </div>
         </div>
       </div>
 
-      <div className="bg-[#1A1D24] border border-[#262A33] rounded-lg p-6">
-        <h3 className="text-lg font-medium text-white mb-4">Frequently Asked Questions</h3>
+      <div className="bg-[var(--bg-elevated)] border border-[var(--bg-subtle)] rounded-lg p-6">
+        <h3 className="text-lg font-medium text-[var(--text-primary)] mb-4">Frequently Asked Questions</h3>
         <div className="space-y-2">
           {faqItems.map((item, idx) => (
-            <div key={idx} className="bg-[#0C0E12] rounded-lg overflow-hidden">
+            <div key={idx} className="bg-[var(--bg-base)] rounded-lg overflow-hidden">
               <button onClick={() => setExpanded(expanded === idx ? null : idx)}
-                className="w-full flex items-center justify-between p-4 text-left hover:bg-[#1A1E26] transition-colors">
-                <span className="text-sm text-[#E8EAF0]">{item.q}</span>
-                {expanded === idx ? <ChevronDown size={16} className="text-[#8B92A8]" /> : <ChevronRight size={16} className="text-[#8B92A8]" />}
+                className="w-full flex items-center justify-between p-4 text-left hover:bg-[var(--bg-elevated)] transition-colors">
+                <span className="text-sm text-[var(--text-primary)]">{item.q}</span>
+                {expanded === idx ? <ChevronDown size={16} className="text-[var(--text-secondary)]" /> : <ChevronRight size={16} className="text-[var(--text-secondary)]" />}
               </button>
               {expanded === idx && (
                 <div className="px-4 pb-4">
-                  <p className="text-sm text-[#8B92A8]">{item.a}</p>
+                  <p className="text-sm text-[var(--text-secondary)]">{item.a}</p>
                 </div>
               )}
             </div>

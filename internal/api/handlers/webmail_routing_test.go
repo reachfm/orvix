@@ -296,6 +296,10 @@ func webmailSend(t *testing.T, e *webmailRoutingEnv, token, to, subject, body st
 	req := httptest.NewRequest("POST", "/api/v1/webmail/send", strings.NewReader(string(buf)))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+token)
+	// H-1: /webmail/send is a mutation and now requires CSRF material.
+	csrfTok := mintWebmailCSRF(t, e.router, "")
+	req.Header.Set("Cookie", "csrf_token="+csrfTok)
+	req.Header.Set("X-CSRF-Token", csrfTok)
 	resp, err := e.router.App().Test(req, fiber.TestConfig{Timeout: 0})
 	if err != nil {
 		t.Fatalf("send: %v", err)

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/mail"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -28,24 +29,40 @@ import (
 	"github.com/orvix/orvix/internal/audit"
 	"github.com/orvix/orvix/internal/auth"
 	"github.com/orvix/orvix/internal/billing"
+	"github.com/orvix/orvix/internal/capability"
 	"github.com/orvix/orvix/internal/config"
+	"github.com/orvix/orvix/internal/configtruth"
 	"github.com/orvix/orvix/internal/coremail"
+	"github.com/orvix/orvix/internal/coremail/delivery"
 	"github.com/orvix/orvix/internal/coremail/push"
 	"github.com/orvix/orvix/internal/coremail/queue"
 	"github.com/orvix/orvix/internal/coremail/storage"
 	"github.com/orvix/orvix/internal/customerdomain"
 	"github.com/orvix/orvix/internal/dbdialect"
 	"github.com/orvix/orvix/internal/dnsops"
+	"github.com/orvix/orvix/internal/incident"
 	"github.com/orvix/orvix/internal/license"
 	"github.com/orvix/orvix/internal/models"
 	"github.com/orvix/orvix/internal/modules"
 	"github.com/orvix/orvix/internal/observability"
+	platformbilling "github.com/orvix/orvix/internal/platform/billing"
+	"github.com/orvix/orvix/internal/platform/bulkprovision"
+	"github.com/orvix/orvix/internal/platform/cluster"
+	"github.com/orvix/orvix/internal/platform/deliverability"
+	"github.com/orvix/orvix/internal/platform/importer"
+	platformjobs "github.com/orvix/orvix/internal/platform/jobs"
+	"github.com/orvix/orvix/internal/platform/kernel"
+	"github.com/orvix/orvix/internal/platform/mailcontrol"
+	"github.com/orvix/orvix/internal/platform/relay"
+	"github.com/orvix/orvix/internal/platform/retention"
 	"github.com/orvix/orvix/internal/ruler"
 	"github.com/orvix/orvix/internal/runtime"
 	settingsbridge "github.com/orvix/orvix/internal/settings/bridge"
+	"github.com/orvix/orvix/internal/supportaccess"
 	"github.com/orvix/orvix/internal/tlsmgmt"
 	"github.com/orvix/orvix/internal/trustmgmt"
 	"github.com/orvix/orvix/internal/updater"
+	"github.com/orvix/orvix/internal/webhooks"
 	"github.com/orvix/orvix/internal/webmailmgmt"
 	"go.uber.org/zap"
 	"golang.org/x/crypto/argon2"
@@ -64,6 +81,12 @@ type Handler struct {
 	features    *license.FeatureFlags
 	security    *auth.SecurityMonitor
 	rateLimiter *auth.RedisRateLimiter
+	// authLimiter is the multi-dimensional authentication limiter (H-6).
+	// The credential endpoints mount it as middleware (router
+	// authThrottle/authThrottleIP); the handler only uses it to reset the
+	// account/pair budgets after a genuine login. nil means resets are
+	// skipped (never the case in the production router).
+	authLimiter *auth.AuthLimiter
 	auditStore  *audit.Store
 	webmailSvc  *webmailmgmt.Service
 
@@ -83,6 +106,22 @@ type Handler struct {
 	// parallel pipeline. Set via SetQueueEngine at router
 	// construction time.
 	queueEngine *queue.QueueEngine
+	// historyRepo is the immutable delivery-attempt history store
+	// (Milestone 8), set via SetAttemptHistoryRepo.
+	historyRepo delivery.AttemptHistoryRepository
+
+	// incidentSvc is lazily initialized by h.incidentService().
+	incidentSvc *incident.Service
+	// supportAccessSvc is lazily initialized by h.supportAccessService().
+	supportAccessSvc *supportaccess.Service
+	// webhookSvc is lazily initialized by h.webhookService().
+	webhookSvc *webhooks.Service
+	jobSvc     *platformjobs.Service
+	jobWorker  *platformjobs.Worker
+	// capabilitySvc is lazily initialized by h.capabilityService().
+	capabilitySvc *capability.Service
+	// configTruthSvc is lazily initialized by h.configTruthService().
+	configTruthSvc *configtruth.Service
 
 	// updateSvc is the process-wide Update Management v1 service.
 	// It is set once at router construction (see
@@ -92,6 +131,11 @@ type Handler struct {
 	// service per request would defeat the single-flight
 	// guarantee. This field is read by h.updateService().
 	updateSvc *updater.RuntimeService
+
+	// hasUpdater reports whether the update coordinator is installed.
+	hasUpdater bool
+	// hasDR reports whether disaster-recovery coordination is available.
+	hasDR bool
 
 	// updateSvcOnce ensures the schema is created exactly once
 	// for the lifetime of the Handler, even if updateService()
@@ -192,6 +236,11 @@ type Handler struct {
 	domainAdminSvc   *domainadminsvc.Service
 	platformAdminSvc *platformsvc.PlatformService
 	dashboardSvc     *dashboardsvc.DashboardService
+	bulkProvisionSvc *bulkprovision.Service
+	relaySvc         *relay.Service
+	clusterSvc       *cluster.Service
+	retentionSvc     *retention.Service
+	platformBillSvc  *platformbilling.Service
 
 	billingSvc   *billing.Service
 	usageSvc     *billing.UsageService
@@ -205,6 +254,17 @@ type Handler struct {
 	paymentProvider  billing.PaymentProvider
 	sendEnforcer     *billing.SendEnforcer
 	mailSender       MailSender
+
+	importSvc *importer.Service
+
+	mailControlSvc *mailcontrol.Service
+
+	deliverabilitySvc *deliverability.Service
+
+	// platformIdem is the idempotency store for platform control-plane
+	// mutations (relay create/update/rotate/test). Wired by the router;
+	// nil disables idempotent mutations with a 503.
+	platformIdem *kernel.IdempotencyStore
 }
 
 // MailSender sends transactional emails.
@@ -401,6 +461,96 @@ func (h *Handler) SetDomainAdminService(s *domainadminsvc.Service) {
 	h.domainAdminSvc = s
 }
 
+func (h *Handler) SetWebhookService(s *webhooks.Service) { h.webhookSvc = s }
+
+func (h *Handler) WebhookService() *webhooks.Service { return h.webhookSvc }
+
+func (h *Handler) CustomerDomainService() *customerdomain.Service { return h.customerDomainSvc }
+
+func (h *Handler) SetAutomationJobs(service *platformjobs.Service, worker *platformjobs.Worker) {
+	h.jobSvc = service
+	h.jobWorker = worker
+}
+
+func (h *Handler) StartAutomationWorker(ctx context.Context) {
+	if h.jobWorker == nil {
+		return
+	}
+	go func() {
+		if err := h.jobWorker.Run(ctx); err != nil && ctx.Err() == nil {
+			h.logger.Error("automation jobs worker stopped", zap.Error(err))
+		}
+	}()
+}
+
+func (h *Handler) StartWebhookWorker(ctx context.Context, interval time.Duration) {
+	if h.webhookSvc == nil {
+		return
+	}
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if err := h.webhookSvc.ProcessOutbox(ctx, 50); err != nil {
+					h.logger.Error("webhook outbox processing failed", zap.Error(err))
+				}
+				if err := h.webhookSvc.ProcessPendingDeliveries(ctx, 50); err != nil {
+					h.logger.Error("webhook delivery processing failed", zap.Error(err))
+				}
+			}
+		}
+	}()
+}
+
+// DomainAdminService returns the wired domain admin service, or nil if
+// it was never set. Used by router.go to wire the TLS service into it
+// after both have been constructed, without changing construction
+// order or NewService's signature.
+func (h *Handler) DomainAdminService() *domainadminsvc.Service {
+	return h.domainAdminSvc
+}
+
+// OrganizationAdminService returns the wired organization admin service.
+func (h *Handler) OrganizationAdminService() *orgadminsvc.Service {
+	return h.orgAdminSvc
+}
+
+// MailboxAdminService returns the wired mailbox admin service.
+func (h *Handler) MailboxAdminService() *mailboxadminsvc.Service {
+	return h.mailboxAdminSvc
+}
+
+// SetBulkProvisionService wires the bulk mailbox provisioning service.
+func (h *Handler) SetBulkProvisionService(s *bulkprovision.Service) {
+	h.bulkProvisionSvc = s
+}
+
+// SetRelayService wires the outbound relay control plane service.
+func (h *Handler) SetRelayService(s *relay.Service) {
+	h.relaySvc = s
+}
+
+// SetClusterService wires the cluster node registry service.
+func (h *Handler) SetClusterService(s *cluster.Service) {
+	h.clusterSvc = s
+}
+
+// SetRetentionService wires the retention/legal-hold/compliance service.
+func (h *Handler) SetRetentionService(s *retention.Service) {
+	h.retentionSvc = s
+}
+
+// SetPlatformBillingService wires the platform-level balances/manual
+// adjustments service (Milestone 15) — distinct from the pre-existing
+// internal/billing subscription/invoice package.
+func (h *Handler) SetPlatformBillingService(s *platformbilling.Service) {
+	h.platformBillSvc = s
+}
+
 // SetPlatformAdminService wires the platform admin service.
 func (h *Handler) SetPlatformAdminService(s *platformsvc.PlatformService) {
 	h.platformAdminSvc = s
@@ -517,7 +667,7 @@ func (h *Handler) issueLoginSession(c fiber.Ctx, userID uint, role auth.Role, em
 	if role == "" {
 		return fmt.Errorf("issue login session: role is required")
 	}
-	token, err := h.auth.GenerateOpaqueSession(userID, role, email)
+	token, err := h.auth.GenerateOpaqueSession(userID, role, email, c.IP(), c.Get("User-Agent"))
 	if err != nil {
 		return err
 	}
@@ -525,25 +675,12 @@ func (h *Handler) issueLoginSession(c fiber.Ctx, userID uint, role auth.Role, em
 	return nil
 }
 
-// recordLoginFailure records a failed login attempt via the security monitor.
-func (h *Handler) recordLoginFailure(c fiber.Ctx, email string) {
-	h.security.RecordFailedLogin(c.Context(), c.IP(), email)
-}
-
-// recordLoginSuccess records a successful login and resets the rate limiter.
-func (h *Handler) recordLoginSuccess(c fiber.Ctx) {
-	h.security.RecordSuccessfulLogin(c.IP())
-	if h.rateLimiter != nil {
-		h.rateLimiter.ResetLoginLimit(c.IP())
-	}
-}
-
 // LoginProtectionStatus returns the current state of login protection.
 func (h *Handler) LoginProtectionStatus(c fiber.Ctx) error {
 	status := fiber.Map{
 		"enabled":         h.trustService != nil,
 		"rate_limiter":    "active",
-		"rate_limit_desc": "100 req/min per IP, 5 login attempts per 15 min per IP",
+		"rate_limit_desc": "IP 20, account 5, pair 5 attempts per 15 min; account lockout after 5 failed logins within 1 hour",
 		"lockout_count":   0,
 		"persistence":     h.trustPersistence,
 		"persistence_ok":  h.trustPersistenceOK,
@@ -577,6 +714,15 @@ func (h *Handler) ClearLockout(c fiber.Ctx) error {
 		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "trust engine not available"})
 	}
 	key := c.Params("key")
+	// Fiber v3 does not decode path parameters. Trust keys legitimately
+	// contain characters that browsers percent-encode ("auth:combo:ip|acct"
+	// carries a pipe), so the raw segment arrives as "ip%7Cacct" and would
+	// never match. Unescape before lookup; a malformed escape cannot clear
+	// anything (an unescape failure keeps the raw value, which then simply
+	// never matches — the 404 path).
+	if decoded, err := url.PathUnescape(key); err == nil {
+		key = decoded
+	}
 	if key == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "lockout key is required"})
 	}
@@ -633,7 +779,7 @@ func (h *Handler) Login(c fiber.Ctx) error {
 	err = sqlDB.QueryRow("SELECT id, password_hash, role, COALESCE(mfa_enabled, "+h.dialect.FalseLiteral()+") FROM users WHERE email = "+h.dialect.Placeholder(1), loginEmail).Scan(&userID, &passwordHash, &userRole, &mfaEnabled)
 	if err != nil {
 		h.logger.Warn("user not found during login", zap.String("email", loginEmail), zap.Error(err))
-		h.security.RecordFailedLogin(c.Context(), c.IP(), loginEmail)
+		h.recordLoginFailure(c, loginEmail)
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid credentials"})
 	}
 
@@ -641,11 +787,20 @@ func (h *Handler) Login(c fiber.Ctx) error {
 		zap.Uint("user_id", userID),
 		zap.String("role", userRole))
 
+	// H-6: reject locked-out attempts BEFORE verifying the password, with
+	// one real verify spent on the way so the locked path is
+	// timing-indistinguishable from a wrong password. The generic 401 keeps
+	// the endpoint from being an oracle for lockout state.
+	if h.denyIfLockedOut(c, loginEmail, passwordHash) {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid credentials"})
+	}
+
 	result := auth.VerifyPasswordWithRehash(req.Password, passwordHash)
 	if !result.Valid {
 		h.logger.Warn("password verification failed",
 			zap.String("email", loginEmail),
 			zap.Uint("user_id", userID))
+		h.recordLoginFailure(c, loginEmail)
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid credentials"})
 	}
 
@@ -665,11 +820,13 @@ func (h *Handler) Login(c fiber.Ctx) error {
 		}
 	}
 
-	h.security.RecordSuccessfulLogin(c.IP())
-
-	if h.rateLimiter != nil {
-		h.rateLimiter.ResetLoginLimit(c.IP())
-	}
+	// A genuine password success clears the lockout state and the
+	// account/pair budgets (IP budget deliberately preserved — see
+	// recordLoginSuccess). This runs even when MFA is enabled next: the
+	// password proof is the credential, and MFA verification failures are
+	// bounded per-challenge, so the account must not keep accumulating
+	// failures from a flow it already passed.
+	h.recordLoginSuccess(c, loginEmail)
 
 	// Validate the current user authorization snapshot BEFORE issuing any
 	// MFA challenge or token. A malformed role, wrong tenant binding,
@@ -685,9 +842,21 @@ func (h *Handler) Login(c fiber.Ctx) error {
 	// Instead return an MFA challenge token that can only be exchanged at
 	// the /auth/mfa/verify endpoint.
 	if mfaEnabled {
-		challengeToken, err := h.auth.GenerateMFAChallengeToken(userID)
+		challengeToken, jti, err := h.auth.GenerateMFAChallengeTokenWithID(userID)
 		if err != nil {
 			h.logger.Error("failed to generate MFA challenge token", zap.Error(err))
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "authentication failed"})
+		}
+		// H-6: record the challenge so verification attempts can be bounded
+		// and the challenge made single-use. Failing to record it must NOT
+		// hand out an unbounded challenge — fail closed.
+		store, serr := h.mfaChallengeStore()
+		if serr != nil {
+			h.logger.Error("mfa challenge store unavailable", zap.Error(serr))
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "authentication failed"})
+		}
+		if err := store.Issue(c.Context(), jti, userID, auth.MFAChallengeTTL); err != nil {
+			h.logger.Error("failed to record MFA challenge", zap.Error(err))
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "authentication failed"})
 		}
 		h.logger.Info("MFA challenge issued", zap.Uint("user_id", userID))
@@ -716,7 +885,7 @@ func (h *Handler) Login(c fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "authentication failed"})
 	}
 
-	refreshToken, expiresAt, err := h.auth.GenerateRefreshToken(userID, accessJTI)
+	refreshToken, expiresAt, err := h.auth.GenerateRefreshToken(userID, accessJTI, c.IP(), c.Get("User-Agent"))
 	if err != nil {
 		h.logger.Error("failed to generate refresh token", zap.Error(err))
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "authentication failed"})
@@ -728,14 +897,24 @@ func (h *Handler) Login(c fiber.Ctx) error {
 		Expires:  time.Now().Add(15 * time.Minute),
 		HTTPOnly: true,
 		Secure:   true,
-		// None + Domain=cfg.Auth.CookieDomain lets the
-		// browser send this cookie to admin.<parent> AND
-		// webmail.<parent> (single sign-on across
-		// subdomains). The installer writes a non-empty
-		// CookieDomain for production; in dev / docker the
-		// field is empty and the cookie is scoped to the
+		// Domain=cfg.Auth.CookieDomain is what lets the browser
+		// send this cookie to admin.<parent> AND webmail.<parent>
+		// (single sign-on across subdomains). The installer writes
+		// a non-empty CookieDomain for production; in dev / docker
+		// the field is empty and the cookie is scoped to the
 		// response Host.
-		SameSite: "None",
+		//
+		// H-1: SameSite is Lax, NOT None. SameSite is evaluated
+		// against the registrable domain (eTLD+1), so
+		// admin.<parent> and webmail.<parent> are already SAME-site
+		// — cross-subdomain SSO never needed None. None also
+		// attached this cookie to genuinely cross-SITE requests,
+		// which is exactly what made every webmail mutation
+		// forgeable from an attacker page. Lax preserves SSO while
+		// withholding the cookie from cross-site sub-resource
+		// requests and cross-site form POSTs. CSRF middleware on
+		// every mutation remains the primary, independent defence.
+		SameSite: "Lax",
 		Path:     "/",
 		Domain:   h.cfg.Auth.CookieDomain,
 	})
@@ -746,7 +925,7 @@ func (h *Handler) Login(c fiber.Ctx) error {
 		Expires:  expiresAt,
 		HTTPOnly: true,
 		Secure:   true,
-		SameSite: "None",
+		SameSite: "Lax",
 		Path:     "/api/v1/auth/refresh",
 		Domain:   h.cfg.Auth.CookieDomain,
 	})
@@ -778,7 +957,7 @@ func (h *Handler) Refresh(c fiber.Ctx) error {
 		Expires:  time.Now().Add(15 * time.Minute),
 		HTTPOnly: true,
 		Secure:   true,
-		SameSite: "None",
+		SameSite: "Lax",
 		Path:     "/",
 		Domain:   h.cfg.Auth.CookieDomain,
 	})
@@ -789,7 +968,7 @@ func (h *Handler) Refresh(c fiber.Ctx) error {
 		Expires:  expiresAt,
 		HTTPOnly: true,
 		Secure:   true,
-		SameSite: "None",
+		SameSite: "Lax",
 		Path:     "/api/v1/auth/refresh",
 		Domain:   h.cfg.Auth.CookieDomain,
 	})
@@ -811,7 +990,7 @@ func (h *Handler) clearAuthCookies(c fiber.Ctx) {
 		Expires:  expiry,
 		HTTPOnly: true,
 		Secure:   true,
-		SameSite: "None",
+		SameSite: "Lax",
 		Path:     "/",
 		Domain:   h.cfg.Auth.CookieDomain,
 	})
@@ -821,7 +1000,7 @@ func (h *Handler) clearAuthCookies(c fiber.Ctx) {
 		Expires:  expiry,
 		HTTPOnly: true,
 		Secure:   true,
-		SameSite: "None",
+		SameSite: "Lax",
 		Path:     "/api/v1/auth/refresh",
 		Domain:   h.cfg.Auth.CookieDomain,
 	})
@@ -2742,6 +2921,9 @@ func (h *Handler) DeleteUser(c fiber.Ctx) error {
 
 // ListQueue returns the mail queue with safe fields only.
 func (h *Handler) ListQueue(c fiber.Ctx) error {
+	if !h.cfg.CoreMail.Enabled {
+		return coreMailUnavailableResponse(c)
+	}
 	type queueEntry struct {
 		ID          uint   `json:"id"`
 		MessageID   string `json:"message_id"`
@@ -2774,7 +2956,11 @@ func (h *Handler) ListQueue(c fiber.Ctx) error {
 	var raw []rawQueue
 	rows, err := sqlDB.Query("SELECT id, message_id, from_address, to_address, status, attempt_count, next_attempt_at, created_at, updated_at FROM coremail_queue WHERE deleted_at IS NULL ORDER BY id DESC LIMIT 200")
 	if err != nil {
-		return c.JSON([]queueEntry{})
+		// CoreMail is enabled (checked above) but the query still failed —
+		// a genuine server/migration inconsistency, not an empty queue.
+		// Log the real cause server-side only; never leak SQL/table text.
+		h.logger.Error("queue list query failed", zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "queue unavailable"})
 	}
 	defer rows.Close()
 	for rows.Next() {
@@ -2898,12 +3084,16 @@ func (h *Handler) RetryQueue(c fiber.Ctx) error {
 // AdminQueueSummary returns aggregated queue metrics for the admin dashboard.
 // Admin-only by route registration. Read-only.
 func (h *Handler) AdminQueueSummary(c fiber.Ctx) error {
+	if !h.cfg.CoreMail.Enabled {
+		return coreMailUnavailableResponse(c)
+	}
 	if h.queueEngine == nil || h.queueEngine.Repo == nil {
-		return c.JSON(fiber.Map{"error": "queue engine not available", "metrics": nil})
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "queue metrics unavailable"})
 	}
 	metrics, err := h.queueEngine.Repo.Metrics(c.Context(), nil, nil)
 	if err != nil {
-		return c.JSON(fiber.Map{"error": "metrics unavailable", "metrics": nil})
+		h.logger.Error("queue metrics query failed", zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "queue metrics unavailable"})
 	}
 	return c.JSON(fiber.Map{"metrics": metrics})
 }
@@ -3060,17 +3250,25 @@ func (h *Handler) ListFirewallRules(c fiber.Ctx) error {
 	return c.JSON(rules)
 }
 
-// CreateFirewallRule creates a new firewall rule.
+// CreateFirewallRule serves POST /api/v1/firewall/rules.
+//
+// The legacy internal/firewall rule engine this table once fed is not
+// wired into any production mail path: Module.Start never calls
+// LoadRules, and no SMTP/CoreMail code consumes RuleEngine — CoreMail
+// enforces policy through internal/ruler instead. Accepting writes
+// here would silently persist rules an operator reasonably believes
+// are protecting live mail traffic while nothing enforces them. This
+// endpoint fails closed rather than perform that mass-assignment
+// write (raw JSON bound directly into models.FirewallRule, no action
+// allowlist, no condition/priority validation) against a table that
+// isn't consulted at delivery time. Wiring a real, validated firewall
+// policy engine into the mail path is out of scope for this PR and
+// belongs in its own bounded backend change.
 func (h *Handler) CreateFirewallRule(c fiber.Ctx) error {
-	var rule models.FirewallRule
-	if err := c.Bind().JSON(&rule); err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid rule"})
-	}
-	if err := h.db.Create(&rule).Error; err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to create rule"})
-	}
-	h.writeAuditLog(c, "firewall.rule.create", fmt.Sprintf("rule:%s", rule.Name))
-	return c.Status(fiber.StatusCreated).JSON(rule)
+	return c.Status(fiber.StatusGone).JSON(fiber.Map{
+		"error": "firewall rule engine is not operational in the current CoreMail runtime",
+		"code":  "FIREWALL_RULE_ENGINE_NOT_OPERATIONAL",
+	})
 }
 
 // ListFirewallLogs returns firewall logs.
@@ -3080,23 +3278,42 @@ func (h *Handler) ListFirewallLogs(c fiber.Ctx) error {
 	return c.JSON(logs)
 }
 
-// ListModules returns registered modules.
+// moduleHealthReporter is an optional capability a registered module
+// may implement to report its OWN real runtime health. ListModules
+// checks for it via a type assertion rather than assuming every
+// module is healthy — a module that doesn't implement it reports
+// "unknown", never a fabricated "active".
+type moduleHealthReporter interface {
+	HealthStatus() (status, message string)
+}
+
+// ListModules returns registered modules with status DERIVED from
+// each module's actual runtime health when available, closing the
+// "module status must be derived from actual runtime/module state,
+// not a static always-active list" defect: this previously hardcoded
+// status="active" for every module regardless of whether it was
+// actually healthy, degraded, or had failed to initialize.
 func (h *Handler) ListModules(c fiber.Ctx) error {
 	type moduleInfo struct {
 		ID      string `json:"id"`
 		Version string `json:"version"`
 		Status  string `json:"status"`
+		Message string `json:"message,omitempty"`
 	}
-	var modules []moduleInfo
+	var mods []moduleInfo
 	for _, m := range h.registry.All() {
-		status := "active"
-		modules = append(modules, moduleInfo{
+		status, message := "unknown", ""
+		if hr, ok := m.(moduleHealthReporter); ok {
+			status, message = hr.HealthStatus()
+		}
+		mods = append(mods, moduleInfo{
 			ID:      m.ID(),
 			Version: m.Version(),
 			Status:  status,
+			Message: message,
 		})
 	}
-	return c.JSON(modules)
+	return c.JSON(mods)
 }
 
 // GetLicense returns the current license status.

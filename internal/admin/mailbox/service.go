@@ -43,6 +43,28 @@ func (s *Service) ListMailboxes(ctx context.Context, filter MailboxFilter) ([]Ad
 	return s.repo.List(ctx, filter)
 }
 
+// ExistsByEmail is a read-only existence check exposed for dry-run
+// validation callers (e.g. internal/platform/bulkprovision) that must
+// detect a duplicate without performing or preparing any mutation.
+func (s *Service) ExistsByEmail(ctx context.Context, email string) (bool, error) {
+	return s.repo.ExistsByEmail(ctx, email, 0)
+}
+
+// ResolveDomainAllocation is a read-only passthrough exposed for
+// dry-run capacity estimation. lock=false: callers using this for an
+// estimate must not take a row lock outside of CreateMailbox's own
+// authoritative, transactional check — this is advisory only.
+func (s *Service) ResolveDomainAllocation(ctx context.Context, domainName string, tenantID uint) (*DomainAllocation, error) {
+	return s.repo.ResolveDomainAllocation(ctx, domainName, tenantID, false)
+}
+
+// CountActiveByDomain is a read-only passthrough for advisory capacity
+// estimates (e.g. bulk-import dry-run). Not authoritative — see
+// ResolveDomainAllocation's doc comment.
+func (s *Service) CountActiveByDomain(ctx context.Context, domainID, tenantID uint) (int, error) {
+	return s.repo.CountActiveByDomain(ctx, domainID, tenantID)
+}
+
 func (s *Service) GetMailbox(ctx context.Context, id, tenantID uint) (*AdminMailbox, error) {
 	m, err := s.repo.GetByID(ctx, id, tenantID)
 	if err != nil {
@@ -345,12 +367,16 @@ func (s *Service) mutateWithAudit(ctx context.Context, entry *audit.ExtendedEntr
 func isValidStatusTransition(from, to AdminMailboxStatus) bool {
 	switch from {
 	case AdminMailboxActive:
-		return to == AdminMailboxDisabled || to == AdminMailboxSuspended
+		return to == AdminMailboxDisabled || to == AdminMailboxSuspended || to == AdminMailboxDeleted
 	case AdminMailboxDisabled:
-		return to == AdminMailboxActive
+		return to == AdminMailboxActive || to == AdminMailboxDeleted
 	case AdminMailboxSuspended:
-		return to == AdminMailboxActive
+		return to == AdminMailboxActive || to == AdminMailboxDeleted
 	case AdminMailboxDeleted:
+		// Deleted is reached only via SetStatus/SoftDeleteMailbox and
+		// left only via RestoreMailbox (a dedicated path with its own
+		// email-conflict re-check) — never via a plain status
+		// transition, which would skip that check.
 		return false
 	}
 	return false

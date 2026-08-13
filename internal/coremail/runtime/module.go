@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -27,6 +28,11 @@ import (
 	"github.com/orvix/orvix/internal/licensing"
 	"github.com/orvix/orvix/internal/licensingauthority"
 	"github.com/orvix/orvix/internal/observability"
+	"github.com/orvix/orvix/internal/platform/cluster"
+	"github.com/orvix/orvix/internal/platform/deliverability"
+	"github.com/orvix/orvix/internal/platform/kernel"
+	"github.com/orvix/orvix/internal/platform/relay"
+	"github.com/orvix/orvix/internal/platform/security"
 	"github.com/orvix/orvix/internal/policy"
 	"github.com/orvix/orvix/internal/ruler"
 	orvixruntime "github.com/orvix/orvix/internal/runtime"
@@ -72,6 +78,12 @@ type Module struct {
 	pop3sServer       *pop3.Server
 	jmapServer        *jmap.Server
 	workers           []*delivery.DeliveryWorker
+	// clusterSvc is the Milestone 10 node registry/placement/lease
+	// service. nil if schema init failed (never blocks startup).
+	clusterSvc *cluster.Service
+	// securitySvc is the Milestone 12 normalized security-event
+	// recorder. nil if schema init failed (never blocks startup).
+	securitySvc *security.Service
 
 	// pushNotifier is the Web Push (RFC 8030 / RFC 8291) dispatcher.
 	// It is constructed in initCore from cfg.CoreMail.VAPIDPublicKey
@@ -154,7 +166,11 @@ func (m *Module) initCore(cfg *config.Config, sqlDB *sql.DB) error {
 	if err != nil {
 		return fmt.Errorf("coremail mailstore: %w", err)
 	}
-	m.queue = queue.NewQueueEngine(sqlDB)
+	queueEngine, queueErr := queue.NewQueueEngineChecked(sqlDB)
+	if queueErr != nil {
+		return fmt.Errorf("initialize queue repository: %w", queueErr)
+	}
+	m.queue = queueEngine
 	m.obs = observability.NewObservability(1000, 5000)
 
 	// Initialize licensing service (retained for SaaS quota enforcement).
@@ -329,6 +345,7 @@ func (m *Module) initCore(cfg *config.Config, sqlDB *sql.DB) error {
 		return err == nil, err
 	}
 	m.smtpServer.SetLocalDomainChecker(identity.IsLocalDomain)
+	m.smtpServer.SetMailAccessModeChecker(identity.MailAccessMode)
 	m.smtpServer.Observability = m.obs
 
 	// ── Submission SMTP (port 587, STARTTLS) ───────────────
@@ -364,6 +381,7 @@ func (m *Module) initCore(cfg *config.Config, sqlDB *sql.DB) error {
 			m.submissionServer = smtp.NewServer(subCfg, subHandler, receiver)
 			m.submissionServer.TLSConfig = tlsCfg
 			m.submissionServer.SetLocalDomainChecker(identity.IsLocalDomain)
+			m.submissionServer.SetMailAccessModeChecker(identity.MailAccessMode)
 			m.submissionServer.SenderValidator = identity.ResolveSender
 			m.submissionServer.Observability = m.obs
 		}
@@ -459,6 +477,186 @@ func (m *Module) initCore(cfg *config.Config, sqlDB *sql.DB) error {
 		}
 		transportCfg.TLSPolicy = parsed
 	}
+	// Outbound relay control plane (Milestone 7) — optional. A schema
+	// init failure disables relay routing for this run; every worker
+	// simply keeps its RelaySelector nil and delivers direct-to-MX
+	// exactly as before this integration existed.
+	//
+	// F9: the runtime relay service is wired with the canonical
+	// transactional outbox, so circuit transitions and other meaningful
+	// relay state changes are published as operational events. It was
+	// constructed with `relay.NewService(relayRepo, nil, nil)`, so
+	// RecordAttemptResult skipped outbox enqueue entirely and a tripped
+	// circuit produced no event for operators. The outbox is a single
+	// canonical instance (same dialect detection as the webhook outbox),
+	// and a failure to initialize it degrades relay routing explicitly
+	// rather than running silently without events.
+	relayDialect, rderr := dbdialect.Detect(sqlDB)
+	if rderr != nil {
+		if m.logger != nil {
+			m.logger.Warn("relay database dialect detection failed; outbound relay disabled", zap.Error(rderr))
+		}
+	}
+	relayRepo, relayRepoErr := relay.NewRepositoryChecked(sqlDB)
+	var relayAdapter *relay.DeliveryAdapter
+	if relayRepoErr != nil {
+		if m.logger != nil {
+			m.logger.Warn("relay repository init failed; outbound relay disabled", zap.Error(relayRepoErr))
+		}
+	} else if err := relayRepo.EnsureSchema(context.Background()); err != nil {
+		if m.logger != nil {
+			m.logger.Warn("relay control plane schema init failed; outbound relay disabled", zap.Error(err))
+		}
+	} else if relayDialect != nil {
+		relayOutbox := kernel.NewOutboxRepository(relayDialect)
+		if oerr := relayOutbox.EnsureSchema(context.Background(), sqlDB); oerr != nil {
+			if m.logger != nil {
+				m.logger.Warn("relay outbox init failed; outbound relay disabled", zap.Error(oerr))
+			}
+		} else {
+			relayAdapter = relay.NewDeliveryAdapter(relay.NewService(relayRepo, nil, relayOutbox))
+		}
+	}
+	// Sending-identity resolution for relay routing.
+	//
+	// Three defects are closed here:
+	//
+	//  1. The statement used a raw `?` placeholder. On PostgreSQL that is a
+	//     syntax error, the error was discarded by `_ = row.Scan(...)`, and
+	//     every outbound message therefore resolved to tenant 0 with the
+	//     default mail-access mode — so tenant-scoped relay routing and the
+	//     internal-only policy check were both inert on the dialect that
+	//     ships in production. It now goes through dbdialect.
+	//  2. The sending domain's row id was never resolved at all, so
+	//     domain-scoped routing rules could not match. It is selected here and
+	//     handed to the worker via DomainIDForRelay.
+	//  3. (F3) Every identity-lookup failure collapsed to tenant 0 +
+	//     "internal_external" — a permissive anonymous identity — and the
+	//     query ran under unbounded context.Background(). Identity failures
+	//     are now typed and the worker defers before any network I/O.
+	//
+	// senderIdentityQueryTimeout bounds a single identity lookup well below
+	// the queue lease (300s), so a hung or locked database cannot pin a
+	// worker goroutine indefinitely.
+	const senderIdentityQueryTimeout = 5 * time.Second
+	senderIdentityQuery := relayDialect.Rewrite(
+		`SELECT m.tenant_id, m.domain_id, COALESCE(d.mail_access_mode, 'internal_external')
+		 FROM coremail_mailboxes m JOIN coremail_domains d ON d.id = m.domain_id
+		 WHERE m.email = ?`)
+	type senderIdentity struct {
+		tenantID uint
+		domainID uint
+		mode     string
+	}
+	// senderIdentityError signals that a sender identity could not be
+	// established for a reason other than "the address is genuinely not
+	// a local mailbox" (which is sql.ErrNoRows). The delivery worker
+	// treats it as fail-closed: defer, never fabricate an anonymous
+	// permissive identity.
+	var errSenderIdentityUnavailable = errors.New("sender identity unavailable")
+
+	// resolveSenderIdentity FAILS CLOSED (F3): the previous form returned
+	// {tenantID: 0, mode: "internal_external"} on EVERY error, so a
+	// transient database failure silently disabled tenant-scoped relay
+	// rules and the internal-only policy — and the query ran under
+	// unbounded context.Background(). Distinctions:
+	//   - row found: identity (tenant, domain, mode) as stored;
+	//   - sql.ErrNoRows: the sender is genuinely not a local mailbox;
+	//     the caller decides policy from the enqueue origin, never from
+	//     a fabricated identity;
+	//   - any other error (database unavailable, timeout, malformed
+	//     row): a typed identity-unavailable error → the worker defers
+	//     BEFORE any direct or relay network I/O.
+	// The query runs under the delivery operation's context with a hard
+	// timeout well below the queue lease, so a hung database cannot pin
+	// a worker indefinitely.
+	resolveSenderIdentity := func(ctx context.Context, entry *queue.QueueEntry) (senderIdentity, error) {
+		qctx, cancel := context.WithTimeout(ctx, senderIdentityQueryTimeout)
+		defer cancel()
+		id := senderIdentity{}
+		row := sqlDB.QueryRowContext(qctx, senderIdentityQuery, entry.FromAddress)
+		if err := row.Scan(&id.tenantID, &id.domainID, &id.mode); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				// Genuinely absent sender: not an infrastructure failure.
+				// The caller uses the enqueue origin; we never fabricate a
+				// tenant or a permissive mode from nothing.
+				return senderIdentity{}, sql.ErrNoRows
+			}
+			if m.logger != nil {
+				m.logger.Warn("relay sender identity lookup failed", zap.Error(err))
+			}
+			return senderIdentity{}, errSenderIdentityUnavailable
+		}
+		return id, nil
+	}
+	tenantForRelay := func(ctx context.Context, entry *queue.QueueEntry) (uint, string, error) {
+		id, err := resolveSenderIdentity(ctx, entry)
+		if err != nil {
+			return 0, "", err
+		}
+		return id.tenantID, id.mode, nil
+	}
+	domainForRelay := func(ctx context.Context, entry *queue.QueueEntry) (uint, error) {
+		id, err := resolveSenderIdentity(ctx, entry)
+		if err != nil {
+			return 0, err
+		}
+		return id.domainID, nil
+	}
+
+	// Deliverability control plane (Milestone 9) — optional, same
+	// fail-safe-to-disabled pattern as the relay control plane above.
+	deliverabilityRepo := deliverability.NewRepository(sqlDB)
+	var deliverabilityAdapter *deliverability.DeliveryAdapter
+	if err := deliverabilityRepo.EnsureSchema(context.Background()); err != nil {
+		if m.logger != nil {
+			m.logger.Warn("deliverability schema init failed; suppression enforcement and reputation signals disabled", zap.Error(err))
+		}
+	} else {
+		deliverabilityAdapter = deliverability.NewDeliveryAdapter(deliverability.NewService(deliverabilityRepo, audit.NewExtendedStore(sqlDB), nil, nil))
+	}
+
+	// Cluster control plane (Milestone 10) — a fresh/single-node
+	// install self-enrolls as its own sole node on first boot and
+	// simply heartbeats on every later boot; nothing about existing
+	// single-node behavior changes if the multi-node APIs are never
+	// used.
+	clusterRepo := cluster.NewRepository(sqlDB)
+	if err := clusterRepo.EnsureSchema(context.Background()); err != nil {
+		if m.logger != nil {
+			m.logger.Warn("cluster schema init failed; node registry disabled", zap.Error(err))
+		}
+	} else {
+		m.clusterSvc = cluster.NewService(clusterRepo, audit.NewExtendedStore(sqlDB), nil, nil)
+		selfID := cfg.CoreMail.Hostname
+		if selfID == "" {
+			selfID = "orvix-node"
+		}
+		alreadyEnrolled, _, err := m.clusterSvc.EnsureSelfNode(context.Background(), selfID, cluster.Node{
+			Role: "all-in-one", Capabilities: []string{"smtp", "delivery_worker", "imap", "pop3", "jmap"},
+		})
+		if err != nil && m.logger != nil {
+			m.logger.Warn("cluster self-enrollment failed", zap.Error(err))
+		} else if !alreadyEnrolled && m.logger != nil {
+			m.logger.Info("cluster node self-enrolled", zap.String("node_id", selfID))
+		}
+	}
+
+	// Security event normalization (Milestone 12) — the recording
+	// choke point for antivirus/antispam/ACL/auth events. Wired here
+	// so it's available to future producers; individual subsystems
+	// (internal/antivirus.Engine, internal/coremail/antispam.Engine,
+	// the ACL enforcement path) emitting INTO it is a follow-up
+	// integration slice, not fabricated here.
+	securityRepo := security.NewRepository(sqlDB)
+	if err := securityRepo.EnsureSchema(context.Background()); err != nil {
+		if m.logger != nil {
+			m.logger.Warn("security event schema init failed; normalized security events disabled", zap.Error(err))
+		}
+	} else {
+		m.securitySvc = security.NewService(securityRepo, nil)
+	}
+
 	m.workers = make([]*delivery.DeliveryWorker, 0, workerCount)
 	for i := 0; i < workerCount; i++ {
 		worker := delivery.NewDeliveryWorker(
@@ -471,6 +669,30 @@ func (m *Module) initCore(cfg *config.Config, sqlDB *sql.DB) error {
 		)
 		worker.Observability = m.obs
 		worker.PreferIPv4 = cfg.Outbound.PreferIPv4
+		if relayAdapter != nil {
+			worker.RelaySelector = relayAdapter
+			worker.TenantIDForRelay = tenantForRelay
+			worker.DomainIDForRelay = domainForRelay
+			// Bookkeeping failures after an already-completed SMTP
+			// transaction are surfaced, not swallowed: the mail was
+			// delivered, so this must not retry, but an operator needs to
+			// know the circuit breaker is not seeing real outcomes.
+			worker.RelayBookkeepingFailed = func(ctx context.Context, providerID uint, success bool, err error) {
+				if m.logger != nil {
+					m.logger.Warn("relay attempt bookkeeping failed",
+						zap.Uint("provider_id", providerID),
+						zap.Bool("delivery_succeeded", success),
+						zap.Error(err))
+				}
+			}
+		}
+		if deliverabilityAdapter != nil {
+			worker.SuppressionChecker = deliverabilityAdapter
+			worker.DeliverabilityRecorder = deliverabilityAdapter
+			if worker.TenantIDForRelay == nil {
+				worker.TenantIDForRelay = tenantForRelay
+			}
+		}
 		m.workers = append(m.workers, worker)
 	}
 
@@ -778,6 +1000,55 @@ func (m *Module) MailStore() *storage.MailStore {
 // the runtime was not booted.
 func (m *Module) QueueEngine() *queue.QueueEngine {
 	return m.queue
+}
+
+// ClusterService returns the Milestone 10 node registry service, or
+// nil if cluster schema init failed or the runtime was not booted.
+func (m *Module) ClusterService() *cluster.Service {
+	return m.clusterSvc
+}
+
+// SecurityService returns the Milestone 12 normalized security-event
+// service, or nil if schema init failed or the runtime was not
+// booted.
+func (m *Module) SecurityService() *security.Service {
+	return m.securitySvc
+}
+
+// HealthStatus implements the admin API's optional moduleHealthReporter
+// capability (internal/api/handlers.moduleHealthReporter): it derives
+// this module's status from its OWN observability.HealthChecker
+// report (populated throughout initCore via m.obs.Health.Ready/
+// NotReady/Degraded on real subsystem checks — database, mailstore,
+// queue, DNS resolver, DKIM config) rather than a hardcoded "active".
+func (m *Module) HealthStatus() (status, message string) {
+	if !m.cfg.CoreMail.Enabled {
+		return "disabled", "coremail.enabled=false"
+	}
+	if m.obs == nil {
+		return "unknown", "observability not initialized"
+	}
+	report := m.obs.Health.Report()
+	switch report.Overall {
+	case observability.HealthReady:
+		return "active", ""
+	case observability.HealthDegraded:
+		return "degraded", degradedSummary(report)
+	default:
+		return "unavailable", degradedSummary(report)
+	}
+}
+
+func degradedSummary(report *observability.HealthReport) string {
+	for name, check := range report.Checks {
+		if check.Status != observability.HealthReady {
+			if check.Message != "" {
+				return name + ": " + check.Message
+			}
+			return name + " not ready"
+		}
+	}
+	return ""
 }
 
 // AntivirusEngine returns the antivirus engine wired into

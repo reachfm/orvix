@@ -1,0 +1,102 @@
+import { useFirewallRulesQuery, useFirewallLogsQuery } from "../queries";
+import { Loading, ErrorBox, Empty } from "./StateViews";
+
+export default function FirewallPanel() {
+  const rulesQuery = useFirewallRulesQuery();
+  const logsQuery = useFirewallLogsQuery();
+  const rules = rulesQuery.data ?? [];
+  const logs = logsQuery.data ?? [];
+
+  return (
+    <div>
+      <div className="grid grid-cols-2 gap-4 mb-6">
+        <div className="bg-[var(--bg-surface)] border border-[var(--border)] rounded-xl p-4">
+          <p className="text-xs text-[var(--text-secondary)] mb-1">Recent Log Entries</p>
+          <p className="text-2xl font-bold text-[var(--text-primary)]">{logsQuery.isLoading ? "…" : logs.length}</p>
+        </div>
+        <div className="bg-[var(--bg-surface)] border border-[var(--border)] rounded-xl p-4">
+          <p className="text-xs text-[var(--text-secondary)] mb-1">Legacy Rule Records</p>
+          <p className="text-2xl font-bold text-[var(--text-primary)]">{rulesQuery.isLoading ? "…" : rules.length}</p>
+        </div>
+      </div>
+
+      {/* No production mail path consults this table: internal/firewall.Module.Start
+          never calls LoadRules, and CoreMail enforces policy via internal/ruler
+          instead. POST /firewall/rules fails closed (410) — there is no
+          create/edit/delete control here because none of it would do anything. */}
+      <div className="mb-3 px-3 py-2 text-xs bg-[var(--warning)]/10 text-[var(--warning)] rounded-lg border border-[var(--warning)]/30">
+        Legacy rule records — not enforced by the current CoreMail runtime.
+      </div>
+
+      <h3 className="text-sm font-semibold text-[var(--text-primary)] mb-3">Rules</h3>
+      {rulesQuery.isLoading ? <Loading /> : rulesQuery.error ? <ErrorBox error={rulesQuery.error} /> : rules.length === 0 ? (
+        <div className="mb-6"><Empty text="No firewall rules configured." /></div>
+      ) : (
+        <div className="bg-[var(--bg-surface)] border border-[var(--border)] rounded-xl overflow-hidden mb-6">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-[var(--border)]">
+                <th className="text-left p-4 text-[var(--text-secondary)] font-medium">Rule</th>
+                <th className="text-left p-4 text-[var(--text-secondary)] font-medium">Condition</th>
+                <th className="text-left p-4 text-[var(--text-secondary)] font-medium">Action</th>
+                <th className="text-left p-4 text-[var(--text-secondary)] font-medium">Priority</th>
+                <th className="text-left p-4 text-[var(--text-secondary)] font-medium">Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rules.map((r) => (
+                <tr key={r.id} className="border-b border-[var(--border)] hover:bg-[var(--bg-elevated)]">
+                  <td className="p-4 text-[var(--text-primary)]">{r.name}</td>
+                  <td className="p-4 text-[var(--text-secondary)]">{r.condition}</td>
+                  <td className="p-4">
+                    <span className={`px-2 py-1 text-xs rounded-full ${
+                      r.action === "block" ? "bg-[var(--danger)]/10 text-[var(--danger)]" :
+                      r.action === "throttle" ? "bg-[var(--warning)]/10 text-[var(--warning)]" :
+                      "bg-[var(--success)]/10 text-[var(--success)]"
+                    }`}>{r.action}</span>
+                  </td>
+                  <td className="p-4 text-[var(--text-secondary)]">{r.priority}</td>
+                  <td className="p-4">
+                    <span className={`px-2 py-1 text-xs rounded-full ${r.enabled ? "bg-[var(--success)]/10 text-[var(--success)]" : "bg-[var(--text-secondary)]/10 text-[var(--text-secondary)]"}`}>
+                      {r.enabled ? "enabled" : "disabled"}
+                    </span>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      <h3 className="text-sm font-semibold text-[var(--text-primary)] mb-3">Recent Activity</h3>
+      {logsQuery.isLoading ? <Loading /> : logsQuery.error ? <ErrorBox error={logsQuery.error} /> : logs.length === 0 ? (
+        <Empty text="No firewall activity recorded yet." />
+      ) : (
+        <div className="bg-[var(--bg-surface)] border border-[var(--border)] rounded-xl overflow-hidden">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-[var(--border)]">
+                <th className="text-left p-4 text-[var(--text-secondary)] font-medium">IP</th>
+                <th className="text-left p-4 text-[var(--text-secondary)] font-medium">Domain</th>
+                <th className="text-left p-4 text-[var(--text-secondary)] font-medium">Sender</th>
+                <th className="text-left p-4 text-[var(--text-secondary)] font-medium">Recipient</th>
+                <th className="text-left p-4 text-[var(--text-secondary)] font-medium">Time</th>
+              </tr>
+            </thead>
+            <tbody>
+              {logs.map((l) => (
+                <tr key={l.id} className="border-b border-[var(--border)] hover:bg-[var(--bg-elevated)]">
+                  <td className="p-4 text-[var(--text-primary)]">{l.ip}</td>
+                  <td className="p-4 text-[var(--text-secondary)]">{l.domain}</td>
+                  <td className="p-4 text-[var(--text-secondary)]">{l.sender || "-"}</td>
+                  <td className="p-4 text-[var(--text-secondary)]">{l.recipient || "-"}</td>
+                  <td className="p-4 text-[var(--text-secondary)]">{new Date(l.created_at).toLocaleString()}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}

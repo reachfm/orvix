@@ -785,10 +785,21 @@ func (h *Handler) WebmailSend(c fiber.Ctx) error {
 	// Real quota gate: number of unique, valid recipients.
 	// This reserves quota atomically before storage/queue side
 	// effects, then reconciles the reservation to the actual
-	// successful enqueue count below.
+	// successful enqueue count below. The enforcer is a hard
+	// dependency for outbound send: if it is not wired the
+	// request fails closed rather than bypassing quotas.
+	if h.sendEnforcer == nil {
+		h.logger.Error("webmail send rejected: send enforcer unavailable",
+			zap.String("mailbox", ctx.Mailbox.Email),
+			zap.String("message_id", messageID))
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+			"error": "send enforcement unavailable",
+			"code":  "SEND_ENFORCEMENT_UNAVAILABLE",
+		})
+	}
 	intendedRecipientCount := len(allRecipients)
 	var reservedSend *billing.SendReservationResult
-	if h.sendEnforcer != nil {
+	{
 		id := billing.SendIdentity{TenantID: ctx.Mailbox.TenantID, MailboxID: ctx.Mailbox.ID}
 		result, err := h.sendEnforcer.ReserveSend(c.Context(), id, messageID, intendedRecipientCount)
 		if err != nil {
@@ -805,7 +816,7 @@ func (h *Handler) WebmailSend(c fiber.Ctx) error {
 		reservedSend = result
 	}
 	cancelReservation := func() {
-		if h.sendEnforcer != nil && reservedSend != nil {
+		if reservedSend != nil {
 			id := billing.SendIdentity{TenantID: ctx.Mailbox.TenantID, MailboxID: ctx.Mailbox.ID}
 			if err := h.sendEnforcer.CancelSendReservation(c.Context(), id, messageID); err != nil {
 				h.logger.Error("webmail send quota reservation release failed",

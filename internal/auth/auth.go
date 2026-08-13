@@ -300,7 +300,14 @@ func newJTI() (string, error) {
 // it is persisted on the session row so RevokeAccountSession can revoke that
 // exact access token immediately when the session is revoked. Pass "" for flows
 // that do not mint an access token.
-func (a *Authenticator) GenerateRefreshToken(userID uint, accessJTI string) (string, time.Time, error) {
+// ip and userAgent are the request's real client IP and User-Agent
+// header — persisted on the session row so ListAccountSessions can
+// report actual device/client metadata instead of an always-empty
+// value the frontend has to render as "Unknown". Pass "" for either
+// when genuinely unavailable (e.g. a non-HTTP caller); the session
+// still stores correctly, it just carries an honestly-empty field
+// rather than a fabricated one.
+func (a *Authenticator) GenerateRefreshToken(userID uint, accessJTI, ip, userAgent string) (string, time.Time, error) {
 	expiresAt := time.Now().Add(a.refreshTTL)
 
 	b := make([]byte, 32)
@@ -321,9 +328,9 @@ func (a *Authenticator) GenerateRefreshToken(userID uint, accessJTI string) (str
 	}
 	d := a.dbDialect()
 	now := time.Now().UTC()
-	insert := "INSERT INTO sessions (created_at, updated_at, user_id, token_hash, role, email, ip, jti, expires_at) VALUES (" +
-		d.Placeholders(9) + ")"
-	if _, err := sqlDB.Exec(insert, now, now, userID, tokenHash, "", "", "", accessJTI, expiresAt); err != nil {
+	insert := "INSERT INTO sessions (created_at, updated_at, user_id, token_hash, role, email, ip, user_agent, jti, expires_at) VALUES (" +
+		d.Placeholders(10) + ")"
+	if _, err := sqlDB.Exec(insert, now, now, userID, tokenHash, "", "", ip, userAgent, accessJTI, expiresAt); err != nil {
 		return "", time.Time{}, fmt.Errorf("failed to store session: %w", err)
 	}
 
@@ -541,6 +548,42 @@ func validateAuthorizationSnapshot(snap userAuthorizationSnapshot) error {
 	return nil
 }
 
+// rowQuerier is the minimal read surface shared by *sql.DB and *sql.Tx.
+type rowQuerier interface {
+	QueryRow(query string, args ...any) *sql.Row
+}
+
+// loadAuthorizationSnapshot reads one user's authorization state in a single
+// dialect-aware SELECT and validates it. It is the single canonical
+// implementation, shared by JWT/session authentication (via the Authenticator
+// method below) and by API-key authentication (internal/auth/apikey.go), so
+// there is exactly one definition of "is this user still allowed to act".
+// Any DB error, missing user, or invalid snapshot returns ErrTokenInvalid.
+//
+// It accepts any rowQuerier so callers already holding a transaction pass the
+// *sql.Tx. That is not a style preference: the SQLite pool is configured with
+// MaxOpenConns(1), so issuing this read against the *sql.DB while a
+// transaction holds the only connection deadlocks the request.
+func loadAuthorizationSnapshot(q rowQuerier, d *dbdialect.Info, userID uint) (userAuthorizationSnapshot, error) {
+	var snap userAuthorizationSnapshot
+	if q == nil || d == nil {
+		return snap, ErrTokenInvalid
+	}
+	var dbRole string
+	err := q.QueryRow(
+		"SELECT role, tenant_id, active, deleted_at, COALESCE(token_version, 0) FROM users WHERE id = "+d.Placeholder(1),
+		userID,
+	).Scan(&dbRole, &snap.TenantID, &snap.Active, &snap.DeletedAt, &snap.TokenVersion)
+	if err != nil {
+		return snap, ErrTokenInvalid
+	}
+	snap.Role = Role(dbRole)
+	if err := validateAuthorizationSnapshot(snap); err != nil {
+		return snap, ErrTokenInvalid
+	}
+	return snap, nil
+}
+
 // loadUserAuthorizationSnapshot reads one user's authorization state in a
 // single dialect-aware SELECT. Any DB acquisition/query error or missing user
 // returns ErrTokenInvalid.
@@ -553,20 +596,7 @@ func (a *Authenticator) loadUserAuthorizationSnapshot(userID uint) (userAuthoriz
 	if err != nil {
 		return snap, ErrTokenInvalid
 	}
-	d := a.dbDialect()
-	var dbRole string
-	err = rawDB.QueryRow(
-		"SELECT role, tenant_id, active, deleted_at, COALESCE(token_version, 0) FROM users WHERE id = "+d.Placeholder(1),
-		userID,
-	).Scan(&dbRole, &snap.TenantID, &snap.Active, &snap.DeletedAt, &snap.TokenVersion)
-	if err != nil {
-		return snap, ErrTokenInvalid
-	}
-	snap.Role = Role(dbRole)
-	if err := validateAuthorizationSnapshot(snap); err != nil {
-		return snap, ErrTokenInvalid
-	}
-	return snap, nil
+	return loadAuthorizationSnapshot(rawDB, a.dbDialect(), userID)
 }
 
 // ValidateUserForTokenIssuance verifies that userID has a valid canonical
@@ -624,10 +654,16 @@ func (a *Authenticator) RefreshToken(ctx context.Context, refreshToken string) (
 	// can consume the session. A second concurrent caller reads
 	// the row before the delete completes, but its delete returns
 	// zero rows affected — we check for that case below.
+	// ip/user_agent are captured from the session being rotated (not
+	// re-derived from the current request, which this function has no
+	// access to) so device metadata a caller sees via
+	// ListAccountSessions survives a refresh instead of reverting to
+	// empty on every rotation.
 	var userID uint
+	var sessIP, sessUA sql.NullString
 	if err := sqlDB.QueryRow(
-		"SELECT user_id FROM sessions WHERE token_hash = "+d.Placeholder(1)+" AND expires_at > "+d.Placeholder(2),
-		tokenHash, time.Now().UTC()).Scan(&userID); err != nil {
+		"SELECT user_id, ip, user_agent FROM sessions WHERE token_hash = "+d.Placeholder(1)+" AND expires_at > "+d.Placeholder(2),
+		tokenHash, time.Now().UTC()).Scan(&userID, &sessIP, &sessUA); err != nil {
 		return "", "", time.Time{}, ErrSessionExpired
 	}
 
@@ -657,7 +693,7 @@ func (a *Authenticator) RefreshToken(ctx context.Context, refreshToken string) (
 		return "", "", time.Time{}, err
 	}
 
-	newRefresh, expiresAt, err := a.GenerateRefreshToken(userID, accessJTI)
+	newRefresh, expiresAt, err := a.GenerateRefreshToken(userID, accessJTI, sessIP.String, sessUA.String)
 	if err != nil {
 		return "", "", time.Time{}, err
 	}
@@ -736,11 +772,30 @@ func (a *Authenticator) Middleware() fiber.Handler {
 			return c.Next()
 		}
 
+		// credentialSource records HOW the caller authenticated, because
+		// CSRF applicability depends entirely on whether the credential is
+		// *ambient* (attached automatically by the browser) or not.
+		//
+		// A cookie is ambient: the victim's browser sends it on cross-site
+		// requests, so a cookie-authenticated mutation is forgeable and MUST
+		// carry a CSRF token. An Authorization: Bearer header is not
+		// ambient — an attacker page cannot make the browser add it, and
+		// adding it explicitly forces a CORS preflight the server refuses
+		// for untrusted origins. This is the same reasoning already applied
+		// to API keys in CSRFManager.Middleware.
+		//
+		// Order matters for safety: the cookie is checked FIRST, so a
+		// request that carries the victim's cookie is always classified as
+		// cookie-authenticated (CSRF enforced) even if an attacker also
+		// appends a Bearer header. The bearer classification is only
+		// reachable when no valid session cookie authenticated the request.
+		credentialSource := CredentialCookie
 		token := c.Cookies("access_token")
 		if token == "" {
 			authHeader := c.Get("Authorization")
 			if len(authHeader) > 7 && authHeader[:7] == "Bearer " {
 				token = authHeader[7:]
+				credentialSource = CredentialBearer
 			}
 		}
 
@@ -749,6 +804,7 @@ func (a *Authenticator) Middleware() fiber.Handler {
 			if err == nil {
 				c.Locals("user_id", userID)
 				c.Locals("role", role)
+				c.Locals(CredentialSourceLocal, credentialSource)
 				return c.Next()
 			}
 		}
@@ -767,6 +823,9 @@ func (a *Authenticator) Middleware() fiber.Handler {
 			if err == nil {
 				c.Locals("user_id", userID)
 				c.Locals("role", role)
+				// An opaque session cookie is ambient, exactly like
+				// access_token, so it always requires CSRF on mutations.
+				c.Locals(CredentialSourceLocal, CredentialCookie)
 				if email != "" {
 					c.Locals("email", email)
 				}
@@ -836,19 +895,34 @@ func SetMFAChallengeClockForTest(now func() time.Time) func() {
 // MFA. The token MUST NOT be accepted by any protected endpoint.
 // It is only usable with the MFA verify endpoint.
 func (a *Authenticator) GenerateMFAChallengeToken(userID uint) (string, error) {
+	token, _, err := a.GenerateMFAChallengeTokenWithID(userID)
+	return token, err
+}
+
+// GenerateMFAChallengeTokenWithID is GenerateMFAChallengeToken plus the
+// challenge's unique id (jti). H-6: the id is what lets the server bound
+// verification attempts per challenge and make a challenge single-use — a
+// bare stateless JWT can be replayed and brute-forced for its whole lifetime.
+// Callers must record the id with MFAChallengeStore.Issue.
+func (a *Authenticator) GenerateMFAChallengeTokenWithID(userID uint) (string, string, error) {
 	now := mfaChallengeNow()
+	jti, err := NewChallengeID()
+	if err != nil {
+		return "", "", err
+	}
 	claims := jwt.MapClaims{
 		"sub":             fmt.Sprintf("%d", userID),
 		MFAChallengeClaim: true,
+		"jti":             jti,
 		"iat":             now.Unix(),
 		"exp":             now.Add(MFAChallengeTTL).Unix(),
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
 	tokenString, err := token.SignedString(a.privateKey)
 	if err != nil {
-		return "", fmt.Errorf("failed to sign MFA challenge token: %w", err)
+		return "", "", fmt.Errorf("failed to sign MFA challenge token: %w", err)
 	}
-	return tokenString, nil
+	return tokenString, jti, nil
 }
 
 // ValidateMFAChallengeToken validates an MFA challenge token and
@@ -873,7 +947,11 @@ const OpaqueSessionTTL = 30 * time.Minute
 // middleware reads back; passing the client's claim would defeat the
 // purpose. email is the canonical user email and is included so
 // future /me and audit calls do not need a second DB roundtrip.
-func (a *Authenticator) GenerateOpaqueSession(userID uint, role Role, email string) (string, error) {
+// ip and userAgent are the request's real client IP and User-Agent
+// header, persisted on the row for the same "no fabricated Unknown
+// metadata" reason documented on GenerateRefreshToken. Pass "" for
+// either when genuinely unavailable.
+func (a *Authenticator) GenerateOpaqueSession(userID uint, role Role, email, ip, userAgent string) (string, error) {
 	if userID == 0 {
 		return "", fmt.Errorf("generate opaque session: userID is required")
 	}
@@ -899,9 +977,9 @@ func (a *Authenticator) GenerateOpaqueSession(userID uint, role Role, email stri
 	}
 	d := a.dbDialect()
 	now := time.Now().UTC()
-	insert := "INSERT INTO sessions (created_at, updated_at, user_id, token_hash, role, email, ip, jti, expires_at) VALUES (" +
-		d.Placeholders(9) + ")"
-	if _, err := sqlDB.Exec(insert, now, now, userID, tokenHash, string(role), email, "", "", expiresAt); err != nil {
+	insert := "INSERT INTO sessions (created_at, updated_at, user_id, token_hash, role, email, ip, user_agent, jti, expires_at) VALUES (" +
+		d.Placeholders(10) + ")"
+	if _, err := sqlDB.Exec(insert, now, now, userID, tokenHash, string(role), email, ip, userAgent, "", expiresAt); err != nil {
 		return "", fmt.Errorf("store session: %w", err)
 	}
 
@@ -973,4 +1051,43 @@ func (a *Authenticator) ValidateMFAChallengeToken(tokenString string) (uint, err
 	var userID uint
 	fmt.Sscanf(claims["sub"].(string), "%d", &userID)
 	return userID, nil
+}
+
+// ValidateMFAChallengeTokenWithID is ValidateMFAChallengeToken plus the
+// challenge id, which the caller needs to enforce per-challenge attempt caps
+// and single-use consumption. A token with no jti is rejected: it predates
+// H-6's challenge tracking and cannot be bounded, so accepting it would
+// reopen the unlimited-guess hole.
+func (a *Authenticator) ValidateMFAChallengeTokenWithID(tokenString string) (uint, string, error) {
+	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
+		if _, ok := token.Method.(*jwt.SigningMethodRSA); !ok {
+			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+		}
+		return a.publicKey, nil
+	})
+	if err != nil || !token.Valid {
+		return 0, "", ErrTokenInvalid
+	}
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok {
+		return 0, "", ErrTokenInvalid
+	}
+	if val, _ := claims[MFAChallengeClaim].(bool); !val {
+		return 0, "", fmt.Errorf("not an MFA challenge token")
+	}
+	exp, ok := claims["exp"].(float64)
+	if ok && mfaChallengeNow().Unix() > int64(exp) {
+		return 0, "", ErrTokenExpired
+	}
+	jti, _ := claims["jti"].(string)
+	if jti == "" {
+		return 0, "", ErrTokenInvalid
+	}
+	sub, _ := claims["sub"].(string)
+	var userID uint
+	fmt.Sscanf(sub, "%d", &userID)
+	if userID == 0 {
+		return 0, "", ErrTokenInvalid
+	}
+	return userID, jti, nil
 }

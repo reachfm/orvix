@@ -103,6 +103,16 @@ const (
 	PermAPIKeysRead  Permission = "apikeys.read"
 	PermAPIKeysWrite Permission = "apikeys.write"
 
+	// Durable automation jobs.
+	PermJobsRead  Permission = "jobs.read"
+	PermJobsWrite Permission = "jobs.write"
+
+	// Imports.
+	PermImportsRead    Permission = "imports.read"
+	PermImportsWrite   Permission = "imports.write"
+	PermImportsExecute Permission = "imports.execute"
+	PermImportsAdmin   Permission = "imports.admin"
+
 	// Billing.
 	PermBillingRead  Permission = "billing.read"
 	PermBillingWrite Permission = "billing.write"
@@ -112,6 +122,20 @@ const (
 	PermPlatformOrganizationsWrite Permission = "platform.organizations.write"
 	PermPlatformSecurityRead       Permission = "platform.security.read"
 	PermPlatformSessionsRevoke     Permission = "platform.sessions.revoke"
+
+	// Platform mail control (cross-tenant, platform_super_admin only).
+	// These gate the /platform/relays, /platform/suppressions, and
+	// /platform/deliverability surfaces. They are deliberately
+	// platform-scoped: no tenant role inherits them, and they are NOT
+	// tenant-scoped permissions (so a PSA-minted API key may carry
+	// them without violating the tenant-scoped-key boundary enforced
+	// by validateAPIKeyScopes).
+	PermRelaysRead         Permission = "relay.read"
+	PermRelaysWrite        Permission = "relay.write"
+	PermRelaysTest         Permission = "relay.test"
+	PermSuppressionsRead   Permission = "suppressions.read"
+	PermSuppressionsWrite  Permission = "suppressions.write"
+	PermDeliverabilityRead Permission = "deliverability.read"
 )
 
 // AllPermissions is the canonical ordered list of permissions.
@@ -149,12 +173,24 @@ var AllPermissions = []Permission{
 	PermOwnershipTransfer,
 	PermAPIKeysRead,
 	PermAPIKeysWrite,
+	PermJobsRead,
+	PermJobsWrite,
+	PermImportsRead,
+	PermImportsWrite,
+	PermImportsExecute,
+	PermImportsAdmin,
 	PermBillingRead,
 	PermBillingWrite,
 	PermPlatformOrganizationsRead,
 	PermPlatformOrganizationsWrite,
 	PermPlatformSecurityRead,
 	PermPlatformSessionsRevoke,
+	PermRelaysRead,
+	PermRelaysWrite,
+	PermRelaysTest,
+	PermSuppressionsRead,
+	PermSuppressionsWrite,
+	PermDeliverabilityRead,
 }
 
 // rolePermissions is the source of truth for "what can role X
@@ -164,21 +200,33 @@ var AllPermissions = []Permission{
 var rolePermissions = map[auth.Role]map[Permission]bool{
 	// ── Canonical roles ─────────────────────────────────────
 	// Platform Super Admin: PLATFORM permissions ONLY.
-	// PORTAL-SEPARATION-PHASE1 Phase 5 (PR#58): platform_super_admin
-	// governs the platform surface — mail queue, platform settings,
-	// backups, updater, license, monitoring, platform audit, firewall/
-	// modules (inline gates), platform organizations (cross-tenant list/
-	// update) and platform security. It intentionally does NOT hold any
-	// tenant-scoped permission (domains/mailboxes/users/aliases/groups/
-	// invitations/organizations write, billing, api-keys, ownership,
-	// tenant security, credentials/sessions). A platform_super_admin
-	// bootstrap row has NULL tenant_id, so tenant-scoped routes are
-	// unreachable via requireTenantContext regardless; this map keeps
-	// the RBAC boundary explicit rather than relying only on that
-	// middleware.
+	// PORTAL-SEPARATION-PHASE1 Phase 5 (PR#58) + Mail-Control enablement:
+	// platform_super_admin governs the platform surface — mail queue,
+	// cross-tenant mail control (domains/mailboxes/aliases/groups through
+	// the /platform/* routes with explicit target tenants), platform
+	// settings, backups, updater, license, monitoring, platform audit,
+	// firewall/modules (inline gates), platform organizations (cross-
+	// tenant list/update) and platform security. It intentionally does
+	// NOT hold any tenant-scoped route permission — the /platform/*
+	// routes it may call are platformMW-owned and every request must
+	// name an explicit target tenant; it is never treated as a tenant
+	// admin. A platform_super_admin bootstrap row has NULL tenant_id,
+	// so tenant-scoped routes remain unreachable via requireTenantContext
+	// regardless; this map keeps the RBAC boundary explicit rather than
+	// relying only on that middleware.
 	auth.RolePlatformSuperAdmin: {
 		// Platform mail queue.
 		PermQueueRead: true, PermQueueAction: true,
+		// Platform mail control (cross-tenant platform surface). These
+		// reuse the canonical domain/mailbox/alias/group permissions so
+		// route-level RBAC is uniform; the /platform/* routes they gate
+		// are platformMW-owned and require an explicit target tenant in
+		// every request — a platform_super_admin never acquires tenant
+		// identity implicitly.
+		PermDomainsRead: true, PermDomainsWrite: true,
+		PermMailboxesRead: true, PermMailboxesWrite: true,
+		PermAliasesRead: true, PermAliasesWrite: true,
+		PermGroupsRead: true, PermGroupsWrite: true,
 		// Platform settings.
 		PermSettingsRead: true, PermSettingsWrite: true,
 		// Platform backups.
@@ -194,6 +242,15 @@ var rolePermissions = map[auth.Role]map[Permission]bool{
 		// Cross-tenant security controls (session revocation, security ops).
 		PermPlatformSecurityRead:   true,
 		PermPlatformSessionsRevoke: true,
+		PermJobsRead:               true, PermJobsWrite: true,
+		// Platform imports (the /platform/imports surface is platform-scope).
+		PermImportsRead: true, PermImportsWrite: true, PermImportsExecute: true, PermImportsAdmin: true,
+		// Platform mail control: relay administration, suppression
+		// lifecycle, and deliverability metrics. Platform-scoped only —
+		// no tenant role inherits these.
+		PermRelaysRead: true, PermRelaysWrite: true, PermRelaysTest: true,
+		PermSuppressionsRead: true, PermSuppressionsWrite: true,
+		PermDeliverabilityRead: true,
 	},
 	// Tenant Admin: full tenant permissions (no platform).
 	auth.RoleTenantAdmin: {
@@ -207,6 +264,7 @@ var rolePermissions = map[auth.Role]map[Permission]bool{
 		PermInvitationsRead: true, PermInvitationsWrite: true,
 		PermOwnershipTransfer: true,
 		PermAPIKeysRead:       true, PermAPIKeysWrite: true,
+		PermJobsRead: true, PermJobsWrite: true,
 		PermBillingRead: true, PermBillingWrite: true,
 		PermAuditRead:        true,
 		PermSettingsRead:     true,
@@ -214,6 +272,7 @@ var rolePermissions = map[auth.Role]map[Permission]bool{
 		PermCredentialsReset: true,
 		PermSessionsRevoke:   true,
 		PermSecurityRead:     true,
+		PermImportsRead:      true, PermImportsWrite: true, PermImportsExecute: true,
 	},
 	// Tenant Operator: operational management without user/role/admin.
 	auth.RoleTenantOperator: {
@@ -232,8 +291,9 @@ var rolePermissions = map[auth.Role]map[Permission]bool{
 		PermSessionsRevoke:   true,
 		PermSecurityRead:     true,
 		PermBillingRead:      true,
+		PermJobsRead:         true, PermJobsWrite: true,
+		PermImportsRead: true, PermImportsWrite: true, PermImportsExecute: true,
 	},
-	// Tenant Support: read + password reset + mailbox status.
 	auth.RoleTenantSupport: {
 		PermDashboardRead: true,
 		PermDomainsRead:   true,
@@ -250,6 +310,8 @@ var rolePermissions = map[auth.Role]map[Permission]bool{
 		PermSessionsRevoke:    true,
 		PermSecurityRead:      true,
 		PermBillingRead:       true,
+		PermJobsRead:          true,
+		PermImportsRead:       true,
 	},
 	// Tenant Read Only.
 	auth.RoleTenantReadOnly: {
@@ -266,6 +328,7 @@ var rolePermissions = map[auth.Role]map[Permission]bool{
 		PermMonitoringRead:    true,
 		PermSecurityRead:      true,
 		PermBillingRead:       true,
+		PermJobsRead:          true,
 	},
 
 	// ── Legacy roles ────────────────────────────────────────
@@ -293,6 +356,12 @@ var rolePermissions = map[auth.Role]map[Permission]bool{
 		PermPlatformOrganizationsRead: true, PermPlatformOrganizationsWrite: true,
 		PermPlatformSecurityRead:   true,
 		PermPlatformSessionsRevoke: true,
+		PermJobsRead:               true, PermJobsWrite: true,
+		PermImportsRead: true, PermImportsWrite: true, PermImportsExecute: true, PermImportsAdmin: true,
+		// Platform mail control (legacy super-admin mirrors the PSA).
+		PermRelaysRead: true, PermRelaysWrite: true, PermRelaysTest: true,
+		PermSuppressionsRead: true, PermSuppressionsWrite: true,
+		PermDeliverabilityRead: true,
 	},
 	// PORTAL-SEPARATION-PHASE1: the deprecated auth.RoleAdmin no longer maps
 	// to any permission. Legacy "admin" rows are normalized at startup
@@ -331,6 +400,7 @@ var rolePermissions = map[auth.Role]map[Permission]bool{
 		PermInvitationsRead:  true,
 		PermAPIKeysRead:      true,
 		PermBillingRead:      true,
+		PermJobsRead:         true, PermJobsWrite: true,
 	},
 	auth.RoleReadOnly: {
 		PermQueueRead:         true,
@@ -350,6 +420,7 @@ var rolePermissions = map[auth.Role]map[Permission]bool{
 		PermInvitationsRead:   true,
 		PermAPIKeysRead:       true,
 		PermBillingRead:       true,
+		PermJobsRead:          true,
 	},
 	// RoleUser is a tenant owner/member who has full control over their
 	// own tenant resources but NO platform-level privileges (platform
@@ -366,6 +437,7 @@ var rolePermissions = map[auth.Role]map[Permission]bool{
 		PermOwnershipTransfer: true,
 		PermAPIKeysRead:       true, PermAPIKeysWrite: true,
 		PermBillingRead: true, PermBillingWrite: true,
+		PermJobsRead: true, PermJobsWrite: true,
 		PermAuditRead:        true,
 		PermSettingsRead:     true,
 		PermMonitoringRead:   true,
@@ -388,6 +460,7 @@ var rolePermissions = map[auth.Role]map[Permission]bool{
 		PermInvitationsRead: true,
 		PermAliasesRead:     true,
 		PermAPIKeysRead:     true,
+		PermJobsRead:        true,
 	},
 }
 

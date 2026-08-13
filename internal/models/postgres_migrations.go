@@ -213,6 +213,13 @@ func postgresTables() []string {
 			expires_at TIMESTAMP
 		)`,
 		`ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS scopes TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS allowed_ips TEXT NOT NULL DEFAULT ''`,
+		// owner_token_version: see migrateAPIKeysSchema in models.go (H-2).
+		// The users.token_version captured at mint time; authentication
+		// rejects a key whose version no longer matches the owner's current
+		// one, so password reset / global revocation invalidates outstanding
+		// keys through the same mechanism JWTs already use.
+		`ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS owner_token_version BIGINT NOT NULL DEFAULT 0`,
 
 		// --- Sessions / security / audit ---
 
@@ -1144,6 +1151,11 @@ func postgresColumnAdditions() []string {
 		// 0 means "inherit the organization plan" (domain.LimitInherit), so
 		// every pre-existing row is correct without a backfill.
 		`ALTER TABLE coremail_domains ADD COLUMN IF NOT EXISTS default_mailbox_quota_mb BIGINT NOT NULL DEFAULT 0`,
+
+		// coremail_domains.mail_access_mode: internal_only restricts a
+		// domain to local-only delivery (Milestone 5, Feature 6/7);
+		// internal_external is the default, unrestricted mode.
+		`ALTER TABLE coremail_domains ADD COLUMN IF NOT EXISTS mail_access_mode TEXT NOT NULL DEFAULT 'internal_external'`,
 
 		`ALTER TABLE licenses ADD COLUMN IF NOT EXISTS tier TEXT NOT NULL DEFAULT 'smb'`,
 		`ALTER TABLE licenses ADD COLUMN IF NOT EXISTS max_domains INTEGER NOT NULL DEFAULT 10`,

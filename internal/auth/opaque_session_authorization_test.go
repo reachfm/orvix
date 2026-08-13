@@ -66,7 +66,7 @@ func TestOpaqueSessionUsesCurrentDBRole(t *testing.T) {
 	a, db := newOpaqueTestAuth(t)
 	uid := seedOpaqueUser(t, db, "tenant_support", uint(1), true, false)
 	// Create session with stale role stored.
-	tok, err := a.GenerateOpaqueSession(uid, "tenant_admin", "x@test.local")
+	tok, err := a.GenerateOpaqueSession(uid, "tenant_admin", "x@test.local", "", "")
 	if err != nil {
 		t.Fatalf("generate session: %v", err)
 	}
@@ -82,7 +82,7 @@ func TestOpaqueSessionUsesCurrentDBRole(t *testing.T) {
 func TestOpaqueSessionRoleChangeAfterCreation(t *testing.T) {
 	a, db := newOpaqueTestAuth(t)
 	uid := seedOpaqueUser(t, db, "tenant_admin", uint(1), true, false)
-	tok, err := a.GenerateOpaqueSession(uid, "tenant_admin", "x@test.local")
+	tok, err := a.GenerateOpaqueSession(uid, "tenant_admin", "x@test.local", "", "")
 	if err != nil {
 		t.Fatalf("generate: %v", err)
 	}
@@ -102,7 +102,7 @@ func TestOpaqueSessionRoleChangeAfterCreation(t *testing.T) {
 func TestOpaqueSessionInactiveUserFails(t *testing.T) {
 	a, db := newOpaqueTestAuth(t)
 	uid := seedOpaqueUser(t, db, "tenant_admin", uint(1), true, false)
-	tok, err := a.GenerateOpaqueSession(uid, "tenant_admin", "x@test.local")
+	tok, err := a.GenerateOpaqueSession(uid, "tenant_admin", "x@test.local", "", "")
 	if err != nil {
 		t.Fatalf("generate: %v", err)
 	}
@@ -121,7 +121,7 @@ func TestOpaqueSessionInactiveUserFails(t *testing.T) {
 func TestOpaqueSessionDeletedUserFails(t *testing.T) {
 	a, db := newOpaqueTestAuth(t)
 	uid := seedOpaqueUser(t, db, "tenant_admin", uint(1), true, false)
-	tok, err := a.GenerateOpaqueSession(uid, "tenant_admin", "x@test.local")
+	tok, err := a.GenerateOpaqueSession(uid, "tenant_admin", "x@test.local", "", "")
 	if err != nil {
 		t.Fatalf("generate: %v", err)
 	}
@@ -141,7 +141,7 @@ func TestOpaqueSessionDeletedUserFails(t *testing.T) {
 func TestOpaqueSessionMissingUserFails(t *testing.T) {
 	a, db := newOpaqueTestAuth(t)
 	uid := seedOpaqueUser(t, db, "tenant_admin", uint(1), true, false)
-	tok, err := a.GenerateOpaqueSession(uid, "tenant_admin", "x@test.local")
+	tok, err := a.GenerateOpaqueSession(uid, "tenant_admin", "x@test.local", "", "")
 	if err != nil {
 		t.Fatalf("generate: %v", err)
 	}
@@ -162,7 +162,7 @@ func TestOpaqueSessionDeprecatedAndUnknownRolesFail(t *testing.T) {
 	deprecated := []string{"admin", "operator", "readonly", "superadmin", "super_admin", "super-admin", "nonexistent_role"}
 	for _, role := range deprecated {
 		uid := seedOpaqueUser(t, db, role, uint(1), true, false)
-		tok, err := a.GenerateOpaqueSession(uid, Role(role), "x@test.local")
+		tok, err := a.GenerateOpaqueSession(uid, Role(role), "x@test.local", "", "")
 		if err != nil {
 			t.Fatalf("generate session for %q: %v", role, err)
 		}
@@ -180,7 +180,7 @@ func TestOpaqueSessionTenantBinding(t *testing.T) {
 	a, db := newOpaqueTestAuth(t)
 	// PSA NULL tenant succeeds.
 	uidPSA := seedOpaqueUser(t, db, "platform_super_admin", nil, true, false)
-	tokPSA, err := a.GenerateOpaqueSession(uidPSA, "platform_super_admin", "psa-null@test.local")
+	tokPSA, err := a.GenerateOpaqueSession(uidPSA, "platform_super_admin", "psa-null@test.local", "", "")
 	if err != nil {
 		t.Fatalf("generate PSA: %v", err)
 	}
@@ -191,7 +191,7 @@ func TestOpaqueSessionTenantBinding(t *testing.T) {
 
 	// PSA with tenant fails.
 	uidPSATenant := seedOpaqueUser(t, db, "platform_super_admin", uint(1), true, false)
-	tokPSATenant, err := a.GenerateOpaqueSession(uidPSATenant, "platform_super_admin", "psa-tenant@test.local")
+	tokPSATenant, err := a.GenerateOpaqueSession(uidPSATenant, "platform_super_admin", "psa-tenant@test.local", "", "")
 	if err != nil {
 		t.Fatalf("generate PSA tenant: %v", err)
 	}
@@ -203,7 +203,7 @@ func TestOpaqueSessionTenantBinding(t *testing.T) {
 	// Tenant roles with valid tenant succeed.
 	for _, role := range []string{"tenant_admin", "tenant_operator", "tenant_support", "tenant_readonly", "user", "billing"} {
 		uid := seedOpaqueUser(t, db, role, uint(1), true, false)
-		tok, err := a.GenerateOpaqueSession(uid, Role(role), role+"@test.local")
+		tok, err := a.GenerateOpaqueSession(uid, Role(role), role+"@test.local", "", "")
 		if err != nil {
 			t.Fatalf("generate %s: %v", role, err)
 		}
@@ -216,7 +216,7 @@ func TestOpaqueSessionTenantBinding(t *testing.T) {
 	// Tenant roles with NULL tenant fail.
 	for _, role := range []string{"tenant_admin", "tenant_operator", "tenant_support", "tenant_readonly", "user", "billing"} {
 		uid := seedOpaqueUser(t, db, role, nil, true, false)
-		tok, err := a.GenerateOpaqueSession(uid, Role(role), role+"null@test.local")
+		tok, err := a.GenerateOpaqueSession(uid, Role(role), role+"null@test.local", "", "")
 		if err != nil {
 			t.Fatalf("generate %s null: %v", role, err)
 		}

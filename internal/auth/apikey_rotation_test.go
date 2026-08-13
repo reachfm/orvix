@@ -24,7 +24,11 @@ func newRotationManager(t *testing.T) *APIKeyManager {
 // request URL).
 func genKey(t *testing.T, m *APIKeyManager, name string, uid, tid uint) (string, uint) {
 	t.Helper()
-	full, rec, err := m.Generate(name, uid, tid, "admin", []string{"domains.write"}, 365)
+	// H-2: the owner must exist and currently hold the role stamped on the
+	// key. "admin" is a legacy alias that is no longer a canonical runtime
+	// role, so these keys are minted as tenant_admin.
+	ensureKeyOwner(t, m, uid, tid, RoleTenantAdmin)
+	full, rec, err := m.Generate(name, uid, tid, string(RoleTenantAdmin), []string{"domains.write"}, 365)
 	if err != nil {
 		t.Fatalf("generate: %v", err)
 	}
@@ -48,7 +52,7 @@ func rotationSuite(t *testing.T, m *APIKeyManager) {
 		if _, err := m.Validate(oldFull); err != nil {
 			t.Fatalf("old key should be valid before rotation: %v", err)
 		}
-		newFull, newRec, err := m.RotateByID(oldID, 5, 9, "admin", []string{"domains.write"}, 365)
+		newFull, newRec, err := m.RotateByID(oldID, 5, 9, string(RoleTenantAdmin), []string{"domains.write"}, 365)
 		if err != nil {
 			t.Fatalf("rotate: %v", err)
 		}
@@ -71,10 +75,10 @@ func rotationSuite(t *testing.T, m *APIKeyManager) {
 
 	t.Run("cross-owner denied and old key preserved", func(t *testing.T) {
 		oldFull, oldID := genKey(t, m, "k", 6, 9)
-		if _, _, err := m.RotateByID(oldID, 7 /* other user */, 9, "admin", []string{"domains.write"}, 365); err == nil {
+		if _, _, err := m.RotateByID(oldID, 7 /* other user */, 9, string(RoleTenantAdmin), []string{"domains.write"}, 365); err == nil {
 			t.Fatal("cross-user rotation must be denied")
 		}
-		if _, _, err := m.RotateByID(oldID, 6, 11 /* other tenant */, "admin", []string{"domains.write"}, 365); err == nil {
+		if _, _, err := m.RotateByID(oldID, 6, 11 /* other tenant */, string(RoleTenantAdmin), []string{"domains.write"}, 365); err == nil {
 			t.Fatal("cross-tenant rotation must be denied")
 		}
 		if _, err := m.Validate(oldFull); err != nil {
@@ -85,7 +89,7 @@ func rotationSuite(t *testing.T, m *APIKeyManager) {
 	t.Run("unrelated same-name key untouched", func(t *testing.T) {
 		_, aID := genKey(t, m, "dup", 8, 9)
 		otherFull, _ := genKey(t, m, "dup", 8, 9)
-		if _, _, err := m.RotateByID(aID, 8, 9, "admin", []string{"domains.write"}, 365); err != nil {
+		if _, _, err := m.RotateByID(aID, 8, 9, string(RoleTenantAdmin), []string{"domains.write"}, 365); err != nil {
 			t.Fatalf("rotate a: %v", err)
 		}
 		if _, err := m.Validate(otherFull); err != nil {
@@ -95,10 +99,10 @@ func rotationSuite(t *testing.T, m *APIKeyManager) {
 
 	t.Run("already-disabled rejected", func(t *testing.T) {
 		_, id := genKey(t, m, "twice", 10, 9)
-		if _, _, err := m.RotateByID(id, 10, 9, "admin", []string{"domains.write"}, 365); err != nil {
+		if _, _, err := m.RotateByID(id, 10, 9, string(RoleTenantAdmin), []string{"domains.write"}, 365); err != nil {
 			t.Fatalf("first rotate: %v", err)
 		}
-		if _, _, err := m.RotateByID(id, 10, 9, "admin", []string{"domains.write"}, 365); err == nil {
+		if _, _, err := m.RotateByID(id, 10, 9, string(RoleTenantAdmin), []string{"domains.write"}, 365); err == nil {
 			t.Fatal("rotating an already-disabled key must be rejected")
 		}
 	})
@@ -113,7 +117,7 @@ func rotationSuite(t *testing.T, m *APIKeyManager) {
 		for i := 0; i < n; i++ {
 			go func(i int) {
 				defer wg.Done()
-				full, _, e := m.RotateByID(id, 12, 9, "admin", []string{"domains.write"}, 365)
+				full, _, e := m.RotateByID(id, 12, 9, string(RoleTenantAdmin), []string{"domains.write"}, 365)
 				results[i], errs[i] = full, e
 			}(i)
 		}

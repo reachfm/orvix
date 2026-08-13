@@ -137,6 +137,31 @@ func (r *OrganizationRepo) SetActive(ctx context.Context, id uint, active bool) 
 	return err
 }
 
+// SetActiveIfCurrentlyIs atomically transitions active only if the row's
+// current active value equals expectedActive — a single conditional
+// UPDATE, not a separate read-then-write. Returns applied=true iff the
+// transition actually happened (RowsAffected > 0). This closes a real
+// TOCTOU race in SuspendOrganization/ReactivateOrganization: two
+// concurrent suspend calls that both read active=true before either
+// writes would otherwise both flip the row and both record a suspension
+// row. With this, only the request that atomically wins the WHERE
+// active=<expected> clause applies; the loser sees applied=false and
+// must report a stable conflict instead of silently duplicating the
+// transition's side effects (the suspension/reactivation audit record).
+func (r *OrganizationRepo) SetActiveIfCurrentlyIs(ctx context.Context, id uint, expectedActive, newActive bool) (applied bool, err error) {
+	res, err := r.db.ExecContext(ctx,
+		"UPDATE tenants SET active="+r.dialect.Placeholder(1)+", updated_at="+r.dialect.Placeholder(2)+" WHERE id="+r.dialect.Placeholder(3)+" AND deleted_at IS NULL AND active="+r.dialect.Placeholder(4),
+		boolToInt(newActive), time.Now().UTC(), id, boolToInt(expectedActive))
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
 func (r *OrganizationRepo) ExistsBySlug(ctx context.Context, slug string, excludeID uint) (bool, error) {
 	var count int64
 	err := r.db.QueryRowContext(ctx,

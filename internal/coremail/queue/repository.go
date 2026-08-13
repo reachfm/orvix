@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/orvix/orvix/internal/dbdialect"
 )
 
 // Repository defines all queue persistence operations.
@@ -29,6 +31,11 @@ type Repository interface {
 
 	// AckDelivered marks a job as successfully delivered.
 	AckDelivered(ctx context.Context, id uint, tx interface{}) error
+
+	// AckDeliveredForOwner completes a job only while it is still
+	// leased by `owner` (F6 fencing). Zero affected rows means the
+	// lease was lost and ErrLeaseLost is returned.
+	AckDeliveredForOwner(ctx context.Context, id uint, owner string, tx interface{}) error
 
 	// Defer reschedules a job for retry with exponential backoff.
 	Defer(ctx context.Context, id uint, nextAttemptAt time.Time, lastError string, tx interface{}) error
@@ -109,24 +116,72 @@ var _ Repository = (*SQLRepo)(nil)
 
 // SQLRepo implements Repository using database/sql.
 type SQLRepo struct {
-	db *sql.DB
+	db      *sql.DB
+	dialect *dbdialect.Info
 }
 
 func NewSQLRepo(db *sql.DB) *SQLRepo {
-	return &SQLRepo{db: db}
+	repo, err := NewSQLRepoChecked(db)
+	if err != nil {
+		// Compatibility constructor for existing tests/callers. Production
+		// runtime uses NewSQLRepoChecked and fails startup explicitly. Keeping
+		// the detection error encoded as an invalid dialect prevents a silent
+		// PostgreSQL-to-SQLite downgrade.
+		return &SQLRepo{db: db}
+	}
+	return repo
 }
 
-func (r *SQLRepo) exec(tx interface{}) interface {
-	ExecContext(ctx context.Context, query string, args ...interface{}) (sql.Result, error)
-	QueryRowContext(ctx context.Context, query string, args ...interface{}) *sql.Row
-	QueryContext(ctx context.Context, query string, args ...interface{}) (*sql.Rows, error)
-} {
+// NewSQLRepoChecked creates a dialect-aware queue repository. Queue is a
+// production-critical subsystem, so callers that control startup must use
+// this constructor and refuse to run if the backend cannot be identified.
+func NewSQLRepoChecked(db *sql.DB) (*SQLRepo, error) {
+	dialect, err := dbdialect.Detect(db)
+	if err != nil {
+		return nil, fmt.Errorf("queue dialect detection: %w", err)
+	}
+	return &SQLRepo{db: db, dialect: dialect}, nil
+}
+
+type sqlExecutor interface {
+	ExecContext(context.Context, string, ...interface{}) (sql.Result, error)
+	QueryRowContext(context.Context, string, ...interface{}) *sql.Row
+	QueryContext(context.Context, string, ...interface{}) (*sql.Rows, error)
+}
+
+type dialectExecutor struct {
+	inner   sqlExecutor
+	dialect *dbdialect.Info
+}
+
+func (e dialectExecutor) rewrite(query string) string {
+	if e.dialect == nil {
+		// Deliberately invalid SQL: an undetected dialect must fail visibly,
+		// never execute raw SQLite placeholders against an unknown backend.
+		return "/* queue dialect unavailable */ " + query
+	}
+	return e.dialect.Rewrite(query)
+}
+
+func (e dialectExecutor) ExecContext(ctx context.Context, query string, args ...interface{}) (sql.Result, error) {
+	return e.inner.ExecContext(ctx, e.rewrite(query), args...)
+}
+
+func (e dialectExecutor) QueryRowContext(ctx context.Context, query string, args ...interface{}) *sql.Row {
+	return e.inner.QueryRowContext(ctx, e.rewrite(query), args...)
+}
+
+func (e dialectExecutor) QueryContext(ctx context.Context, query string, args ...interface{}) (*sql.Rows, error) {
+	return e.inner.QueryContext(ctx, e.rewrite(query), args...)
+}
+
+func (r *SQLRepo) exec(tx interface{}) sqlExecutor {
 	if tx != nil {
 		if t, ok := tx.(*sql.Tx); ok {
-			return t
+			return dialectExecutor{inner: t, dialect: r.dialect}
 		}
 	}
-	return r.db
+	return dialectExecutor{inner: r.db, dialect: r.dialect}
 }
 
 const queueCols = `id, tenant_id, domain_id, mailbox_id, message_id, from_address, to_address,
@@ -152,7 +207,7 @@ func (r *SQLRepo) Enqueue(ctx context.Context, e *QueueEntry, tx interface{}) er
 	}
 
 	e2 := r.exec(tx)
-	res, err := e2.ExecContext(ctx, `
+	insertSQL := `
 		INSERT INTO coremail_queue
 			(tenant_id, domain_id, mailbox_id, message_id, from_address, to_address,
 			 recipient_domain, direction, status, priority, attempt_count, max_attempts,
@@ -160,13 +215,23 @@ func (r *SQLRepo) Enqueue(ctx context.Context, e *QueueEntry, tx interface{}) er
 			 remote_host, remote_ip, tls_used,
 			 lease_owner, lease_expires_at,
 			 created_at, updated_at, completed_at, dead_letter_at, deleted_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, 0, '', NULL, ?, ?, NULL, NULL, NULL)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, '', NULL, ?, ?, NULL, NULL, NULL)`
+	args := []interface{}{
 		e.TenantID, e.DomainID, e.MailboxID, e.MessageID, e.FromAddress, e.ToAddress,
 		e.RecipientDomain, string(e.Direction), string(e.Status), e.Priority, e.MaxAttempts,
 		e.NextAttemptAt, e.LastAttemptAt, e.LastError, string(e.DeliveryMode),
-		e.RemoteHost, e.RemoteIP,
+		e.RemoteHost, e.RemoteIP, r.databaseBool(false),
 		e.CreatedAt, e.UpdatedAt,
-	)
+	}
+	if r.dialect != nil && r.dialect.IsPostgres() {
+		var id uint
+		if err := e2.QueryRowContext(ctx, insertSQL+" RETURNING id", args...).Scan(&id); err != nil {
+			return fmt.Errorf("enqueue: %w", err)
+		}
+		e.ID = id
+		return nil
+	}
+	res, err := e2.ExecContext(ctx, insertSQL, args...)
 	if err != nil {
 		return fmt.Errorf("enqueue: %w", err)
 	}
@@ -315,7 +380,10 @@ func (r *SQLRepo) LeaseNext(ctx context.Context, owner string, leaseSeconds int,
 	if err != nil {
 		return nil, err
 	}
-	rowsAffected, _ := res.RowsAffected()
+	rowsAffected, err := res.RowsAffected()
+	if err != nil {
+		return nil, fmt.Errorf("queue lease rows affected: %w", err)
+	}
 	if rowsAffected == 0 {
 		return nil, nil // someone else got it
 	}
@@ -332,12 +400,15 @@ func (r *SQLRepo) LeaseNext(ctx context.Context, owner string, leaseSeconds int,
 // worker ceilings. Prevents one tenant from monopolizing the queue.
 func (r *SQLRepo) LeaseNextTenantFair(ctx context.Context, owner string, leaseSeconds int, allowedStatuses []QueueStatus, maxPerTenant, globalMax int, tx interface{}) (*QueueEntry, error) {
 	e := r.exec(tx)
+	now := nowFn()
 
 	// Check global ceiling.
 	if globalMax > 0 {
 		var active int
-		e.QueryRowContext(ctx,
-			"SELECT COUNT(*) FROM coremail_queue WHERE status='leased' AND lease_expires_at>datetime('now') AND deleted_at IS NULL").Scan(&active)
+		if err := e.QueryRowContext(ctx,
+			"SELECT COUNT(*) FROM coremail_queue WHERE status='leased' AND lease_expires_at>? AND deleted_at IS NULL", now).Scan(&active); err != nil {
+			return nil, fmt.Errorf("queue global lease count: %w", err)
+		}
 		if active >= globalMax {
 			return nil, nil
 		}
@@ -356,25 +427,30 @@ func (r *SQLRepo) LeaseNextTenantFair(ctx context.Context, owner string, leaseSe
 		candidates, err := e.QueryContext(ctx,
 			`SELECT q.tenant_id, COUNT(q2.id) as active
 			FROM coremail_queue q
-			LEFT JOIN coremail_queue q2 ON q2.tenant_id = q.tenant_id AND q2.status='leased' AND q2.lease_expires_at>datetime('now') AND q2.deleted_at IS NULL
+			LEFT JOIN coremail_queue q2 ON q2.tenant_id = q.tenant_id AND q2.status='leased' AND q2.lease_expires_at>? AND q2.deleted_at IS NULL
 			WHERE q.status IN (`+strings.Join(statusPlaceholders, ",")+`) AND q.deleted_at IS NULL
 			GROUP BY q.tenant_id
-			ORDER BY active ASC LIMIT 1`, statusArgs...)
-		if err == nil {
-			if candidates.Next() {
-				var tid uint
-				var activeCount int
-				candidates.Scan(&tid, &activeCount)
-				if activeCount < maxPerTenant {
-					chosenTenant = &tid
-				}
+			ORDER BY active ASC LIMIT 1`, append([]interface{}{now}, statusArgs...)...)
+		if err != nil {
+			return nil, fmt.Errorf("queue tenant fairness candidates: %w", err)
+		}
+		if candidates.Next() {
+			var tid uint
+			var activeCount int
+			if err := candidates.Scan(&tid, &activeCount); err != nil {
+				candidates.Close()
+				return nil, fmt.Errorf("queue tenant fairness scan: %w", err)
 			}
-			candidates.Close()
+			if activeCount < maxPerTenant {
+				chosenTenant = &tid
+			}
+		}
+		if err := candidates.Close(); err != nil {
+			return nil, fmt.Errorf("queue tenant fairness close: %w", err)
 		}
 	}
 
 	// Build WHERE clause.
-	now := nowFn()
 	whereStatus := "status IN (" + strings.Join(statusPlaceholders, ",") + ")"
 	whereArgs := append([]interface{}{}, statusArgs...)
 
@@ -407,7 +483,10 @@ func (r *SQLRepo) LeaseNextTenantFair(ctx context.Context, owner string, leaseSe
 	if err != nil {
 		return nil, err
 	}
-	n, _ := res.RowsAffected()
+	n, err := res.RowsAffected()
+	if err != nil {
+		return nil, fmt.Errorf("queue fair lease rows affected: %w", err)
+	}
 	if n == 0 {
 		return nil, nil
 	}
@@ -419,13 +498,37 @@ func (r *SQLRepo) LeaseNextTenantFair(ctx context.Context, owner string, leaseSe
 	entry.UpdatedAt = now
 	return entry, nil
 }
-
 func (r *SQLRepo) AckDelivered(ctx context.Context, id uint, tx interface{}) error {
 	now := nowFn()
 	e := r.exec(tx)
-	_, err := e.ExecContext(ctx, `UPDATE coremail_queue SET status=?, completed_at=?, updated_at=? WHERE id=? AND deleted_at IS NULL`,
+	_, err := e.ExecContext(ctx, `UPDATE coremail_queue SET status=?, 
+completed_at=?, updated_at=? WHERE id=? AND deleted_at IS NULL`,
 		string(StatusDelivered), now, now, id)
 	return err
+}
+
+// AckDeliveredForOwner is the F6-fenced completion: the row is
+// completed only if it is STILL leased by `owner`. If the lease
+// expired and another worker re-claimed the message, zero rows are
+// affected and the stale worker learns its lease was lost instead of
+// racing the new owner to complete the same message.
+func (r *SQLRepo) AckDeliveredForOwner(ctx context.Context, id uint, owner string, tx interface{}) error {
+	now := nowFn()
+	e := r.exec(tx)
+	res, err := e.ExecContext(ctx, `UPDATE coremail_queue SET status=?, 
+completed_at=?, updated_at=? WHERE id=? AND status=? AND lease_owner=? AND deleted_at IS NULL`,
+		string(StatusDelivered), now, now, id, string(StatusLeased), owner)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("queue fenced acknowledgement rows affected: %w", err)
+	}
+	if n == 0 {
+		return ErrLeaseLost
+	}
+	return nil
 }
 
 func (r *SQLRepo) Defer(ctx context.Context, id uint, nextAttemptAt time.Time, lastError string, tx interface{}) error {
@@ -454,7 +557,7 @@ func (r *SQLRepo) DeferWithDiagnostics(ctx context.Context, id uint, nextAttempt
 		WHERE id=? AND deleted_at IS NULL`,
 		string(StatusDeferred), nextAttemptAt, now,
 		diag.LastError, diag.StatusCode, diag.EnhancedCode,
-		diag.RemoteHost, diag.RemoteIP, boolToInt(diag.TLSUsed),
+		diag.RemoteHost, diag.RemoteIP, r.databaseBool(diag.TLSUsed),
 		now, id)
 	return err
 }
@@ -490,7 +593,7 @@ func (r *SQLRepo) BounceWithDiagnostics(ctx context.Context, id uint, diag Deliv
 		WHERE id=? AND deleted_at IS NULL`,
 		string(StatusBounced), now,
 		diag.LastError, diag.StatusCode, diag.EnhancedCode,
-		diag.RemoteHost, diag.RemoteIP, boolToInt(diag.TLSUsed),
+		diag.RemoteHost, diag.RemoteIP, r.databaseBool(diag.TLSUsed),
 		now, id)
 	return err
 }
@@ -521,7 +624,7 @@ func (r *SQLRepo) DeadLetterWithDiagnostics(ctx context.Context, id uint, diag D
 		WHERE id=? AND deleted_at IS NULL`,
 		string(StatusDeadLetter), now,
 		diag.LastError, diag.StatusCode, diag.EnhancedCode,
-		diag.RemoteHost, diag.RemoteIP, boolToInt(diag.TLSUsed),
+		diag.RemoteHost, diag.RemoteIP, r.databaseBool(diag.TLSUsed),
 		now, id)
 	return err
 }
@@ -633,6 +736,13 @@ func boolToInt(b bool) int {
 	return 0
 }
 
+func (r *SQLRepo) databaseBool(b bool) interface{} {
+	if r.dialect != nil && r.dialect.IsPostgres() {
+		return b
+	}
+	return boolToInt(b)
+}
+
 func (r *SQLRepo) ReleaseExpiredLeases(ctx context.Context, tx interface{}) (int64, error) {
 	now := nowFn()
 	e := r.exec(tx)
@@ -701,7 +811,7 @@ func (r *SQLRepo) Metrics(ctx context.Context, tenantID *uint, tx interface{}) (
 	}
 
 	// Status counts.
-	var oldestPendingStr sql.NullString
+	var oldestPending interface{}
 	row := e.QueryRowContext(ctx, `
 		SELECT
 			COALESCE(SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END), 0),
@@ -719,10 +829,17 @@ func (r *SQLRepo) Metrics(ctx context.Context, tenantID *uint, tx interface{}) (
 
 	err := row.Scan(&m.Pending, &m.Leased, &m.Delivering, &m.Deferred,
 		&m.Delivered, &m.Bounced, &m.DeadLetter, &m.Cancelled,
-		&m.Total, &m.AvgAttempts, &oldestPendingStr)
-	if oldestPendingStr.Valid && oldestPendingStr.String != "" {
-		t, parseErr := time.Parse("2006-01-02 15:04:05", oldestPendingStr.String)
-		if parseErr == nil {
+		&m.Total, &m.AvgAttempts, &oldestPending)
+	switch value := oldestPending.(type) {
+	case time.Time:
+		t := value.UTC()
+		m.OldestPending = &t
+	case string:
+		if t, parseErr := parseDatabaseTime(value); parseErr == nil {
+			m.OldestPending = &t
+		}
+	case []byte:
+		if t, parseErr := parseDatabaseTime(string(value)); parseErr == nil {
 			m.OldestPending = &t
 		}
 	}
@@ -730,6 +847,15 @@ func (r *SQLRepo) Metrics(ctx context.Context, tenantID *uint, tx interface{}) (
 		return nil, fmt.Errorf("metrics: %w", err)
 	}
 	return m, nil
+}
+
+func parseDatabaseTime(value string) (time.Time, error) {
+	for _, layout := range []string{time.RFC3339Nano, "2006-01-02 15:04:05.999999999Z07:00", "2006-01-02 15:04:05.999999999", "2006-01-02 15:04:05"} {
+		if t, err := time.Parse(layout, value); err == nil {
+			return t.UTC(), nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("unsupported database timestamp")
 }
 
 func (r *SQLRepo) CountByStatus(ctx context.Context, status QueueStatus, tenantID *uint, tx interface{}) (int64, error) {
@@ -755,7 +881,7 @@ func scanEntry(row interface {
 }) (*QueueEntry, error) {
 	var e QueueEntry
 	var direction, status, deliveryMode string
-	var tlsUsed int
+	var tlsUsed interface{}
 	err := row.Scan(
 		&e.ID, &e.TenantID, &e.DomainID, &e.MailboxID, &e.MessageID, &e.FromAddress, &e.ToAddress,
 		&e.RecipientDomain, &direction, &status, &e.Priority, &e.AttemptCount, &e.MaxAttempts,
@@ -774,6 +900,25 @@ func scanEntry(row interface {
 	e.Direction = Direction(direction)
 	e.Status = QueueStatus(status)
 	e.DeliveryMode = DeliveryMode(deliveryMode)
-	e.TLSUsed = tlsUsed == 1
+	e.TLSUsed = databaseBoolValue(tlsUsed)
 	return &e, nil
+}
+
+func databaseBoolValue(v interface{}) bool {
+	switch x := v.(type) {
+	case bool:
+		return x
+	case int64:
+		return x != 0
+	case int:
+		return x != 0
+	case []byte:
+		s := strings.ToLower(string(x))
+		return s == "1" || s == "true" || s == "t"
+	case string:
+		s := strings.ToLower(x)
+		return s == "1" || s == "true" || s == "t"
+	default:
+		return false
+	}
 }

@@ -23,4 +23,7 @@ jobs:
         run: |
           set -euo pipefail
           test -f docs/api/openapi.yaml || { echo "OpenAPI spec not found"; exit 1; }
+          test -f docs/api/public-v1.openapi.yaml || { echo "Public API OpenAPI spec not found"; exit 1; }
           npx @redocly/cli@1.25.0 lint docs/api/openapi.yaml --format stylish
+          npx @redocly/cli@1.25.0 lint docs/api/public-v1.openapi.yaml --format stylish
+          go test ./internal/api -run TestPublicRouterMatchesOpenAPI -count=1

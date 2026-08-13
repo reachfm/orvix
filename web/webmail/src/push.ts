@@ -1,3 +1,5 @@
+import { apiFetch } from "./csrf";
+
 const VAPID_PUBKEY_URL = "/api/v1/webmail/push/status";
 
 let swRegistration: ServiceWorkerRegistration | null = null;
@@ -34,10 +36,8 @@ export async function requestPushSubscription(): Promise<PushSubscriptionJSON | 
       applicationServerKey: vapidKey,
     });
     const subJSON = sub.toJSON();
-    const resp = await fetch("/api/v1/webmail/push/subscribe", {
+    const resp = await apiFetch("/api/v1/webmail/push/subscribe", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      credentials: "include",
       body: JSON.stringify({
         endpoint: subJSON.endpoint,
         keys: { p256dh: subJSON.keys?.p256dh, auth: subJSON.keys?.auth },
@@ -52,19 +52,15 @@ export async function requestPushSubscription(): Promise<PushSubscriptionJSON | 
 }
 
 export async function unsubscribePush(endpoint: string) {
-  await fetch("/api/v1/webmail/push/unsubscribe", {
+  await apiFetch("/api/v1/webmail/push/unsubscribe", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    credentials: "include",
     body: JSON.stringify({ endpoint }),
   });
 }
 
 export async function testPushNotification(endpoint: string) {
-  const resp = await fetch("/api/v1/webmail/push/test", {
+  const resp = await apiFetch("/api/v1/webmail/push/test", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    credentials: "include",
     body: JSON.stringify({ endpoint }),
   });
   return resp.ok;
