@@ -129,3 +129,67 @@ jobs:
             TestFreshInstall_SelfHealsSubscriptionForAlreadyBootstrappedTenant; do
             grep -q -- "--- PASS: ${name}" "$out" || { echo "missing PASS for ${name} against PostgreSQL" >&2; exit 1; }
           done
+
+      # ── Phase 2 acceptance: deliverability (H-5/B-4) ─────────────────────
+      #
+      # H-5 was a PostgreSQL-ONLY defect: the deliverability aggregation
+      # queries embedded raw SQLite-style `?` placeholders, so they failed at
+      # the driver and the Deliverability API returned 500 on PostgreSQL.
+      # SQLite runs could never catch it. These steps execute the aggregation,
+      # bucket, suppression-lifecycle and cross-dialect suites against the real
+      # PostgreSQL 16 service and FAIL if any of them merely skips — a skipped
+      # PostgreSQL test must never be reported as acceptance.
+      - name: Deliverability PostgreSQL tests (H-5/B-4)
+        run: |
+          set -euo pipefail
+          out="$(mktemp)"
+          go test ./internal/platform/deliverability/... -run 'Postgres|Equivalence_PostgreSQL' -count=1 -timeout 300s -v | tee "$out"
+          for name in \
+            TestPostgresSuppressionLifecycle \
+            TestPostgresSuppressionConcurrency_UpsertSingleRow \
+            TestPostgresMetricsAggregationAndBuckets \
+            TestPostgresAggregate_NullFreeEmptyWindow \
+            TestDeliverabilityEquivalence_PostgreSQL; do
+            if grep -q -- "--- SKIP: ${name}" "$out"; then
+              echo "::error::${name} SKIPPED; the PostgreSQL environment is not wired correctly" >&2
+              exit 1
+            fi
+            grep -q -- "--- PASS: ${name}" "$out" || { echo "::error::missing PASS for ${name} against PostgreSQL" >&2; exit 1; }
+          done
+
+      # Cross-dialect equivalence: the SAME behavioural table must produce the
+      # SAME numbers on SQLite, so a dialect-specific regression is caught by
+      # comparison rather than by one engine's tests alone.
+      - name: Deliverability SQLite equivalence counterpart
+        run: |
+          set -euo pipefail
+          out="$(mktemp)"
+          PGHOST= ORVIX_RUN_POSTGRES_DML_TEST= go test ./internal/platform/deliverability/... -run 'Equivalence_SQLite' -count=1 -timeout 300s -v | tee "$out"
+          grep -q -- "--- PASS: TestDeliverabilityEquivalence_SQLite" "$out" || { echo "::error::SQLite equivalence counterpart did not pass" >&2; exit 1; }
+
+      # ── Phase 2 acceptance: importer tenant ownership (H-7) ──────────────
+      #
+      # H-7 allowed platform imports to create tenant-owned entities with
+      # tenant_id = 0. These steps prove the invariant on PostgreSQL: the
+      # entry-point guard, the adapter choke point, immutable/cross-tenant
+      # ownership, the RETURNING-id insert path (never LastInsertId), and the
+      # read-only orphan diagnostic.
+      - name: Importer PostgreSQL portability and tenant-ownership tests (H-7)
+        run: |
+          set -euo pipefail
+          out="$(mktemp)"
+          go test ./internal/platform/importer/... -run 'TestPostgresImport|TestProductionAdaptersPortableInserts|TestInsertReturningID_PostgresSQLPath' -count=1 -timeout 300s -v | tee "$out"
+          for name in \
+            TestPostgresImport_RejectsZeroTenantBeforeStaging \
+            TestPostgresImport_AcceptsExplicitTargetTenant \
+            TestPostgresImport_TargetTenantImmutableAndCrossTenantDenied \
+            TestPostgresImport_AdaptersRejectTenantZero \
+            TestPostgresImport_OrphanDiagnosticReportsWithoutMutating \
+            TestProductionAdaptersPortableInserts \
+            TestInsertReturningID_PostgresSQLPath; do
+            if grep -q -- "--- SKIP: ${name}" "$out"; then
+              echo "::error::${name} SKIPPED; the PostgreSQL environment is not wired correctly" >&2
+              exit 1
+            fi
+            grep -q -- "--- PASS: ${name}" "$out" || { echo "::error::missing PASS for ${name} against PostgreSQL" >&2; exit 1; }
+          done

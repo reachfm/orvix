@@ -37,7 +37,28 @@ func (a *DeliveryAdapter) SelectRoute(ctx context.Context, tenantID uint, sender
 	if err != nil || provider == nil {
 		return &delivery.RelayRoute{Direct: true}, nil // fail safe to direct rather than error the whole delivery
 	}
-	password, _ := a.svc.decryptCredential(*provider)
+
+	// H-4: validate the destination BEFORE decrypting the credential. A host
+	// with unsafe syntax or an internal IP literal is rejected here, so its
+	// credential is never decrypted into memory. (Hostnames that resolve to
+	// an internal address are additionally caught by the validating dialer at
+	// connect time, before any byte or credential is transmitted.) Refusing
+	// the route as an error — rather than silently falling back to direct
+	// MX delivery — keeps a misconfigured/hostile relay from quietly
+	// exfiltrating mail out a different path; the delivery worker treats the
+	// error as a retriable failure.
+	if verr := ValidateRelayTarget(provider.Host, provider.Port); verr != nil {
+		return nil, ErrUnsafeTarget
+	}
+
+	password, derr := a.svc.decryptCredential(*provider)
+	if derr != nil {
+		// A credential that cannot be decrypted must fail the route, not
+		// dial with an empty password (which could authenticate anonymously
+		// somewhere it should not). The error is generic — it never carries
+		// the ciphertext, key path, or provider secret.
+		return nil, ErrCredentialUnavailable
+	}
 	return &delivery.RelayRoute{
 		ProviderID: route.ProviderID, ProviderName: route.ProviderName,
 		Host: route.Host, Port: route.Port, ConnSecurity: string(route.ConnSecurity),

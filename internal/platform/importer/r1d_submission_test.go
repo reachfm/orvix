@@ -48,12 +48,12 @@ func newSubmissionHarness(t *testing.T) *submissionHarness {
 func (h *submissionHarness) prepare(t *testing.T) *ImportJob {
 	t.Helper()
 	job, err := h.svc.Create(context.Background(), CreateImportParams{
-		Scope: "platform", Actor: "submission-test", SourceType: SourceCSV, SourceName: "s.csv",
+		TenantID: importTestTenantID, Scope: "platform", Actor: "submission-test", SourceType: SourceCSV, SourceName: "s.csv",
 	}, []byte("entity,name,domain\norganization,Acme,acme.test\n"))
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	if _, err := h.svc.Validate(context.Background(), job.ID, 0, "platform"); err != nil {
+	if _, err := h.svc.Validate(context.Background(), job.ID, importTestTenantID, "platform"); err != nil {
 		t.Fatalf("validate: %v", err)
 	}
 	return job

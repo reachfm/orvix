@@ -45,7 +45,7 @@ func TestCreateCleanupFailureRecordsPendingAndReconciles(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err := svc.Create(context.Background(), CreateImportParams{
-		Scope: "platform", Actor: "cleanup", SourceType: SourceCSV, SourceName: "c.csv",
+		TenantID: importTestTenantID, Scope: "platform", Actor: "cleanup", SourceType: SourceCSV, SourceName: "c.csv",
 	}, []byte("entity,name,domain\norganization,Acme,acme.test\n"))
 	if err == nil {
 		t.Fatal("expected create failure")
@@ -95,13 +95,13 @@ func TestValidateFailurePersistsState(t *testing.T) {
 	// A CSV with an unbalanced quote fails CSV parsing during validation.
 	data := []byte("entity,name,domain\norganization,\"unterminated,acme.test\n")
 	job, err := svc.Create(context.Background(), CreateImportParams{
-		Scope: "platform", Actor: "v", SourceType: SourceCSV, SourceName: "v.csv",
+		TenantID: importTestTenantID, Scope: "platform", Actor: "v", SourceType: SourceCSV, SourceName: "v.csv",
 	}, data)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
 
-	if _, err := svc.Validate(context.Background(), job.ID, 0, "platform"); err == nil {
+	if _, err := svc.Validate(context.Background(), job.ID, importTestTenantID, "platform"); err == nil {
 		t.Fatal("expected validation failure for unparseable CSV")
 	}
 

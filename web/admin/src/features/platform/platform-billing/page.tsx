@@ -2,16 +2,32 @@ import { useState } from "react";
 import { useBalance, useAdjustments, useReconciliation, useCreateAdjustment } from "./queries";
 import { formatMinorUnits, formatSignedMinorUnits } from "./formatters";
 import { ADJUSTMENT_TYPES, type AdjustmentType } from "./contract";
+import { useTenantScope } from "../tenant-context/queries";
+import TenantScopeBanner from "../tenant-context/components/TenantScopeBanner";
 
-interface Props {
-  tenantId: number;
-}
-
+/**
+ * B-3: Platform Billing requires an EXPLICIT tenant selection.
+ *
+ * This page previously received a hardcoded `tenantId={1}` from the router, so
+ * a Platform Super Admin was shown — and could mutate — the first customer's
+ * billing data regardless of which customer they intended. The tenant now
+ * comes from the canonical platform tenant scope (the same selector the
+ * mail-control pages use, sourced from the real organization inventory), and
+ * nothing is requested until a tenant is chosen.
+ *
+ * The selection is a request TARGET, never authentication: the backend still
+ * enforces platform RBAC and explicit tenant scoping on every route, so
+ * editing the selection in DevTools cannot bypass authorization.
+ */
 function money(cents: number, currency?: string): string {
   return formatMinorUnits(cents, currency);
 }
 
-export default function PlatformBillingPage({ tenantId }: Props) {
+export default function PlatformBillingPage() {
+  const { data: scope } = useTenantScope();
+  const tenantId = scope?.tenantId ?? null;
+  const tenantName = scope?.tenantName;
+
   const balance = useBalance(tenantId);
   const adjustments = useAdjustments(tenantId);
   const reconciliation = useReconciliation(tenantId);
@@ -50,12 +66,36 @@ export default function PlatformBillingPage({ tenantId }: Props) {
   const bal = balance.data;
   const rec = reconciliation.data;
 
+  // No tenant selected: render the selector only. Nothing is fetched and no
+  // tenant-specific figure is on screen, so an operator can never read one
+  // customer's ledger while believing they are looking at another's.
+  if (tenantId === null) {
+    return (
+      <div className="space-y-6">
+        <div>
+          <h2 className="text-xl font-semibold text-[var(--text-primary)]">Platform Billing</h2>
+          <p className="text-sm text-[var(--text-secondary)]">
+            Select a tenant to view its ledger balance, adjustments, and reconciliation.
+          </p>
+        </div>
+        <TenantScopeBanner />
+        <p className="text-sm text-[var(--text-muted)]" role="status">
+          No tenant selected.
+        </p>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-6">
       <div>
         <h2 className="text-xl font-semibold text-[var(--text-primary)]">Platform Billing</h2>
-        <p className="text-sm text-[var(--text-secondary)]">Tenant {tenantId} — ledger balance, adjustments, and reconciliation.</p>
+        <p className="text-sm text-[var(--text-secondary)]">
+          {tenantName ? `${tenantName} (tenant ${tenantId})` : `Tenant ${tenantId}`} — ledger balance, adjustments, and reconciliation.
+        </p>
       </div>
+
+      <TenantScopeBanner />
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         <div className="bg-[var(--bg-surface)] border border-[var(--border)] rounded-lg p-4">

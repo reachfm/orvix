@@ -205,14 +205,29 @@ type DeliverResult struct {
 	StatusMsg  string
 }
 
-// Deliver connects to the provider (encrypting nothing further — the
-// caller already holds the decrypted password for this one call) and
-// sends one message via MAIL FROM/RCPT TO/DATA. This is the function
-// the outbound delivery worker calls once SelectRoute has chosen a
-// non-direct route.
+// Deliver connects to the provider and sends one message via
+// MAIL FROM/RCPT TO/DATA. This is the function the outbound delivery worker
+// calls once SelectRoute has chosen a non-direct route.
+//
+// H-4: it dials through the SAME secure validating dialer that TestConnection
+// uses — never a plain net.Dial. The dialer resolves the provider hostname,
+// rejects the connection if any resolved A/AAAA record is a loopback /
+// private / link-local / metadata / CGNAT / reserved address, and connects
+// only to the validated IP. Because the connection is refused BEFORE any TCP
+// handshake, a blocked destination receives neither the AUTH credential nor a
+// single message byte — connectAndAuth is never reached. This closes the
+// SSRF where a tenant-controlled relay hostname resolves to an internal
+// address during real delivery.
 func Deliver(ctx context.Context, p Provider, password string, from string, to []string, data []byte) *DeliverResult {
+	return deliverWith(ctx, newValidatingDialer(), p, password, from, to, data)
+}
+
+// deliverWith is the delivery body parameterised by dialer, so the exported
+// Deliver always uses the secure dialer while tests can drive the SMTP
+// exchange over an in-process pipe.
+func deliverWith(ctx context.Context, d dialer, p Provider, password string, from string, to []string, data []byte) *DeliverResult {
 	result := &HealthCheckResult{}
-	conn, reader, err := connectAndAuth(ctx, netDialer{}, p, password, result)
+	conn, reader, err := connectAndAuth(ctx, d, p, password, result)
 	if err != nil {
 		return &DeliverResult{TempFail: true, StatusMsg: redactHealthError(result.Error)}
 	}

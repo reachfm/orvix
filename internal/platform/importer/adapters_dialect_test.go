@@ -111,7 +111,17 @@ func TestProductionAdaptersPortableInserts(t *testing.T) {
 	})
 
 	t.Run("alias insert returns real id", func(t *testing.T) {
-		if _, err := db.Exec(`INSERT INTO coremail_domains (tenant_id, name) VALUES (?, ?)`, 7, "example.test"); err != nil {
+		// The seed must use dialect placeholders like every other statement in
+		// this file: a raw `?` reaches PostgreSQL verbatim and fails with
+		// `syntax error at or near ","` (SQLSTATE 42601). This subtest had
+		// never executed against PostgreSQL until the Phase 2 acceptance gate
+		// ran it there, so the harness bug was invisible. The production
+		// CreateAlias path was always correct — it rewrites through
+		// insertReturningID/dialect.Rewrite.
+		if _, err := db.Exec(
+			`INSERT INTO coremail_domains (tenant_id, name) VALUES (`+
+				dialect.Placeholder(1)+`, `+dialect.Placeholder(2)+`)`,
+			7, "example.test"); err != nil {
 			t.Fatal(err)
 		}
 		id, err := adapters.Alias.CreateAlias(ctx, "team@example.test", "boss@example.test", 7, 0)

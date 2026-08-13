@@ -133,17 +133,22 @@ func (r *Repository) RecordSignal(ctx context.Context, s *Signal) (inserted bool
 // the same COUNT(*) FILTER-style aggregation (implemented portably
 // via SUM(CASE...) since SQLite lacks FILTER).
 func (r *Repository) Aggregate(ctx context.Context, dim Dimension, dimValue string, start, end time.Time) (*WindowMetrics, error) {
+	// H-5: every placeholder is dialect-rewritten. Raw `?` here made this
+	// aggregation 500 on PostgreSQL (which needs $1..$n), returning a 500
+	// from the Deliverability API. The argument ORDER is unchanged; only the
+	// placeholder token is dialect-aware.
+	ph := func(n int) string { return r.dialect.Placeholder(n) }
 	row := r.db.QueryRowContext(ctx, `
 		SELECT
 			COUNT(*),
-			COALESCE(SUM(CASE WHEN type=? THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN type=? THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN type=? THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN type=? THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN type=? THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN type=`+ph(1)+` THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN type=`+ph(2)+` THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN type=`+ph(3)+` THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN type=`+ph(4)+` THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN type=`+ph(5)+` THEN 1 ELSE 0 END), 0),
 			COALESCE(AVG(CASE WHEN latency_ms > 0 THEN latency_ms END), 0)
 		FROM platform_deliverability_signals
-		WHERE dimension=? AND dimension_value=? AND recorded_at >= ? AND recorded_at < ?`,
+		WHERE dimension=`+ph(6)+` AND dimension_value=`+ph(7)+` AND recorded_at >= `+ph(8)+` AND recorded_at < `+ph(9),
 		SignalDelivered, SignalTempFail, SignalPermFail, SignalBounce, SignalComplaint,
 		dim, dimValue, start, end)
 
@@ -270,22 +275,25 @@ type CategoryTotals struct {
 // [start, end). A single query; every rate is derived from the same
 // COUNT(CASE...) aggregation (portable: SQLite lacks FILTER).
 func (r *Repository) AggregateTenant(ctx context.Context, tenantID uint, start, end time.Time) (*CategoryTotals, error) {
+	// H-5: dialect-rewritten placeholders (was raw `?`, which 500'd on
+	// PostgreSQL). Argument order unchanged.
+	ph := func(n int) string { return r.dialect.Placeholder(n) }
 	row := r.db.QueryRowContext(ctx, `
 		SELECT
 			COUNT(*),
-			COALESCE(SUM(CASE WHEN type=? THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN type=? THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN type=? THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN type=? THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN type=? THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN type=? THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN type=? THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN type=? THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN type=? THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN type=? THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN type=? THEN 1 ELSE 0 END), 0)
+			COALESCE(SUM(CASE WHEN type=`+ph(1)+` THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN type=`+ph(2)+` THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN type=`+ph(3)+` THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN type=`+ph(4)+` THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN type=`+ph(5)+` THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN type=`+ph(6)+` THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN type=`+ph(7)+` THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN type=`+ph(8)+` THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN type=`+ph(9)+` THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN type=`+ph(10)+` THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN type=`+ph(11)+` THEN 1 ELSE 0 END), 0)
 		FROM platform_deliverability_signals
-		WHERE tenant_id=? AND recorded_at >= ? AND recorded_at < ?`,
+		WHERE tenant_id=`+ph(12)+` AND recorded_at >= `+ph(13)+` AND recorded_at < `+ph(14),
 		SignalDelivered, SignalTempFail, SignalPermFail, SignalBounce, SignalComplaint,
 		SignalSpamReject, SignalPolicyReject, SignalThrottled, SignalTLSFailure, SignalAuthFailure,
 		SignalSuppressed, tenantID, start, end)

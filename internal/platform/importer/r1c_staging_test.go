@@ -201,7 +201,7 @@ func TestTamperDetectedBeforeEntityCreation(t *testing.T) {
 	svc := NewService(repo, testAdapters(t, db), staging, nil, nil)
 
 	job, err := svc.Create(context.Background(), CreateImportParams{
-		Scope: "platform", Actor: "tester", SourceType: SourceCSV, SourceName: "acme.csv",
+		TenantID: importTestTenantID, Scope: "platform", Actor: "tester", SourceType: SourceCSV, SourceName: "acme.csv",
 	}, data)
 	if err != nil {
 		t.Fatalf("create: %v", err)
@@ -214,7 +214,7 @@ func TestTamperDetectedBeforeEntityCreation(t *testing.T) {
 	}
 
 	// Validation must fail against the persisted SourceHash.
-	if _, err := svc.Validate(context.Background(), job.ID, 0, "platform"); err == nil {
+	if _, err := svc.Validate(context.Background(), job.ID, importTestTenantID, "platform"); err == nil {
 		t.Fatal("expected validation to fail after tampering")
 	} else if !isHashMismatch(err) {
 		t.Fatalf("expected hash mismatch, got %v", err)
@@ -238,7 +238,7 @@ func TestTamperDetectedOnDurableExecution(t *testing.T) {
 	data := []byte("entity,name,domain\norganization,Acme,acme.test\n")
 	svc := NewService(repo, testAdapters(t, db), staging, nil, nil)
 	job, err := svc.Create(context.Background(), CreateImportParams{
-		Scope: "platform", Actor: "tester", SourceType: SourceCSV, SourceName: "acme.csv",
+		TenantID: importTestTenantID, Scope: "platform", Actor: "tester", SourceType: SourceCSV, SourceName: "acme.csv",
 	}, data)
 	if err != nil {
 		t.Fatalf("create: %v", err)

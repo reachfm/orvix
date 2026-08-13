@@ -23,12 +23,12 @@ func prepareValidated(t *testing.T, h *testWorkerHarness, name, domain string) *
 	t.Helper()
 	data := []byte("entity,name,domain\norganization," + name + "," + domain + "\n")
 	job, err := h.svc.Create(context.Background(), CreateImportParams{
-		Scope: "platform", Actor: "r1e-test", SourceType: SourceCSV, SourceName: "r1e.csv",
+		TenantID: importTestTenantID, Scope: "platform", Actor: "r1e-test", SourceType: SourceCSV, SourceName: "r1e.csv",
 	}, data)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	if _, err := h.svc.Validate(context.Background(), job.ID, 0, "platform"); err != nil {
+	if _, err := h.svc.Validate(context.Background(), job.ID, importTestTenantID, "platform"); err != nil {
 		t.Fatalf("validate: %v", err)
 	}
 	return job
