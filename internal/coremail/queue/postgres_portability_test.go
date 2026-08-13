@@ -113,6 +113,36 @@ func TestPostgresQueueAndDeliveryHistory(t *testing.T) {
 		if err != nil || len(listed) != 1 || !listed[0].TLSUsed {
 			t.Fatalf("run %d list history: attempts=%+v err=%v", run, listed, err)
 		}
+
+		// Drain this run's entry before the next iteration.
+		//
+		// Without this, run 2's LeaseNext returns run 1's entry rather than
+		// its own: DeferWithDiagnostics set NextAttemptAt to now, so the
+		// earlier entry is immediately due again and wins the queue's
+		// oldest-due ordering. That is correct queue behaviour — the test's
+		// re-run loop was the thing that assumed otherwise. The bug stayed
+		// invisible while no workflow executed this test against PostgreSQL.
+		//
+		// Acknowledging through AckDeliveredForOwner rather than a bare
+		// status update also exercises the LEASE-FENCED acknowledgement path
+		// on real PostgreSQL: the ack is accepted only for the worker that
+		// currently holds the lease.
+		if err := engine.AckDeliveredForOwner(ctx, entry.ID, fmt.Sprintf("worker-%d", run)); err != nil {
+			t.Fatalf("run %d ack delivered for lease owner: %v", run, err)
+		}
+		acked, err := engine.Repo.Get(ctx, entry.ID, nil)
+		if err != nil || acked == nil {
+			t.Fatalf("run %d reload after ack: entry=%+v err=%v", run, acked, err)
+		}
+		if acked.Status != queue.StatusDelivered {
+			t.Fatalf("run %d entry must be delivered after a fenced ack, got %q", run, acked.Status)
+		}
+
+		// A stale worker that no longer holds the lease must not be able to
+		// acknowledge the same entry again.
+		if err := engine.AckDeliveredForOwner(ctx, entry.ID, "stale-worker"); err == nil {
+			t.Fatalf("run %d: a worker without the lease must not acknowledge the entry", run)
+		}
 	}
 
 	metrics, err := engine.Repo.Metrics(ctx, nil, nil)
