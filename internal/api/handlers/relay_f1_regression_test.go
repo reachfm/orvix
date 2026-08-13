@@ -80,7 +80,7 @@ func TestTenantRelayMalformedJSONIsRejectedWithoutMutation(t *testing.T) {
 	env := f1TenantEnv(t)
 	tenantCSRF := importRouteCSRF(t, env.router, env.tenantAdm)
 	var before int
-	if err := env.db.QueryRow("SELECT COUNT(*) FROM coremail_relay_pools").Scan(&before); err != nil {
+	if err := env.db.QueryRow("SELECT COUNT(*) FROM platform_relay_pools").Scan(&before); err != nil {
 		t.Fatalf("count pools before request: %v", err)
 	}
 
@@ -89,7 +89,7 @@ func TestTenantRelayMalformedJSONIsRejectedWithoutMutation(t *testing.T) {
 		t.Fatalf("malformed JSON must return 400, got %d: %s", resp.StatusCode, raw)
 	}
 	var after int
-	if err := env.db.QueryRow("SELECT COUNT(*) FROM coremail_relay_pools").Scan(&after); err != nil {
+	if err := env.db.QueryRow("SELECT COUNT(*) FROM platform_relay_pools").Scan(&after); err != nil {
 		t.Fatalf("count pools after request: %v", err)
 	}
 	if after != before {
@@ -107,7 +107,7 @@ func TestTenantRelayRouteRejectsPlatformIdentityWithoutTenantContext(t *testing.
 		t.Fatalf("platform identity without tenant context must return 403, got %d: %s", resp.StatusCode, raw)
 	}
 	var count int
-	if err := env.db.QueryRow("SELECT COUNT(*) FROM coremail_relay_pools WHERE name='must-not-exist'").Scan(&count); err != nil {
+	if err := env.db.QueryRow("SELECT COUNT(*) FROM platform_relay_pools WHERE name='must-not-exist'").Scan(&count); err != nil {
 		t.Fatalf("count forbidden pool: %v", err)
 	}
 	if count != 0 {
