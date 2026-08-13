@@ -39,13 +39,16 @@ import (
 	"io"
 	"net"
 	"os"
+	"path"
 	"path/filepath"
 	"reflect"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
+
+	"github.com/orvix/orvix/internal/fsguard"
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/orvix/orvix/internal/config"
@@ -2141,78 +2144,214 @@ func storeBackupTargetSecret(c fiber.Ctx, h *Handler, targetID int64, password, 
 // =====================================================================
 // File System Access — safe read-only browser.
 // =====================================================================
-
-// The browser is restricted to an admin-defined allowlist
-// of approved roots. The default-approved roots are:
-//   - /var/log/orvix/        — runtime / SMTP logs
-//   - /var/backups/orvix/    — backup archive directory
-//   - /var/lib/orvix/        — runtime data, mailstore
-//   - /etc/orvix/tls/        — TLS certs we uploaded
-//   - /var/log/              — generic log dir
 //
-// Trying to navigate outside the allowlist returns 403.
-// Path traversal attempts (../) are normalised and
-// re-checked. Secrets are redacted: any file whose name
-// matches a secret-shape pattern (jwt_key.pem,
-// vapid_private*.pem, id_rsa*, *.key.pem, etc.) is
-// reported as "secret_redacted" rather than returning
-// content.
+// H-8: the previous implementation confined paths with a bare
+// strings.HasPrefix against a cleaned root and no separator boundary, so
+// "/var/lib/orvix-secrets/..." satisfied the "/var/lib/orvix" root. It also
+// never resolved symlinks (os.Stat/os.Open follow them), so a link planted
+// inside an approved root redirected reads to any file the service account
+// could open, and its secret-shape regex missed the AES master key
+// (encryption_key), the SQLite database (orvix.db and its -wal/-shm
+// sidecars), the initial admin credentials (admin-login.txt), .env files and
+// backup archives.
+//
+// The contract is now:
+//   - The caller names a root by OPAQUE ID; host paths never appear in a
+//     request or a response.
+//   - The caller supplies a RELATIVE path. Absolute paths, drive-qualified
+//     paths and any ".." are rejected outright (internal/fsguard).
+//   - Confinement is re-verified AFTER symlink evaluation against an exact
+//     root or root+separator prefix.
+//   - Devices, sockets and FIFOs are refused; listings and reads are bounded.
+//   - Secret-shaped files are refused by a canonical basename/extension
+//     policy, never returned.
+//   - Every allowed and denied access is audited with the root ID and the
+//     relative path only.
 
-var fsApprovedRoots = []string{
-	"/var/log/orvix/",
-	"/var/backups/orvix/",
-	"/var/lib/orvix/",
-	"/etc/orvix/tls/",
-	"/var/log/",
+// fsRootSpecs maps the opaque root ID a caller may request to its host
+// directory. Callers never send or receive the host path.
+var fsRootSpecs = map[string]string{
+	"orvix-logs":    "/var/log/orvix",
+	"orvix-backups": "/var/backups/orvix",
+	"orvix-data":    "/var/lib/orvix",
+	"orvix-tls":     "/etc/orvix/tls",
+	"system-logs":   "/var/log",
 }
 
-// AdminFsBrowse serves GET /api/v1/admin/fs/browse?path=...
-// Lists the directory contents in a safe, structured form.
-// Nothing is returned for files outside the approved
-// roots. Secret-shaped files are flagged but not returned.
+var (
+	fsGuardOnce sync.Once
+	fsGuardInst *fsguard.Guard
+	fsGuardErr  error
+)
+
+// fsGuard lazily resolves the approved roots once per process.
+func fsGuard() (*fsguard.Guard, error) {
+	fsGuardOnce.Do(func() {
+		fsGuardInst, fsGuardErr = fsguard.New(fsRootSpecs)
+	})
+	return fsGuardInst, fsGuardErr
+}
+
+// Bounds. A listing or read must never be unbounded: an operator endpoint is
+// not a bulk-export channel and an enormous directory would pin memory.
+const (
+	fsMaxListEntries = 1000
+	fsMaxReadBytes   = 64 * 1024
+)
+
+// fsSecretBasenames are exact filenames whose contents must never be served.
+var fsSecretBasenames = map[string]struct{}{
+	"encryption_key":       {},
+	"encryption.key":       {},
+	"admin-login.txt":      {},
+	"bootstrap.env":        {},
+	"external-backup.env":  {},
+	"orvix.yaml":           {},
+	"orvix.yml":            {},
+	"credentials":          {},
+	"authorized_keys":      {},
+	"known_hosts":          {},
+	"shadow":               {},
+	"passwd":               {},
+	"jwt.pem":              {},
+	"jwt_key.pem":          {},
+	"privkey.pem":          {},
+	"id_rsa":               {},
+	"id_ed25519":           {},
+	"id_ecdsa":             {},
+	"id_dsa":               {},
+	".env":                 {},
+	".netrc":               {},
+	".pgpass":              {},
+	"dkim.key":             {},
+	"backup_target_secret": {},
+}
+
+// fsSecretExtensions are suffixes that indicate key material, databases, or
+// archives. Matching is on the normalised (lowercased) basename so
+// "Orvix.DB-WAL" is caught too.
+var fsSecretSuffixes = []string{
+	// Key / certificate material.
+	".pem", ".key", ".p12", ".pfx", ".jks", ".keystore", ".asc", ".gpg", ".kdbx",
+	// Databases and their sidecars/backups.
+	".db", ".db-wal", ".db-shm", ".db-journal", ".sqlite", ".sqlite3", ".sql", ".dump",
+	// Archives / backups (may contain any of the above).
+	".enc", ".bak", ".backup", ".tar", ".tgz", ".tar.gz", ".zip", ".gz", ".age",
+	// Environment / secret files.
+	".env",
+}
+
+// fsSecretPrefixes catch families like id_rsa.pub, id_rsa_old, .env.production.
+var fsSecretPrefixes = []string{"id_rsa", "id_ed25519", "id_ecdsa", "id_dsa", ".env", "vapid_private"}
+
+// fsSecretSubstrings catch names that embed a secret marker anywhere.
+var fsSecretSubstrings = []string{"private", "secret", "password", "passwd", "credential", "token", "apikey", "api_key"}
+
+// isSecretName reports whether a basename must never have its contents
+// served. It deliberately errs toward refusal: a false positive costs an
+// operator one denied read, a false negative leaks key material.
+func isSecretName(name string) bool {
+	lower := strings.ToLower(strings.TrimSpace(name))
+	if lower == "" {
+		return true
+	}
+	if _, ok := fsSecretBasenames[lower]; ok {
+		return true
+	}
+	for _, suffix := range fsSecretSuffixes {
+		if strings.HasSuffix(lower, suffix) {
+			return true
+		}
+	}
+	for _, prefix := range fsSecretPrefixes {
+		if strings.HasPrefix(lower, prefix) {
+			return true
+		}
+	}
+	for _, needle := range fsSecretSubstrings {
+		if strings.Contains(lower, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+// fsAccessError maps a guard error to a stable, non-leaking response. The
+// message never contains a host path.
+func fsAccessError(c fiber.Ctx, err error) error {
+	switch {
+	case errors.Is(err, fsguard.ErrNoSuchRoot):
+		return fiber.NewError(fiber.StatusForbidden, "root is not in the filesystem allowlist")
+	case errors.Is(err, fsguard.ErrPathEscapesRoot):
+		return fiber.NewError(fiber.StatusForbidden, "path is outside the approved filesystem root")
+	case errors.Is(err, fsguard.ErrUnsupportedFileType):
+		return fiber.NewError(fiber.StatusBadRequest, "unsupported file type")
+	case errors.Is(err, fsguard.ErrInvalidRoot):
+		return fiber.NewError(fiber.StatusServiceUnavailable, "filesystem access is not available on this host")
+	case os.IsNotExist(err):
+		return fiber.NewError(fiber.StatusNotFound, "not found")
+	default:
+		return fiber.NewError(fiber.StatusBadRequest, "filesystem access denied")
+	}
+}
+
+// AdminFsBrowse serves GET /api/v1/admin/fs/browse?root=<id>&path=<relative>
+// and lists directory contents in a safe, structured form. Only relative
+// paths are returned; host paths are never disclosed.
 func (h *Handler) AdminFsBrowse(c fiber.Ctx) error {
 	if h.cfg == nil {
 		return fiber.NewError(fiber.StatusServiceUnavailable, "config not ready")
 	}
-	root := c.Query("root", "/var/log/orvix/")
-	root = filepath.Clean(root)
-	if !isFsApprovedRoot(root) {
-		return fiber.NewError(fiber.StatusForbidden, "root is not in the FS Access allowlist")
-	}
-	// Ensure the path exists and is a directory.
-	info, err := os.Stat(root)
+	guard, err := fsGuard()
 	if err != nil {
-		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("stat: %v", err))
+		return fsAccessError(c, err)
+	}
+	rootID := c.Query("root", "orvix-logs")
+	rel := c.Query("path", "")
+
+	res, info, err := guard.StatConfined(rootID, rel)
+	if err != nil {
+		h.writeAuditLog(c, "admin.fs.browse.denied", fmt.Sprintf("root:%s|path:%s", rootID, rel))
+		return fsAccessError(c, err)
 	}
 	if !info.IsDir() {
-		return fiber.NewError(fiber.StatusBadRequest, "root is not a directory")
+		return fiber.NewError(fiber.StatusBadRequest, "path is not a directory")
 	}
-	entries, err := os.ReadDir(root)
+	entries, err := os.ReadDir(res.Abs)
 	if err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("readdir: %v", err))
+		return fiber.NewError(fiber.StatusInternalServerError, "failed to list directory")
 	}
+
 	type entry struct {
 		Name       string `json:"name"`
-		Path       string `json:"path"`
+		Path       string `json:"path"` // root-relative, never absolute
 		IsDir      bool   `json:"is_dir"`
 		Size       int64  `json:"size"`
 		ModifiedAt string `json:"modified_at"`
 		SecretFlag bool   `json:"secret_flag"`
 	}
 	out := make([]entry, 0, len(entries))
+	truncated := false
 	for _, e := range entries {
-		full := filepath.Join(root, e.Name())
-		info, err := e.Info()
-		if err != nil {
+		if len(out) >= fsMaxListEntries {
+			truncated = true
+			break
+		}
+		fi, ierr := e.Info()
+		if ierr != nil {
 			continue
+		}
+		childRel := path.Join(res.Rel, e.Name())
+		if res.Rel == "." {
+			childRel = e.Name()
 		}
 		out = append(out, entry{
 			Name:       e.Name(),
-			Path:       full,
+			Path:       childRel,
 			IsDir:      e.IsDir(),
-			Size:       info.Size(),
-			ModifiedAt: info.ModTime().UTC().Format(time.RFC3339),
-			SecretFlag: isSecretPath(full),
+			Size:       fi.Size(),
+			ModifiedAt: fi.ModTime().UTC().Format(time.RFC3339),
+			SecretFlag: isSecretName(e.Name()),
 		})
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -2221,97 +2360,87 @@ func (h *Handler) AdminFsBrowse(c fiber.Ctx) error {
 		}
 		return strings.ToLower(out[i].Name) < strings.ToLower(out[j].Name)
 	})
+
+	h.writeAuditLog(c, "admin.fs.browse", fmt.Sprintf("root:%s|path:%s|entries:%d", rootID, res.Rel, len(out)))
+	c.Set("Cache-Control", "no-store")
 	return c.JSON(fiber.Map{
-		"root":           root,
-		"approved_roots": fsApprovedRoots,
+		"root":           rootID,
+		"path":           res.Rel,
+		"approved_roots": guard.RootIDs(),
 		"entries":        out,
+		"truncated":      truncated,
+		"max_entries":    fsMaxListEntries,
 	})
 }
 
-// AdminFsRead serves GET
-// /api/v1/admin/fs/read?path=...
-// Returns the (possibly truncated, max 64KB) contents of
-// a file under an approved root. Secret-shaped files are
-// refused with a clear "secret_redacted" response rather
-// than echoing their contents.
+// AdminFsRead serves GET /api/v1/admin/fs/read?root=<id>&path=<relative> and
+// returns a bounded slice of a regular file. Secret-shaped files are refused.
 func (h *Handler) AdminFsRead(c fiber.Ctx) error {
-	raw := c.Query("path", "")
-	if raw == "" {
+	if h.cfg == nil {
+		return fiber.NewError(fiber.StatusServiceUnavailable, "config not ready")
+	}
+	guard, err := fsGuard()
+	if err != nil {
+		return fsAccessError(c, err)
+	}
+	rootID := c.Query("root", "orvix-logs")
+	rel := c.Query("path", "")
+	if strings.TrimSpace(rel) == "" {
 		return fiber.NewError(fiber.StatusBadRequest, "path is required")
 	}
-	cleaned := filepath.Clean(raw)
-	// Reject anything outside approved roots.
-	parent := filepath.Dir(cleaned)
-	if !isFsApprovedRoot(parent) && !isFsApprovedRoot(cleaned) && !isUnderApprovedRoot(cleaned) {
-		return fiber.NewError(fiber.StatusForbidden, "path is outside the FS Access allowlist")
-	}
-	// Reject secret-shaped files.
-	if isSecretPath(cleaned) {
-		return c.JSON(fiber.Map{
-			"path":            cleaned,
-			"secret_redacted": true,
-			"reason":          "file name matches a secret-shape pattern (private key, password file, etc.); contents not returned",
-		})
-	}
-	info, err := os.Stat(cleaned)
+
+	res, info, err := guard.StatConfined(rootID, rel)
 	if err != nil {
-		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("stat: %v", err))
+		h.writeAuditLog(c, "admin.fs.read.denied", fmt.Sprintf("root:%s|path:%s", rootID, rel))
+		return fsAccessError(c, err)
 	}
 	if info.IsDir() {
 		return fiber.NewError(fiber.StatusBadRequest, "path is a directory; use browse instead")
 	}
-	f, err := os.Open(cleaned)
+	if !info.Mode().IsRegular() {
+		return fiber.NewError(fiber.StatusBadRequest, "unsupported file type")
+	}
+
+	// Refuse secret-shaped files by canonical name policy.
+	if isSecretName(filepath.Base(res.Abs)) {
+		h.writeAuditLog(c, "admin.fs.read.secret_refused", fmt.Sprintf("root:%s|path:%s", rootID, res.Rel))
+		c.Set("Cache-Control", "no-store")
+		return c.JSON(fiber.Map{
+			"root":            rootID,
+			"path":            res.Rel,
+			"secret_redacted": true,
+			"reason":          "file matches a secret-shape policy (key material, database, credential, or archive); contents are never returned",
+		})
+	}
+
+	// Bound the read. A file larger than the cap is truncated, never streamed
+	// in full.
+	f, err := os.Open(res.Abs)
 	if err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("open: %v", err))
+		return fiber.NewError(fiber.StatusInternalServerError, "failed to open file")
 	}
 	defer f.Close()
-	const maxBytes = 64 * 1024
-	buf := make([]byte, maxBytes+1)
-	n, _ := io.ReadFull(f, buf)
-	truncated := n > maxBytes
-	if truncated {
-		n = maxBytes
+	buf := make([]byte, fsMaxReadBytes+1)
+	n, rerr := io.ReadFull(f, buf)
+	if rerr != nil && rerr != io.EOF && rerr != io.ErrUnexpectedEOF {
+		return fiber.NewError(fiber.StatusInternalServerError, "failed to read file")
 	}
+	truncated := n > fsMaxReadBytes
+	if truncated {
+		n = fsMaxReadBytes
+	}
+
+	h.writeAuditLog(c, "admin.fs.read", fmt.Sprintf("root:%s|path:%s|bytes:%d", rootID, res.Rel, n))
+	c.Set("Cache-Control", "no-store")
 	return c.JSON(fiber.Map{
-		"path":      cleaned,
+		"root":      rootID,
+		"path":      res.Rel,
 		"size":      info.Size(),
 		"truncated": truncated,
-		"max_bytes": maxBytes,
+		"max_bytes": fsMaxReadBytes,
 		"content":   string(buf[:n]),
 		"is_text":   isLikelyText(buf[:n]),
 	})
-}
-
-// isUnderApprovedRoot reports whether a path falls under
-// any of the FS Access approved roots.
-func isUnderApprovedRoot(p string) bool {
-	clean := filepath.Clean(p) + string(os.PathSeparator)
-	for _, root := range fsApprovedRoots {
-		if strings.HasPrefix(clean, filepath.Clean(root)) {
-			return true
-		}
-	}
-	return false
-}
-
-// isFsApprovedRoot reports whether p is itself an
-// approved root.
-func isFsApprovedRoot(p string) bool {
-	clean := filepath.Clean(p)
-	for _, root := range fsApprovedRoots {
-		if clean == filepath.Clean(root) {
-			return true
-		}
-	}
-	return false
-}
-
-// secretPathPattern matches filenames that should never
-// have their contents returned. Kept narrow on purpose.
-var secretPathPattern = regexp.MustCompile(`(?i)(jwt_key\.pem|vapid_private.*\.pem|privkey\.pem|.*_rsa$|id_rsa[A-Za-z0-9._-]*|\.key\.pem$|password\s*file|backup_target_secret)`)
-
-func isSecretPath(p string) bool {
-	return secretPathPattern.MatchString(p)
 }
 
 // isLikelyText estimates whether a buffer looks like a

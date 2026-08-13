@@ -47,11 +47,11 @@ import (
 	platformbilling "github.com/orvix/orvix/internal/platform/billing"
 	"github.com/orvix/orvix/internal/platform/bulkprovision"
 	"github.com/orvix/orvix/internal/platform/cluster"
+	"github.com/orvix/orvix/internal/platform/deliverability"
 	platformimporter "github.com/orvix/orvix/internal/platform/importer"
 	platformjobs "github.com/orvix/orvix/internal/platform/jobs"
-	"github.com/orvix/orvix/internal/platform/deliverability"
-	"github.com/orvix/orvix/internal/platform/mailcontrol"
 	"github.com/orvix/orvix/internal/platform/kernel"
+	"github.com/orvix/orvix/internal/platform/mailcontrol"
 	"github.com/orvix/orvix/internal/platform/relay"
 	"github.com/orvix/orvix/internal/platform/retention"
 	"github.com/orvix/orvix/internal/ruler"
@@ -74,6 +74,7 @@ type Router struct {
 	csrf         *auth.CSRFManager
 	apikeys      *auth.APIKeyManager
 	redisLimiter *auth.RedisRateLimiter
+	authLimiter  *auth.AuthLimiter
 	logger       *zap.Logger
 	cfg          *config.Config
 	h            *handlers.Handler
@@ -101,18 +102,58 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 		// this, c.IP() returns the loopback address for every
 		// request and the rate limiter, audit log, and login
 		// rate-limit gate see the wrong value.
+		//
+		// The client-IP model (H-6): c.IP() is the ONLY client
+		// address ever consumed by the authentication throttles,
+		// the login flow, audit records and lockout keys. Fiber
+		// resolves it as follows, and nothing in this codebase
+		// reads a forwarding header directly:
+		//
+		//  1. If the immediate peer is NOT a trusted proxy
+		//     (trusted = listed in TrustedProxies, a loopback
+		//     address via Loopback:true, or a private/link-local
+		//     address when those flags were enabled — none are),
+		//     the X-Forwarded-For header is IGNORED and c.IP()
+		//     is the socket peer. A random internet client
+		//     therefore cannot spoof an IP.
+		//  2. If the peer IS trusted, the X-Forwarded-For chain
+		//     is walked right-to-left, skipping entries that are
+		//     themselves trusted proxies, and the first valid
+		//     untrusted address is returned. Malformed entries
+		//     are skipped and every entry is validated with
+		//     netip before it can be trusted.
+		//  3. If every entry is trusted, the leftmost valid
+		//     entry wins; with none, the socket peer wins.
+		//
+		// EnableIPValidation must stay true: without it, c.IP()
+		// returns the RAW header verbatim for trusted peers,
+		// i.e. any chain an upstream client can influence would
+		// reach the limiter — including garbage that would land
+		// in the shared "invalid" budget and arbitrary values
+		// that would mint fresh per-IP budgets.
 		ProxyHeader: fiber.HeaderXForwardedFor,
 		TrustProxy:  true,
 		TrustProxyConfig: fiber.TrustProxyConfig{
 			Proxies:  cfg.Server.TrustedProxies,
 			Loopback: true,
 		},
+		EnableIPValidation: true,
 	})
 
 	apikeyMgr := auth.NewAPIKeyManager(db, logger)
 	var rateLimiter *auth.RedisRateLimiter
 	if redisClient != nil {
 		rateLimiter = auth.NewRedisRateLimiter(redisClient, logger)
+	}
+	// Multi-dimensional authentication limiter (H-6). The primary store is
+	// Redis when one is configured (shared budget across nodes) and the
+	// in-process store otherwise; the limiter itself degrades per-request to
+	// an in-process fallback if the primary errors at runtime.
+	var authLimiter *auth.AuthLimiter
+	if redisClient != nil {
+		authLimiter = auth.NewAuthLimiter(auth.NewRedisLimitStore(redisClient), auth.DefaultAuthLimitPolicy(), logger)
+	} else {
+		authLimiter = auth.NewAuthLimiter(nil, auth.DefaultAuthLimitPolicy(), logger)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -122,6 +163,7 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 		csrf:         auth.NewCSRFManager(db, logger, cfg.Server.TLSAuto),
 		apikeys:      apikeyMgr,
 		redisLimiter: rateLimiter,
+		authLimiter:  authLimiter,
 		logger:       logger,
 		cfg:          cfg,
 		appCtx:       ctx,
@@ -129,6 +171,10 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 		h:            handlers.NewHandler(db, authenticator, apikeyMgr, logger, cfg, registry, ff, rateLimiter),
 		db:           db,
 	}
+	// Wire the multi-dimensional auth limiter (H-6) into the handler for
+	// success-path resets. The middleware mounting it is built below in
+	// authThrottle/authThrottleIP.
+	router.h.SetAuthLimiter(authLimiter)
 	if sqlDB, err := db.DB(); err == nil {
 		dialect, detectErr := dbdialect.Detect(sqlDB)
 		if detectErr != nil {
@@ -817,6 +863,38 @@ func (r *Router) allowedOrigins() []string {
 	return origins
 }
 
+// authThrottle returns the multi-dimensional throttle applied to every
+// endpoint that accepts credentials (login, signup, forgot-password).
+//
+// H-6: previously only /api/v1/auth/login and /api/v1/webmail/login were
+// throttled, and each call site duplicated the Redis/in-memory choice. That
+// left /admin/login, /auth/mfa/verify, /auth/signup and /auth/reset-password
+// completely unlimited. Centralising it here means a new credential endpoint
+// cannot silently ship without a limiter. The old budget was a single
+// per-IP counter (5 / 15 min), which a distributed attacker trivially
+// rotates around; the replacement enforces three dimensions together — per
+// IP, per account, per (IP, account) pair — on Redis when configured and on
+// an in-process store otherwise (see internal/auth/authlimit.go).
+//
+// The client address is c.IP(), resolved by the router's trusted-proxy
+// model (see fiber.Config above); the account is read from the request body
+// by CredentialAccountFromBody, which only ever reads identifier fields.
+//
+// Degradation: a primary-store error falls back to an in-process budget
+// (loudly logged); only if BOTH stores fail is the request refused, so a
+// Redis outage can neither open the endpoint nor brick every login.
+func (r *Router) authThrottle() fiber.Handler {
+	return auth.AuthLimitMiddleware(r.authLimiter, auth.CredentialAccountFromBody, r.logger)
+}
+
+// authThrottleIP is the same throttle without an account dimension, for
+// credential endpoints whose request body carries no account identifier
+// (MFA verification, password reset): only the client-IP budget applies,
+// which still stops a single host hammering the endpoint.
+func (r *Router) authThrottleIP() fiber.Handler {
+	return auth.AuthLimitMiddleware(r.authLimiter, auth.NoAccount, r.logger)
+}
+
 // isAllowedOrigin reports whether a browser request's Origin header is
 // trusted for the public CSRF bootstrap endpoint. It uses the existing
 // trusted-origin/CORS policy: the Origin must be listed in
@@ -871,23 +949,30 @@ func (r *Router) setupMiddleware() {
 	// The fix scopes the limiter to the `/api/v1` group only.
 	// Static SPA assets (admin + webmail) are exempt; API calls
 	// retain their per-IP budget (Redis default: 100 / 60 s).
-	// Login endpoints retain their tighter login limit (5 / 15 m)
-	// via the dedicated `LoginMiddleware()` already mounted in
-	// `setupRoutes()`. Security is unchanged — only the scope of
+	// Credential endpoints retain their tighter multi-dimensional
+	// budget (IP 20, account 5, combo 5 / 15 min — see
+	// authThrottle/authThrottleIP above) and do not pass through
+	// this handler. Security is unchanged — only the scope of
 	// the limit changed.
 }
 
 // apiRateLimitMiddleware returns the general API rate limiter
 // middleware for the /api/v1 group. It is built once in setupRoutes
 // and mounted only on the API group, so SPA static routes are
-// never counted against the per-IP budget. Login endpoints get the
-// dedicated LoginMiddleware (5 attempts / 15 min per IP) and do
-// NOT also pass through this handler, by mounting order.
+// never counted against the per-IP budget. Credential endpoints get
+// the dedicated multi-dimensional throttle and do NOT also pass
+// through this handler, by mounting order.
 func (r *Router) apiRateLimitMiddleware() fiber.Handler {
 	if r.redisLimiter != nil {
 		return r.redisLimiter.Middleware()
 	}
-	return limiter.New(limiter.Config{Max: 100, Expiration: 60 * 1000})
+	// NOTE: Expiration is a time.Duration. The previous literal
+	// `60 * 1000` was 60,000 NANOSECONDS (0.06 ms), so the
+	// no-Redis fallback window expired between consecutive
+	// requests and the general API limiter never actually limited
+	// anything — a silently-open API budget for single-node
+	// deployments. A real 1-minute window is intended.
+	return limiter.New(limiter.Config{Max: 100, Expiration: time.Minute})
 }
 
 func (r *Router) setupRoutes() {
@@ -972,30 +1057,36 @@ func (r *Router) setupRoutes() {
 	publicAPI.Post("/groups/:id/members", publicv1.RequireScope(publicv1.ScopeGroupsWrite), publicMutation, r.h.PublicAddGroupMember)
 	publicAPI.Delete("/groups/:id/members/:memberId", publicv1.RequireScope(publicv1.ScopeGroupsWrite), publicMutation, r.h.PublicDeleteGroupMember)
 
+	// authThrottle is applied to every credential-accepting endpoint below.
+	// Endpoints whose bodies carry an account identifier (login, signup,
+	// forgot-password) get the full IP+account+combo budget; endpoints with
+	// no account identifier in the body (MFA verification, password reset)
+	// get the IP budget via authThrottleIP.
 	loginGroup := api.Group("/auth")
-	if r.redisLimiter != nil {
-		loginGroup.Post("/login", r.redisLimiter.LoginMiddleware(), r.h.Login)
-	} else {
-		loginGroup.Post("/login", limiter.New(limiter.Config{Max: 5, Expiration: 15 * 60 * 1000}), r.h.Login)
-	}
+	loginGroup.Post("/login", r.authThrottle(), r.h.Login)
 	loginGroup.Post("/refresh", r.h.Refresh)
 
 	// MFA login verification (public — no auth middleware).
 	// Exchanges a password-based MFA challenge token + TOTP/recovery code
 	// for real access/refresh tokens. Mounted on the public login group
 	// so MFA-enabled users can complete login without being authenticated.
-	loginGroup.Post("/mfa/verify", r.h.MFALoginVerify)
+	//
+	// H-6: this endpoint is now throttled. Without it, a stolen password plus
+	// an unbounded number of TOTP guesses inside the challenge window defeats
+	// MFA; the handler additionally caps attempts per individual challenge.
+	loginGroup.Post("/mfa/verify", r.authThrottleIP(), r.h.MFALoginVerify)
 
 	// Customer portal auth (public — no auth middleware).
-	loginGroup.Post("/signup", r.h.Signup)
-	if r.redisLimiter != nil {
-		loginGroup.Post("/forgot-password", r.redisLimiter.LoginMiddleware(), r.h.ForgotPassword)
-	} else {
-		loginGroup.Post("/forgot-password", limiter.New(limiter.Config{Max: 5, Expiration: 15 * 60 * 1000}), r.h.ForgotPassword)
-	}
-	loginGroup.Post("/reset-password", r.h.ResetPassword)
+	// H-6: signup is throttled to stop automated account/tenant creation.
+	loginGroup.Post("/signup", r.authThrottle(), r.h.Signup)
+	loginGroup.Post("/forgot-password", r.authThrottle(), r.h.ForgotPassword)
+	loginGroup.Post("/reset-password", r.authThrottleIP(), r.h.ResetPassword)
 
-	r.app.Post("/admin/login", r.h.Login)
+	// H-6: /admin/login is the admin SPA's form target. It was registered on
+	// the ROOT app, outside the API group, and so carried no limiter at all —
+	// unbounded password guessing against the highest-value accounts on the
+	// platform.
+	r.app.Post("/admin/login", r.authThrottle(), r.h.Login)
 
 	// Webmail authentication (public — no auth middleware).
 	//
@@ -1006,11 +1097,7 @@ func (r *Router) setupRoutes() {
 	// the handler runs — the gate uses that 401 as the
 	// "show the login form" signal.
 	webmailLoginGroup := api.Group("/webmail")
-	if r.redisLimiter != nil {
-		webmailLoginGroup.Post("/login", r.redisLimiter.LoginMiddleware(), r.h.WebmailLogin)
-	} else {
-		webmailLoginGroup.Post("/login", limiter.New(limiter.Config{Max: 5, Expiration: 15 * 60 * 1000}), r.h.WebmailLogin)
-	}
+	webmailLoginGroup.Post("/login", r.authThrottle(), r.h.WebmailLogin)
 
 	// Public CSRF bootstrap for the unauthenticated admin/webmail login
 	// pages. The SPA calls GET /api/v1/csrf-token BEFORE the user has any
@@ -1087,14 +1174,41 @@ func (r *Router) setupRoutes() {
 	// middleware as the "show the login form" signal,
 	// and a 200 with authenticated:true as the "reveal
 	// the SPA" signal.
+	// H-1: every cookie-authenticated webmail MUTATION carries the canonical
+	// CSRF middleware plus a strict JSON content-type guard, applied
+	// PER-ROUTE. Effective middleware order is therefore
+	// authentication -> portal/tenant context (from the `protected` group)
+	// -> CSRF -> content type -> handler; the handlers still perform their
+	// own mailbox-ownership authorization via resolveWebmailUserContext.
+	//
+	// These are deliberately NOT mounted with protected.Group("", ...):
+	// an empty-prefix group installs its middleware for every route
+	// registered on the parent group afterwards, which would silently apply
+	// the webmail JSON-only rule to unrelated admin routes further down (and
+	// did — it broke the multipart send route). Per-route registration keeps
+	// the blast radius exactly equal to the route list below.
+	//
+	// Read-only GETs are left bare: they change no state, and the CSRF
+	// middleware no-ops on safe methods anyway.
+	//
+	// webmailSendCT additionally permits multipart/form-data because
+	// /webmail/send is the only webmail route that genuinely parses an
+	// upload (webmailParseMultipartSend, for attachments). Every other
+	// mutation is JSON-only, so a plain cross-site HTML <form> — which can
+	// only emit urlencoded/multipart/text-plain — is rejected with 415
+	// before the handler runs, independently of the CSRF check.
+	webmailCSRF := r.csrf.Middleware()
+	webmailJSONCT := auth.RequireJSONContentType()
+	webmailSendCT := auth.RequireJSONContentType(auth.AllowMultipart())
+
 	protected.Get("/webmail/session", r.h.WebmailSession)
 	protected.Get("/webmail/me", r.h.WebmailMe)
 	protected.Get("/webmail/folders", r.h.WebmailFolders)
 	protected.Get("/webmail/messages", r.h.WebmailMessages)
 	protected.Get("/webmail/messages/:id", r.h.WebmailMessage)
-	protected.Patch("/webmail/messages/:id", r.h.WebmailUpdateMessage)
-	protected.Post("/webmail/messages/:id/archive", r.h.WebmailArchive)
-	protected.Post("/webmail/messages/:id/delete", r.h.WebmailDelete)
+	protected.Patch("/webmail/messages/:id", webmailCSRF, webmailJSONCT, r.h.WebmailUpdateMessage)
+	protected.Post("/webmail/messages/:id/archive", webmailCSRF, webmailJSONCT, r.h.WebmailArchive)
+	protected.Post("/webmail/messages/:id/delete", webmailCSRF, webmailJSONCT, r.h.WebmailDelete)
 	// New in Webmail Enterprise 2: per-message source
 	// download, single-message move, multi-message batch
 	// operations. All behind the same protected group as
@@ -1102,8 +1216,8 @@ func (r *Router) setupRoutes() {
 	// auth middleware rejects missing/invalid cookies
 	// with 401 before the handler runs.
 	protected.Get("/webmail/messages/:id/source", r.h.WebmailMessageSource)
-	protected.Post("/webmail/messages/:id/move", r.h.WebmailMoveMessage)
-	protected.Post("/webmail/messages/batch", r.h.WebmailMessageBatch)
+	protected.Post("/webmail/messages/:id/move", webmailCSRF, webmailJSONCT, r.h.WebmailMoveMessage)
+	protected.Post("/webmail/messages/batch", webmailCSRF, webmailJSONCT, r.h.WebmailMessageBatch)
 	// Attachment download / preview. The :id is parsed
 	// with parseMessageID (digits only) and the
 	// handler confirms the attachment's parent message
@@ -1112,28 +1226,28 @@ func (r *Router) setupRoutes() {
 	// response shape does not leak existence.
 	protected.Get("/webmail/attachments/:id", r.h.WebmailAttachmentDownload)
 	protected.Get("/webmail/attachments/:id/preview", r.h.WebmailAttachmentPreview)
-	protected.Post("/webmail/folders/:id/read-all", r.h.WebmailMarkFolderRead)
-	protected.Post("/webmail/send", r.h.WebmailSend)
+	protected.Post("/webmail/folders/:id/read-all", webmailCSRF, webmailJSONCT, r.h.WebmailMarkFolderRead)
+	protected.Post("/webmail/send", webmailCSRF, webmailSendCT, r.h.WebmailSend)
 	// Drafts — minimal CRUD. Drafts are Message rows
 	// with Draft=true in the Drafts system folder; no
 	// separate draft table, no schema change.
 	protected.Get("/webmail/drafts", r.h.WebmailListDrafts)
-	protected.Post("/webmail/drafts", r.h.WebmailSaveDraft)
+	protected.Post("/webmail/drafts", webmailCSRF, webmailJSONCT, r.h.WebmailSaveDraft)
 	protected.Get("/webmail/drafts/:id", r.h.WebmailGetDraft)
-	protected.Put("/webmail/drafts/:id", r.h.WebmailSaveDraft)
-	protected.Delete("/webmail/drafts/:id", r.h.WebmailDeleteDraft)
+	protected.Put("/webmail/drafts/:id", webmailCSRF, webmailJSONCT, r.h.WebmailSaveDraft)
+	protected.Delete("/webmail/drafts/:id", webmailCSRF, webmailJSONCT, r.h.WebmailDeleteDraft)
 	// Push notification subscription management.
-	protected.Post("/webmail/push/subscribe", r.h.PushSubscribe)
-	protected.Post("/webmail/push/unsubscribe", r.h.PushUnsubscribe)
+	protected.Post("/webmail/push/subscribe", webmailCSRF, webmailJSONCT, r.h.PushSubscribe)
+	protected.Post("/webmail/push/unsubscribe", webmailCSRF, webmailJSONCT, r.h.PushUnsubscribe)
 	protected.Get("/webmail/push/status", r.h.PushStatus)
-	protected.Post("/webmail/push/test", r.h.PushTest)
+	protected.Post("/webmail/push/test", webmailCSRF, webmailJSONCT, r.h.PushTest)
 
 	// User settings — per-mailbox profile / appearance / compose /
 	// mail behavior / notification preferences. Auth + mailbox
 	// ownership enforced by resolveWebmailUserContext inside the
 	// handlers; no id is taken from the request body.
 	protected.Get("/webmail/settings", r.h.WebmailGetSettings)
-	protected.Put("/webmail/settings", r.h.WebmailPutSettings)
+	protected.Put("/webmail/settings", webmailCSRF, webmailJSONCT, r.h.WebmailPutSettings)
 
 	// Per-mailbox rules engine API. The handlers resolve
 	// the caller's mailbox from the JWT identity via
@@ -1146,13 +1260,13 @@ func (r *Router) setupRoutes() {
 	// so missing / invalid cookies get 401 before any
 	// mailbox lookup runs.
 	protected.Get("/webmail/rules", r.h.WebmailListRules)
-	protected.Post("/webmail/rules", r.h.WebmailCreateRule)
-	protected.Put("/webmail/rules/:id", r.h.WebmailUpdateRule)
-	protected.Delete("/webmail/rules/:id", r.h.WebmailDeleteRule)
+	protected.Post("/webmail/rules", webmailCSRF, webmailJSONCT, r.h.WebmailCreateRule)
+	protected.Put("/webmail/rules/:id", webmailCSRF, webmailJSONCT, r.h.WebmailUpdateRule)
+	protected.Delete("/webmail/rules/:id", webmailCSRF, webmailJSONCT, r.h.WebmailDeleteRule)
 	protected.Get("/webmail/vacation", r.h.WebmailGetVacation)
-	protected.Put("/webmail/vacation", r.h.WebmailPutVacation)
+	protected.Put("/webmail/vacation", webmailCSRF, webmailJSONCT, r.h.WebmailPutVacation)
 	protected.Get("/webmail/forwarding", r.h.WebmailGetForwarding)
-	protected.Put("/webmail/forwarding", r.h.WebmailPutForwarding)
+	protected.Put("/webmail/forwarding", webmailCSRF, webmailJSONCT, r.h.WebmailPutForwarding)
 
 	authCSRF := protected.Group("", r.csrf.Middleware())
 	authCSRF.Post("/auth/logout", r.h.Logout)

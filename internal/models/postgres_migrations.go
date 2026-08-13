@@ -214,6 +214,12 @@ func postgresTables() []string {
 		)`,
 		`ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS scopes TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS allowed_ips TEXT NOT NULL DEFAULT ''`,
+		// owner_token_version: see migrateAPIKeysSchema in models.go (H-2).
+		// The users.token_version captured at mint time; authentication
+		// rejects a key whose version no longer matches the owner's current
+		// one, so password reset / global revocation invalidates outstanding
+		// keys through the same mechanism JWTs already use.
+		`ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS owner_token_version BIGINT NOT NULL DEFAULT 0`,
 
 		// --- Sessions / security / audit ---
 

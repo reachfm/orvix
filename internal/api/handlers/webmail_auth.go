@@ -204,7 +204,7 @@ func (h *Handler) WebmailLogin(c fiber.Ctx) error {
 	)
 	if err := row.Scan(&mailboxID, &mailboxStatus, &isAdmin, &hash, &authScheme, &allowWebmail, &mailboxTenant); err != nil {
 		if err == sql.ErrNoRows {
-			h.security.RecordFailedLogin(c.Context(), c.IP(), loginEmail)
+			h.recordLoginFailure(c, loginEmail)
 			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
 				"error": "invalid credentials",
 			})
@@ -215,12 +215,26 @@ func (h *Handler) WebmailLogin(c fiber.Ctx) error {
 		})
 	}
 	if mailboxStatus != "active" {
+		// Policy denial, not a credential failure: the mailbox exists and the
+		// owner may simply be suspended. No trust-engine increment (see
+		// auth_h6.go) — the account cannot authenticate anyway.
 		h.security.RecordFailedLogin(c.Context(), c.IP(), loginEmail)
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
 			"error": "mailbox is not active",
 		})
 	}
 	if !allowWebmail {
+		// Policy denial (H-2: webmail access revoked), no trust-engine
+		// increment — same rationale as the inactive-mailbox path.
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+			"error": "invalid credentials",
+		})
+	}
+
+	// H-6: reject locked-out attempts before verifying the password, with
+	// one real verify spent on the way for timing parity with a wrong
+	// password (the same mailbox hash is used).
+	if h.denyIfLockedOut(c, loginEmail, hash) {
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
 			"error": "invalid credentials",
 		})
@@ -229,7 +243,7 @@ func (h *Handler) WebmailLogin(c fiber.Ctx) error {
 	// Verify the password against the mailbox's hash.
 	valid, needsRehash := verifyMailboxPassword(req.Password, hash)
 	if !valid {
-		h.security.RecordFailedLogin(c.Context(), c.IP(), loginEmail)
+		h.recordLoginFailure(c, loginEmail)
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
 			"error": "invalid credentials",
 		})
@@ -344,10 +358,7 @@ func (h *Handler) WebmailLogin(c fiber.Ctx) error {
 		Domain:   h.cfg.Auth.CookieDomain,
 	})
 
-	h.security.RecordSuccessfulLogin(c.IP())
-	if h.rateLimiter != nil {
-		h.rateLimiter.ResetLoginLimit(c.IP())
-	}
+	h.recordLoginSuccess(c, loginEmail)
 
 	h.logger.Info("webmail login success",
 		zap.String("email", loginEmail),

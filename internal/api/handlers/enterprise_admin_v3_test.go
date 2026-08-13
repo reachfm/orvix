@@ -144,30 +144,34 @@ func TestEnterpriseV3FsBrowseAllowlistedRoots(t *testing.T) {
 	seedPlatformSuperAdminWithPassword(t, db, "psa@test.local", "PsaPass!2026")
 	token := enterpriseLoginForTest(t, router, "psa@test.local", "PsaPass!2026")
 
-	// Approved root.
-	req := httptest.NewRequest("GET", "/api/v1/admin/fs/browse?root=/var/log/", nil)
+	// Approved root, addressed by its OPAQUE ID (H-8: host paths never
+	// appear in a request or a response).
+	req := httptest.NewRequest("GET", "/api/v1/admin/fs/browse?root=system-logs", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	resp, err := router.App().Test(req)
 	if err != nil {
 		t.Fatalf("browse approved: %v", err)
 	}
-	if resp.StatusCode != 200 && resp.StatusCode != 400 {
-		// 400 = directory missing in this test env.
-		// The SUT is the allowlist check, not the
-		// filesystem presence on the test machine.
-		t.Fatalf("browse approved root /var/log/ want 200 or 400, got %d", resp.StatusCode)
+	// 200 when the directory exists on this host; 404/400 when it does not;
+	// 503 when no approved root resolves at all (e.g. a Windows CI box).
+	// The SUT is the allowlist decision, not filesystem presence.
+	switch resp.StatusCode {
+	case 200, 400, 404, 503:
+	default:
+		t.Fatalf("browse approved root want 200/400/404/503, got %d", resp.StatusCode)
 	}
 
 	// Disapproved root. Must return 403 even when the
 	// directory does not exist; allowlist denied.
 	req2 := httptest.NewRequest("GET", "/api/v1/admin/fs/browse?root=/etc/shadow", nil)
+	// (An unknown root ID — including anything that looks like a host path.)
 	req2.Header.Set("Authorization", "Bearer "+token)
 	resp2, err := router.App().Test(req2)
 	if err != nil {
 		t.Fatalf("browse disallowed: %v", err)
 	}
-	if resp2.StatusCode != 403 {
-		t.Fatalf("browse /etc/shadow must return 403, got %d", resp2.StatusCode)
+	if resp2.StatusCode != 403 && resp2.StatusCode != 503 {
+		t.Fatalf("browse an unapproved root must return 403 (or 503 when no root resolves), got %d", resp2.StatusCode)
 	}
 }
 
@@ -179,7 +183,9 @@ func TestEnterpriseV3FsReadSecretsRedacted(t *testing.T) {
 	token := enterpriseLoginForTest(t, router, "admin@test.local", "TestPassword123!")
 	// /etc/orvix/tls is an approved root; jwt_key.pem
 	// matches the secret-shape pattern.
-	req := httptest.NewRequest("GET", "/api/v1/admin/fs/read?path=/etc/orvix/tls/jwt_key.pem", nil)
+	// H-8: absolute paths are refused outright; a secret is addressed as a
+	// relative path under a root ID and must still never be returned.
+	req := httptest.NewRequest("GET", "/api/v1/admin/fs/read?root=orvix-tls&path=jwt_key.pem", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	resp, err := router.App().Test(req)
 	if err != nil {
@@ -188,7 +194,9 @@ func TestEnterpriseV3FsReadSecretsRedacted(t *testing.T) {
 	// The endpoint may 200 (returns redacted JSON) or
 	// 403 (path not present in test env). Either way
 	// the file contents MUST NOT be returned.
-	if resp.StatusCode != 200 && resp.StatusCode != 403 {
+	switch resp.StatusCode {
+	case 200, 400, 403, 404, 503:
+	default:
 		t.Fatalf("read secret-shape file: got %d", resp.StatusCode)
 	}
 }

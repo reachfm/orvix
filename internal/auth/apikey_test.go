@@ -3,6 +3,7 @@ package auth
 import (
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/orvix/orvix/internal/config"
 	"github.com/orvix/orvix/internal/models"
@@ -29,7 +30,28 @@ func newAPIKeyTestManager(t *testing.T) *APIKeyManager {
 			sqlDB.Close()
 		}
 	})
-	return NewAPIKeyManager(db, logger)
+	m := NewAPIKeyManager(db, logger)
+
+	// H-2: minting a key now requires a real, currently-authorized owner, so
+	// the fixture provisions the tenant/user these tests mint keys for
+	// (tenant 1, user 1, active tenant_admin). Previously keys could be
+	// minted for a user id that did not exist at all.
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("sql db: %v", err)
+	}
+	now := time.Now().UTC()
+	if _, err := sqlDB.Exec(
+		"INSERT INTO tenants (id, created_at, updated_at, name, slug, domain, plan, active) VALUES (1, ?, ?, 'fixture', 'fixture', 'fixture.test', 'enterprise', 1)",
+		now, now); err != nil {
+		t.Fatalf("insert fixture tenant: %v", err)
+	}
+	if _, err := sqlDB.Exec(
+		"INSERT INTO users (id, created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified, token_version) VALUES (1, ?, ?, 'fixture@example.test', 'x', 'tenant_admin', 1, 1, 1, 0)",
+		now, now); err != nil {
+		t.Fatalf("insert fixture user: %v", err)
+	}
+	return m
 }
 
 func TestParseAllowedIPs_ValidEntries(t *testing.T) {

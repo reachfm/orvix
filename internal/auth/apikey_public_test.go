@@ -10,6 +10,7 @@ import (
 
 func TestPublicMiddlewareRequiresTenantAPIKeyAndExportsIdentity(t *testing.T) {
 	m := newRotationManager(t)
+	ensureKeyOwner(t, m, 7, 11, RoleTenantAdmin)
 	key, rec, err := m.Generate("public", 7, 11, string(RoleTenantAdmin), []string{"public:domains:read"}, 1)
 	if err != nil {
 		t.Fatal(err)
@@ -63,6 +64,7 @@ func TestPublicMiddlewareRequiresTenantAPIKeyAndExportsIdentity(t *testing.T) {
 
 func TestPublicMiddlewareRejectsRevokedAndPlatformKeys(t *testing.T) {
 	m := newRotationManager(t)
+	ensureKeyOwner(t, m, 7, 11, RoleTenantAdmin)
 	revoked, rec, err := m.Generate("revoked", 7, 11, string(RoleTenantAdmin), []string{"public:domains:read"}, 1)
 	if err != nil {
 		t.Fatal(err)
@@ -78,7 +80,10 @@ func TestPublicMiddlewareRejectsRevokedAndPlatformKeys(t *testing.T) {
 	if n, _ := res.RowsAffected(); n != 1 {
 		t.Fatalf("revocation affected %d rows", n)
 	}
-	platform, _, err := m.Generate("platform", 1, 11, string(RolePlatformSuperAdmin), []string{"public:domains:read"}, 1)
+	// A platform super admin has no tenant binding, so the key is minted
+	// unbound; PublicMiddleware must still refuse it as a tenant credential.
+	ensureKeyOwner(t, m, 1, 0, RolePlatformSuperAdmin)
+	platform, _, err := m.Generate("platform", 1, 0, string(RolePlatformSuperAdmin), []string{"public:domains:read"}, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,6 +104,7 @@ func TestPublicMiddlewareRejectsRevokedAndPlatformKeys(t *testing.T) {
 
 func TestPublicMiddlewareRetainsAllowedIPEnforcement(t *testing.T) {
 	m := newRotationManager(t)
+	ensureKeyOwner(t, m, 7, 11, RoleTenantAdmin)
 	key, rec, err := m.Generate("restricted", 7, 11, string(RoleTenantAdmin), []string{"public:domains:read"}, 1)
 	if err != nil {
 		t.Fatal(err)

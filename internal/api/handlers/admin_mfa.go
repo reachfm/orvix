@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha1"
@@ -8,10 +9,13 @@ import (
 	"encoding/base32"
 	"encoding/base64"
 	"encoding/binary"
+	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/gofiber/fiber/v3"
+	"github.com/orvix/orvix/internal/auth"
 	"github.com/orvix/orvix/internal/config"
 	"github.com/orvix/orvix/internal/dbdialect"
 	"go.uber.org/zap"
@@ -321,8 +325,36 @@ func (h *Handler) MFALoginVerify(c fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"error": "code or recovery_code required"})
 	}
 
-	userID, err := h.auth.ValidateMFAChallengeToken(req.Challenge)
+	userID, jti, err := h.auth.ValidateMFAChallengeTokenWithID(req.Challenge)
 	if err != nil {
+		return c.Status(401).JSON(fiber.Map{"error": "invalid or expired MFA challenge"})
+	}
+
+	// H-6: bound this challenge. Begin atomically records the attempt BEFORE
+	// the code is checked, so a wrong guess always costs an attempt, the cap
+	// cannot be exceeded by concurrent requests, and an expired/consumed/
+	// exhausted challenge is refused outright. Without this a stolen password
+	// plus unlimited TOTP guesses inside the 5-minute window defeats MFA.
+	challenges, err := h.mfaChallengeStore()
+	if err != nil {
+		h.logger.Error("mfa challenge store unavailable", zap.Error(err))
+		return c.Status(500).JSON(fiber.Map{"error": "authentication failed"})
+	}
+	if err := challenges.Begin(c.Context(), jti, userID); err != nil {
+		// One opaque response for every rejection reason so the endpoint is
+		// not an oracle for challenge state.
+		switch {
+		case errors.Is(err, auth.ErrMFAChallengeExhausted):
+			h.writeAuditLog(c, "mfa.login.challenge_exhausted", fmt.Sprintf("user_id:%d", userID))
+			h.logger.Warn("mfa login: challenge attempt limit reached", zap.Uint("user_id", userID))
+		case errors.Is(err, auth.ErrMFAChallengeConsumed):
+			h.writeAuditLog(c, "mfa.login.challenge_replay", fmt.Sprintf("user_id:%d", userID))
+			h.logger.Warn("mfa login: challenge replay refused", zap.Uint("user_id", userID))
+		case errors.Is(err, auth.ErrMFAChallengeExpired):
+			h.logger.Warn("mfa login: challenge expired", zap.Uint("user_id", userID))
+		default:
+			h.logger.Warn("mfa login: challenge rejected", zap.Uint("user_id", userID))
+		}
 		return c.Status(401).JSON(fiber.Map{"error": "invalid or expired MFA challenge"})
 	}
 
@@ -383,6 +415,16 @@ func (h *Handler) MFALoginVerify(c fiber.Ctx) error {
 			return c.Status(401).JSON(fiber.Map{"error": "invalid code"})
 		}
 		h.writeAuditLog(c, "mfa.login.totp", fmt.Sprintf("user_id:%d", userID))
+	}
+
+	// H-6: the code was correct — consume the challenge so it is single-use.
+	// The guarded UPDATE succeeds exactly once, so a replay of this same
+	// challenge (or a concurrent duplicate request) cannot mint a second
+	// session.
+	if err := challenges.Consume(c.Context(), jti, userID); err != nil {
+		h.writeAuditLog(c, "mfa.login.challenge_replay", fmt.Sprintf("user_id:%d", userID))
+		h.logger.Warn("mfa login: challenge already consumed", zap.Uint("user_id", userID))
+		return c.Status(401).JSON(fiber.Map{"error": "invalid or expired MFA challenge"})
 	}
 
 	// MFA passed — issue tokens from the CURRENT authorization snapshot.
@@ -454,3 +496,28 @@ func (h *Handler) MFALoginVerify(c fiber.Ctx) error {
 		"refresh_expires_in": int(30 * 24 * 3600),
 	})
 }
+
+// mfaChallengeStore lazily builds the per-challenge state store used to bound
+// MFA verification attempts and make a challenge single-use (H-6).
+func (h *Handler) mfaChallengeStore() (*auth.MFAChallengeStore, error) {
+	mfaStoreMu.Lock()
+	defer mfaStoreMu.Unlock()
+	if s, ok := mfaStoreCache[h]; ok && s != nil {
+		return s, nil
+	}
+	sqlDB, err := h.db.DB()
+	if err != nil {
+		return nil, err
+	}
+	s := auth.NewMFAChallengeStore(sqlDB)
+	if err := s.EnsureSchema(context.Background()); err != nil {
+		return nil, err
+	}
+	mfaStoreCache[h] = s
+	return s, nil
+}
+
+var (
+	mfaStoreMu    sync.Mutex
+	mfaStoreCache = map[*Handler]*auth.MFAChallengeStore{}
+)
