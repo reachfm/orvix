@@ -47,11 +47,11 @@ import (
 	platformbilling "github.com/orvix/orvix/internal/platform/billing"
 	"github.com/orvix/orvix/internal/platform/bulkprovision"
 	"github.com/orvix/orvix/internal/platform/cluster"
+	"github.com/orvix/orvix/internal/platform/deliverability"
 	platformimporter "github.com/orvix/orvix/internal/platform/importer"
 	platformjobs "github.com/orvix/orvix/internal/platform/jobs"
-	"github.com/orvix/orvix/internal/platform/deliverability"
-	"github.com/orvix/orvix/internal/platform/mailcontrol"
 	"github.com/orvix/orvix/internal/platform/kernel"
+	"github.com/orvix/orvix/internal/platform/mailcontrol"
 	"github.com/orvix/orvix/internal/platform/relay"
 	"github.com/orvix/orvix/internal/platform/retention"
 	"github.com/orvix/orvix/internal/ruler"
@@ -74,6 +74,7 @@ type Router struct {
 	csrf         *auth.CSRFManager
 	apikeys      *auth.APIKeyManager
 	redisLimiter *auth.RedisRateLimiter
+	authLimiter  *auth.AuthLimiter
 	logger       *zap.Logger
 	cfg          *config.Config
 	h            *handlers.Handler
@@ -101,18 +102,58 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 		// this, c.IP() returns the loopback address for every
 		// request and the rate limiter, audit log, and login
 		// rate-limit gate see the wrong value.
+		//
+		// The client-IP model (H-6): c.IP() is the ONLY client
+		// address ever consumed by the authentication throttles,
+		// the login flow, audit records and lockout keys. Fiber
+		// resolves it as follows, and nothing in this codebase
+		// reads a forwarding header directly:
+		//
+		//  1. If the immediate peer is NOT a trusted proxy
+		//     (trusted = listed in TrustedProxies, a loopback
+		//     address via Loopback:true, or a private/link-local
+		//     address when those flags were enabled — none are),
+		//     the X-Forwarded-For header is IGNORED and c.IP()
+		//     is the socket peer. A random internet client
+		//     therefore cannot spoof an IP.
+		//  2. If the peer IS trusted, the X-Forwarded-For chain
+		//     is walked right-to-left, skipping entries that are
+		//     themselves trusted proxies, and the first valid
+		//     untrusted address is returned. Malformed entries
+		//     are skipped and every entry is validated with
+		//     netip before it can be trusted.
+		//  3. If every entry is trusted, the leftmost valid
+		//     entry wins; with none, the socket peer wins.
+		//
+		// EnableIPValidation must stay true: without it, c.IP()
+		// returns the RAW header verbatim for trusted peers,
+		// i.e. any chain an upstream client can influence would
+		// reach the limiter — including garbage that would land
+		// in the shared "invalid" budget and arbitrary values
+		// that would mint fresh per-IP budgets.
 		ProxyHeader: fiber.HeaderXForwardedFor,
 		TrustProxy:  true,
 		TrustProxyConfig: fiber.TrustProxyConfig{
 			Proxies:  cfg.Server.TrustedProxies,
 			Loopback: true,
 		},
+		EnableIPValidation: true,
 	})
 
 	apikeyMgr := auth.NewAPIKeyManager(db, logger)
 	var rateLimiter *auth.RedisRateLimiter
 	if redisClient != nil {
 		rateLimiter = auth.NewRedisRateLimiter(redisClient, logger)
+	}
+	// Multi-dimensional authentication limiter (H-6). The primary store is
+	// Redis when one is configured (shared budget across nodes) and the
+	// in-process store otherwise; the limiter itself degrades per-request to
+	// an in-process fallback if the primary errors at runtime.
+	var authLimiter *auth.AuthLimiter
+	if redisClient != nil {
+		authLimiter = auth.NewAuthLimiter(auth.NewRedisLimitStore(redisClient), auth.DefaultAuthLimitPolicy(), logger)
+	} else {
+		authLimiter = auth.NewAuthLimiter(nil, auth.DefaultAuthLimitPolicy(), logger)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -122,6 +163,7 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 		csrf:         auth.NewCSRFManager(db, logger, cfg.Server.TLSAuto),
 		apikeys:      apikeyMgr,
 		redisLimiter: rateLimiter,
+		authLimiter:  authLimiter,
 		logger:       logger,
 		cfg:          cfg,
 		appCtx:       ctx,
@@ -129,6 +171,10 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 		h:            handlers.NewHandler(db, authenticator, apikeyMgr, logger, cfg, registry, ff, rateLimiter),
 		db:           db,
 	}
+	// Wire the multi-dimensional auth limiter (H-6) into the handler for
+	// success-path resets. The middleware mounting it is built below in
+	// authThrottle/authThrottleIP.
+	router.h.SetAuthLimiter(authLimiter)
 	if sqlDB, err := db.DB(); err == nil {
 		dialect, detectErr := dbdialect.Detect(sqlDB)
 		if detectErr != nil {
@@ -817,47 +863,37 @@ func (r *Router) allowedOrigins() []string {
 	return origins
 }
 
-// authThrottle returns the per-IP throttle applied to every endpoint that
-// accepts credentials (login, MFA verification, signup, password reset).
+// authThrottle returns the multi-dimensional throttle applied to every
+// endpoint that accepts credentials (login, signup, forgot-password).
 //
 // H-6: previously only /api/v1/auth/login and /api/v1/webmail/login were
 // throttled, and each call site duplicated the Redis/in-memory choice. That
 // left /admin/login, /auth/mfa/verify, /auth/signup and /auth/reset-password
 // completely unlimited. Centralising it here means a new credential endpoint
-// cannot silently ship without a limiter.
+// cannot silently ship without a limiter. The old budget was a single
+// per-IP counter (5 / 15 min), which a distributed attacker trivially
+// rotates around; the replacement enforces three dimensions together — per
+// IP, per account, per (IP, account) pair — on Redis when configured and on
+// an in-process store otherwise (see internal/auth/authlimit.go).
 //
-// The Redis limiter is preferred and fails CLOSED (503) when Redis is
-// unreachable, so an outage cannot silently disable throttling. The in-memory
-// fallback exists for single-node deployments; it is per-process, so a
-// multi-node deployment must run Redis to get a shared budget.
+// The client address is c.IP(), resolved by the router's trusted-proxy
+// model (see fiber.Config above); the account is read from the request body
+// by CredentialAccountFromBody, which only ever reads identifier fields.
+//
+// Degradation: a primary-store error falls back to an in-process budget
+// (loudly logged); only if BOTH stores fail is the request refused, so a
+// Redis outage can neither open the endpoint nor brick every login.
 func (r *Router) authThrottle() fiber.Handler {
-	if r.redisLimiter != nil {
-		return r.redisLimiter.LoginMiddleware()
-	}
-	// NOTE: Expiration is a time.Duration. The previous call sites passed
-	// `15 * 60 * 1000`, which is 900,000 NANOSECONDS (0.9 ms) — the window
-	// expired between consecutive attempts, so the fallback limiter never
-	// actually limited anything.
-	return limiter.New(limiter.Config{
-		Max:        authThrottleMax,
-		Expiration: authThrottleWindow,
-		LimitReached: func(c fiber.Ctx) error {
-			c.Set("Retry-After", authThrottleRetryAfter)
-			return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{
-				"error": "too many attempts, try again later",
-				"code":  "rate_limited",
-			})
-		},
-	})
+	return auth.AuthLimitMiddleware(r.authLimiter, auth.CredentialAccountFromBody, r.logger)
 }
 
-// Throttle bounds for credential endpoints, matching the Redis limiter's
-// defaults (internal/auth.NewRedisRateLimiter) so both paths behave alike.
-const (
-	authThrottleMax        = 5
-	authThrottleWindow     = 15 * time.Minute
-	authThrottleRetryAfter = "900"
-)
+// authThrottleIP is the same throttle without an account dimension, for
+// credential endpoints whose request body carries no account identifier
+// (MFA verification, password reset): only the client-IP budget applies,
+// which still stops a single host hammering the endpoint.
+func (r *Router) authThrottleIP() fiber.Handler {
+	return auth.AuthLimitMiddleware(r.authLimiter, auth.NoAccount, r.logger)
+}
 
 // isAllowedOrigin reports whether a browser request's Origin header is
 // trusted for the public CSRF bootstrap endpoint. It uses the existing
@@ -913,23 +949,30 @@ func (r *Router) setupMiddleware() {
 	// The fix scopes the limiter to the `/api/v1` group only.
 	// Static SPA assets (admin + webmail) are exempt; API calls
 	// retain their per-IP budget (Redis default: 100 / 60 s).
-	// Login endpoints retain their tighter login limit (5 / 15 m)
-	// via the dedicated `LoginMiddleware()` already mounted in
-	// `setupRoutes()`. Security is unchanged — only the scope of
+	// Credential endpoints retain their tighter multi-dimensional
+	// budget (IP 20, account 5, combo 5 / 15 min — see
+	// authThrottle/authThrottleIP above) and do not pass through
+	// this handler. Security is unchanged — only the scope of
 	// the limit changed.
 }
 
 // apiRateLimitMiddleware returns the general API rate limiter
 // middleware for the /api/v1 group. It is built once in setupRoutes
 // and mounted only on the API group, so SPA static routes are
-// never counted against the per-IP budget. Login endpoints get the
-// dedicated LoginMiddleware (5 attempts / 15 min per IP) and do
-// NOT also pass through this handler, by mounting order.
+// never counted against the per-IP budget. Credential endpoints get
+// the dedicated multi-dimensional throttle and do NOT also pass
+// through this handler, by mounting order.
 func (r *Router) apiRateLimitMiddleware() fiber.Handler {
 	if r.redisLimiter != nil {
 		return r.redisLimiter.Middleware()
 	}
-	return limiter.New(limiter.Config{Max: 100, Expiration: 60 * 1000})
+	// NOTE: Expiration is a time.Duration. The previous literal
+	// `60 * 1000` was 60,000 NANOSECONDS (0.06 ms), so the
+	// no-Redis fallback window expired between consecutive
+	// requests and the general API limiter never actually limited
+	// anything — a silently-open API budget for single-node
+	// deployments. A real 1-minute window is intended.
+	return limiter.New(limiter.Config{Max: 100, Expiration: time.Minute})
 }
 
 func (r *Router) setupRoutes() {
@@ -1015,6 +1058,10 @@ func (r *Router) setupRoutes() {
 	publicAPI.Delete("/groups/:id/members/:memberId", publicv1.RequireScope(publicv1.ScopeGroupsWrite), publicMutation, r.h.PublicDeleteGroupMember)
 
 	// authThrottle is applied to every credential-accepting endpoint below.
+	// Endpoints whose bodies carry an account identifier (login, signup,
+	// forgot-password) get the full IP+account+combo budget; endpoints with
+	// no account identifier in the body (MFA verification, password reset)
+	// get the IP budget via authThrottleIP.
 	loginGroup := api.Group("/auth")
 	loginGroup.Post("/login", r.authThrottle(), r.h.Login)
 	loginGroup.Post("/refresh", r.h.Refresh)
@@ -1027,13 +1074,13 @@ func (r *Router) setupRoutes() {
 	// H-6: this endpoint is now throttled. Without it, a stolen password plus
 	// an unbounded number of TOTP guesses inside the challenge window defeats
 	// MFA; the handler additionally caps attempts per individual challenge.
-	loginGroup.Post("/mfa/verify", r.authThrottle(), r.h.MFALoginVerify)
+	loginGroup.Post("/mfa/verify", r.authThrottleIP(), r.h.MFALoginVerify)
 
 	// Customer portal auth (public — no auth middleware).
 	// H-6: signup is throttled to stop automated account/tenant creation.
 	loginGroup.Post("/signup", r.authThrottle(), r.h.Signup)
 	loginGroup.Post("/forgot-password", r.authThrottle(), r.h.ForgotPassword)
-	loginGroup.Post("/reset-password", r.authThrottle(), r.h.ResetPassword)
+	loginGroup.Post("/reset-password", r.authThrottleIP(), r.h.ResetPassword)
 
 	// H-6: /admin/login is the admin SPA's form target. It was registered on
 	// the ROOT app, outside the API group, and so carried no limiter at all —
