@@ -50,6 +50,18 @@ jobs:
             echo "::error::release/admin/assets/ differs from fresh build. Run 'npm run build' in web/admin and commit the updated release/admin/."
             exit 1
           }
+          # Vite copies web/admin/public files to the dist root. Verify each
+          # public runtime asset is also committed in release/admin; checking
+          # only index.html and assets/ previously missed theme-init.js and
+          # allowed the release smoke to fail with a runtime 404.
+          while IFS= read -r -d '' public_file; do
+            relative="${public_file#web/admin/public/}"
+            if [ ! -f "web/admin/dist/$relative" ] || \
+               ! cmp -s "web/admin/dist/$relative" "release/admin/$relative"; then
+              echo "::error::release/admin/$relative is missing or stale. Run 'npm run build' in web/admin and commit the updated release/admin/."
+              exit 1
+            fi
+          done < <(find web/admin/public -type f -print0)
           echo "release/admin freshness verified — matches clean build."
 
       - name: Run portal browser acceptance tests
