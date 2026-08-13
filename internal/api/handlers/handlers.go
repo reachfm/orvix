@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/mail"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -47,12 +48,12 @@ import (
 	platformbilling "github.com/orvix/orvix/internal/platform/billing"
 	"github.com/orvix/orvix/internal/platform/bulkprovision"
 	"github.com/orvix/orvix/internal/platform/cluster"
+	"github.com/orvix/orvix/internal/platform/deliverability"
 	"github.com/orvix/orvix/internal/platform/importer"
 	platformjobs "github.com/orvix/orvix/internal/platform/jobs"
 	"github.com/orvix/orvix/internal/platform/kernel"
-	"github.com/orvix/orvix/internal/platform/relay"
-	"github.com/orvix/orvix/internal/platform/deliverability"
 	"github.com/orvix/orvix/internal/platform/mailcontrol"
+	"github.com/orvix/orvix/internal/platform/relay"
 	"github.com/orvix/orvix/internal/platform/retention"
 	"github.com/orvix/orvix/internal/ruler"
 	"github.com/orvix/orvix/internal/runtime"
@@ -80,6 +81,12 @@ type Handler struct {
 	features    *license.FeatureFlags
 	security    *auth.SecurityMonitor
 	rateLimiter *auth.RedisRateLimiter
+	// authLimiter is the multi-dimensional authentication limiter (H-6).
+	// The credential endpoints mount it as middleware (router
+	// authThrottle/authThrottleIP); the handler only uses it to reset the
+	// account/pair budgets after a genuine login. nil means resets are
+	// skipped (never the case in the production router).
+	authLimiter *auth.AuthLimiter
 	auditStore  *audit.Store
 	webmailSvc  *webmailmgmt.Service
 
@@ -668,25 +675,12 @@ func (h *Handler) issueLoginSession(c fiber.Ctx, userID uint, role auth.Role, em
 	return nil
 }
 
-// recordLoginFailure records a failed login attempt via the security monitor.
-func (h *Handler) recordLoginFailure(c fiber.Ctx, email string) {
-	h.security.RecordFailedLogin(c.Context(), c.IP(), email)
-}
-
-// recordLoginSuccess records a successful login and resets the rate limiter.
-func (h *Handler) recordLoginSuccess(c fiber.Ctx) {
-	h.security.RecordSuccessfulLogin(c.IP())
-	if h.rateLimiter != nil {
-		h.rateLimiter.ResetLoginLimit(c.IP())
-	}
-}
-
 // LoginProtectionStatus returns the current state of login protection.
 func (h *Handler) LoginProtectionStatus(c fiber.Ctx) error {
 	status := fiber.Map{
 		"enabled":         h.trustService != nil,
 		"rate_limiter":    "active",
-		"rate_limit_desc": "100 req/min per IP, 5 login attempts per 15 min per IP",
+		"rate_limit_desc": "IP 20, account 5, pair 5 attempts per 15 min; account lockout after 5 failed logins within 1 hour",
 		"lockout_count":   0,
 		"persistence":     h.trustPersistence,
 		"persistence_ok":  h.trustPersistenceOK,
@@ -720,6 +714,15 @@ func (h *Handler) ClearLockout(c fiber.Ctx) error {
 		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "trust engine not available"})
 	}
 	key := c.Params("key")
+	// Fiber v3 does not decode path parameters. Trust keys legitimately
+	// contain characters that browsers percent-encode ("auth:combo:ip|acct"
+	// carries a pipe), so the raw segment arrives as "ip%7Cacct" and would
+	// never match. Unescape before lookup; a malformed escape cannot clear
+	// anything (an unescape failure keeps the raw value, which then simply
+	// never matches — the 404 path).
+	if decoded, err := url.PathUnescape(key); err == nil {
+		key = decoded
+	}
 	if key == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "lockout key is required"})
 	}
@@ -776,7 +779,7 @@ func (h *Handler) Login(c fiber.Ctx) error {
 	err = sqlDB.QueryRow("SELECT id, password_hash, role, COALESCE(mfa_enabled, "+h.dialect.FalseLiteral()+") FROM users WHERE email = "+h.dialect.Placeholder(1), loginEmail).Scan(&userID, &passwordHash, &userRole, &mfaEnabled)
 	if err != nil {
 		h.logger.Warn("user not found during login", zap.String("email", loginEmail), zap.Error(err))
-		h.security.RecordFailedLogin(c.Context(), c.IP(), loginEmail)
+		h.recordLoginFailure(c, loginEmail)
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid credentials"})
 	}
 
@@ -784,11 +787,20 @@ func (h *Handler) Login(c fiber.Ctx) error {
 		zap.Uint("user_id", userID),
 		zap.String("role", userRole))
 
+	// H-6: reject locked-out attempts BEFORE verifying the password, with
+	// one real verify spent on the way so the locked path is
+	// timing-indistinguishable from a wrong password. The generic 401 keeps
+	// the endpoint from being an oracle for lockout state.
+	if h.denyIfLockedOut(c, loginEmail, passwordHash) {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid credentials"})
+	}
+
 	result := auth.VerifyPasswordWithRehash(req.Password, passwordHash)
 	if !result.Valid {
 		h.logger.Warn("password verification failed",
 			zap.String("email", loginEmail),
 			zap.Uint("user_id", userID))
+		h.recordLoginFailure(c, loginEmail)
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "invalid credentials"})
 	}
 
@@ -808,11 +820,13 @@ func (h *Handler) Login(c fiber.Ctx) error {
 		}
 	}
 
-	h.security.RecordSuccessfulLogin(c.IP())
-
-	if h.rateLimiter != nil {
-		h.rateLimiter.ResetLoginLimit(c.IP())
-	}
+	// A genuine password success clears the lockout state and the
+	// account/pair budgets (IP budget deliberately preserved — see
+	// recordLoginSuccess). This runs even when MFA is enabled next: the
+	// password proof is the credential, and MFA verification failures are
+	// bounded per-challenge, so the account must not keep accumulating
+	// failures from a flow it already passed.
+	h.recordLoginSuccess(c, loginEmail)
 
 	// Validate the current user authorization snapshot BEFORE issuing any
 	// MFA challenge or token. A malformed role, wrong tenant binding,
