@@ -174,7 +174,9 @@ func TestRelayAdmin_ValidateTargetRejectsUnsafeHosts(t *testing.T) {
 		host string
 		port int
 	}{
-		{"smtp.example.com", 25}, {"relay.example.net", 587}, {"[2001:db8::1]", 465},
+		// A genuine globally-routable IPv6 literal (2001:db8::/32 is
+		// documentation and is correctly rejected by the hardened policy).
+		{"smtp.example.com", 25}, {"relay.example.net", 587}, {"[2606:2800:220:1:248:1893:25c8:1946]", 465},
 		{"smtp.example.com.", 2525}, {"a.b.example.com", 1}, {"relay_example.com", 465},
 	} {
 		if err := ValidateRelayTarget(ok.host, ok.port); err != nil {
@@ -251,21 +253,90 @@ func TestValidatingDialer_RejectsUnsafeResolvedAddresses(t *testing.T) {
 	}
 }
 
-func TestValidatingDialer_DialsValidatedIPNotHostname(t *testing.T) {
-	// A fake resolver supplies a public IP; the dial must target that
-	// IP (rebinding protection: no second resolution of the hostname).
-	d := &validatingDialer{timeout: 200 * time.Millisecond, resolver: fakeResolver{addrs: []net.IP{net.ParseIP("192.0.2.1")}}}
-	_, err := d.DialContext(context.Background(), "tcp", "rebind.example:1")
-	if err == nil {
-		t.Fatal("expected dial failure to an unroutable TEST-NET address")
+// rebindResolver returns `first` on its first call and `second` afterwards.
+// It proves the dialer resolves exactly once: if it ever re-resolved, the
+// second (unsafe) answer would take effect.
+type rebindResolver struct {
+	first  []net.IP
+	second []net.IP
+	calls  int
+}
+
+func (r *rebindResolver) LookupIPAddr(ctx context.Context, host string) ([]net.IPAddr, error) {
+	r.calls++
+	src := r.first
+	if r.calls > 1 {
+		src = r.second
 	}
-	if !strings.Contains(err.Error(), "192.0.2.1") {
-		t.Fatalf("dial must target the validated IP, got %v", err)
+	out := make([]net.IPAddr, 0, len(src))
+	for _, ip := range src {
+		out = append(out, net.IPAddr{IP: ip})
+	}
+	return out, nil
+}
+
+func TestValidatingDialer_DialsValidatedIPNotHostname(t *testing.T) {
+	// The dialer must connect to the exact IP the resolver returned, never
+	// re-resolve the hostname (rebinding protection). An injected recording
+	// connector captures the dialed address so the assertion is hermetic.
+	// 93.184.216.34 is a genuine globally-routable unicast address.
+	var dialed string
+	d := &validatingDialer{
+		timeout:  time.Second,
+		resolver: fakeResolver{addrs: []net.IP{net.ParseIP("93.184.216.34")}},
+		connect: func(_ context.Context, _, addr string) (net.Conn, error) {
+			dialed = addr
+			return nil, fmt.Errorf("connect refused (test)")
+		},
+	}
+	_, err := d.DialContext(context.Background(), "tcp", "rebind.example:587")
+	if err == nil {
+		t.Fatal("expected the injected connector to refuse")
+	}
+	if dialed != "93.184.216.34:587" {
+		t.Fatalf("dial must target the validated resolved IP, got %q", dialed)
+	}
+}
+
+// TestValidatingDialer_RebindAfterValidationCannotBypass proves there is no
+// resolve-validate-then-reresolve window: the resolver is consulted once and
+// the validated answer is what gets dialed.
+func TestValidatingDialer_RebindAfterValidationCannotBypass(t *testing.T) {
+	rb := &rebindResolver{
+		first:  []net.IP{net.ParseIP("93.184.216.34")}, // safe: validated + dialed
+		second: []net.IP{net.ParseIP("127.0.0.1")},     // would be unsafe if re-resolved
+	}
+	var dialed string
+	d := &validatingDialer{
+		timeout:  time.Second,
+		resolver: rb,
+		connect: func(_ context.Context, _, addr string) (net.Conn, error) {
+			dialed = addr
+			return nil, fmt.Errorf("connect refused (test)")
+		},
+	}
+	if _, err := d.DialContext(context.Background(), "tcp", "rebind.example:587"); err == nil {
+		t.Fatal("expected the injected connector to refuse")
+	}
+	if dialed != "93.184.216.34:587" {
+		t.Fatalf("dial must use the first, validated answer, got %q", dialed)
+	}
+	if rb.calls != 1 {
+		t.Fatalf("resolver must be consulted exactly once, got %d calls", rb.calls)
 	}
 }
 
 func TestValidatingDialer_BoundedByContextTimeout(t *testing.T) {
-	d := &validatingDialer{timeout: time.Hour, resolver: fakeResolver{addrs: []net.IP{net.ParseIP("192.0.2.1")}}}
+	// A connector that blocks until the context is done proves the dial is
+	// bounded by the caller's context.
+	d := &validatingDialer{
+		timeout:  time.Hour,
+		resolver: fakeResolver{addrs: []net.IP{net.ParseIP("93.184.216.34")}},
+		connect: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
 	defer cancel()
 	start := time.Now()

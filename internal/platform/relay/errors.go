@@ -12,6 +12,10 @@ var (
 	ErrPolicyBlocked       = errors.New("mail access policy blocks this route")
 	ErrOverrideExpired     = errors.New("emergency override has expired")
 	ErrUnsafeTarget        = errors.New("unsafe relay target")
-	ErrNameRequired        = errors.New("relay name is required")
-	ErrRelayNameConflict   = errors.New("a relay with this name already exists in the same scope")
+	// ErrCredentialUnavailable is returned when a provider's stored
+	// credential cannot be decrypted. The generic message never carries the
+	// ciphertext, key path, or any part of the secret.
+	ErrCredentialUnavailable = errors.New("relay credential unavailable")
+	ErrNameRequired          = errors.New("relay name is required")
+	ErrRelayNameConflict     = errors.New("a relay with this name already exists in the same scope")
 )
