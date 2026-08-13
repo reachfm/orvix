@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -484,15 +485,53 @@ func (m *Module) initCore(cfg *config.Config, sqlDB *sql.DB) error {
 	} else {
 		relayAdapter = relay.NewDeliveryAdapter(relay.NewService(relayRepo, nil, nil))
 	}
+	// Sending-identity resolution for relay routing.
+	//
+	// Two defects are closed here:
+	//
+	//  1. The statement used a raw `?` placeholder. On PostgreSQL that is a
+	//     syntax error, the error was discarded by `_ = row.Scan(...)`, and
+	//     every outbound message therefore resolved to tenant 0 with the
+	//     default mail-access mode — so tenant-scoped relay routing and the
+	//     internal-only policy check were both inert on the dialect that
+	//     ships in production. It now goes through dbdialect.
+	//  2. The sending domain's row id was never resolved at all, so
+	//     domain-scoped routing rules could not match. It is selected here and
+	//     handed to the worker via DomainIDForRelay.
+	relayDialect, rderr := dbdialect.Detect(sqlDB)
+	if rderr != nil {
+		relayDialect = dbdialect.FromDriver("sqlite")
+	}
+	senderIdentityQuery := relayDialect.Rewrite(
+		`SELECT m.tenant_id, m.domain_id, COALESCE(d.mail_access_mode, 'internal_external')
+		 FROM coremail_mailboxes m JOIN coremail_domains d ON d.id = m.domain_id
+		 WHERE m.email = ?`)
+	type senderIdentity struct {
+		tenantID uint
+		domainID uint
+		mode     string
+	}
+	resolveSenderIdentity := func(entry *queue.QueueEntry) senderIdentity {
+		id := senderIdentity{mode: "internal_external"}
+		row := sqlDB.QueryRowContext(context.Background(), senderIdentityQuery, entry.FromAddress)
+		if err := row.Scan(&id.tenantID, &id.domainID, &id.mode); err != nil {
+			// A miss is legitimate (relayed/external sender); an error is not,
+			// but neither may fabricate a tenant. Zero values flow through to
+			// the relay service, which treats an unknown domain id as
+			// "unknown" rather than "matches any".
+			if m.logger != nil && !errors.Is(err, sql.ErrNoRows) {
+				m.logger.Warn("relay sender identity lookup failed", zap.Error(err))
+			}
+			return senderIdentity{mode: "internal_external"}
+		}
+		return id
+	}
 	tenantForRelay := func(entry *queue.QueueEntry) (uint, string) {
-		var tenantID uint
-		var mode string
-		row := sqlDB.QueryRowContext(context.Background(),
-			`SELECT m.tenant_id, COALESCE(d.mail_access_mode, 'internal_external')
-			 FROM coremail_mailboxes m JOIN coremail_domains d ON d.id = m.domain_id
-			 WHERE m.email = ?`, entry.FromAddress)
-		_ = row.Scan(&tenantID, &mode)
-		return tenantID, mode
+		id := resolveSenderIdentity(entry)
+		return id.tenantID, id.mode
+	}
+	domainForRelay := func(entry *queue.QueueEntry) uint {
+		return resolveSenderIdentity(entry).domainID
 	}
 
 	// Deliverability control plane (Milestone 9) — optional, same
@@ -563,6 +602,19 @@ func (m *Module) initCore(cfg *config.Config, sqlDB *sql.DB) error {
 		if relayAdapter != nil {
 			worker.RelaySelector = relayAdapter
 			worker.TenantIDForRelay = tenantForRelay
+			worker.DomainIDForRelay = domainForRelay
+			// Bookkeeping failures after an already-completed SMTP
+			// transaction are surfaced, not swallowed: the mail was
+			// delivered, so this must not retry, but an operator needs to
+			// know the circuit breaker is not seeing real outcomes.
+			worker.RelayBookkeepingFailed = func(ctx context.Context, providerID uint, success bool, err error) {
+				if m.logger != nil {
+					m.logger.Warn("relay attempt bookkeeping failed",
+						zap.Uint("provider_id", providerID),
+						zap.Bool("delivery_succeeded", success),
+						zap.Error(err))
+				}
+			}
 		}
 		if deliverabilityAdapter != nil {
 			worker.SuppressionChecker = deliverabilityAdapter
