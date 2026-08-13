@@ -322,9 +322,16 @@ func TestSenderPattern_AdversarialPatternsFailSafe(t *testing.T) {
 }
 
 func TestSelectRoute_SenderAddressAndDomainRemainDistinct(t *testing.T) {
-	_, svc, _, pool := newRouteFixture(t)
+	_, svc, _, _ := newRouteFixture(t)
 	ctx := context.Background()
-	mustProvider(t, svc, pool.ID, "primary")
+	pool, err := svc.CreatePool(ctx, Pool{Scope: ScopeTenant, TenantID: 7, Name: "tenant7-sender-pool", Strategy: StrategyPriority}, testActor)
+	if err != nil {
+		t.Fatalf("create tenant pool: %v", err)
+	}
+	mustProvider(t, svc, pool.ID, "primary", func(p *Provider) {
+		p.Scope = ScopeTenant
+		p.TenantID = 7
+	})
 	// A rule scoped to ONE sender. Before the fix the sender pattern was never
 	// evaluated at all, so this rule applied to every sender.
 	if _, err := svc.CreateRoutingRule(ctx, RoutingRule{

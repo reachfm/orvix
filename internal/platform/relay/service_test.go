@@ -213,11 +213,11 @@ func TestSelectRoute_DirectOnlyPoolNeverReturnsARelayProvider(t *testing.T) {
 func TestEmergencyOverride_ForcesRouteAndAutoExpires(t *testing.T) {
 	_, svc := newTestService(t)
 	ctx := context.Background()
-	globalPool, _ := svc.CreatePool(ctx, Pool{Scope: ScopeGlobal, Name: "global", Strategy: StrategyPriority}, testActor)
-	overridePool, _ := svc.CreatePool(ctx, Pool{Scope: ScopeGlobal, Name: "override", Strategy: StrategyPriority}, testActor)
-	svc.CreateProvider(ctx, Provider{PoolID: globalPool.ID, Host: "global.relay.test", Port: 587, ConnSecurity: ConnSecurityStartTLS, Active: true}, "", testActor)
-	svc.CreateProvider(ctx, Provider{PoolID: overridePool.ID, Host: "override.relay.test", Port: 587, ConnSecurity: ConnSecurityStartTLS, Active: true}, "", testActor)
-	svc.CreateRoutingRule(ctx, RoutingRule{PoolID: globalPool.ID, Priority: 1}, testActor)
+	normalPool, _ := svc.CreatePool(ctx, Pool{Scope: ScopeTenant, TenantID: 1, Name: "normal", Strategy: StrategyPriority}, testActor)
+	overridePool, _ := svc.CreatePool(ctx, Pool{Scope: ScopeTenant, TenantID: 1, Name: "override", Strategy: StrategyPriority}, testActor)
+	svc.CreateProvider(ctx, Provider{PoolID: normalPool.ID, Scope: ScopeTenant, TenantID: 1, Host: "normal.relay.test", Port: 587, ConnSecurity: ConnSecurityStartTLS, Active: true}, "", testActor)
+	svc.CreateProvider(ctx, Provider{PoolID: overridePool.ID, Scope: ScopeTenant, TenantID: 1, Host: "override.relay.test", Port: 587, ConnSecurity: ConnSecurityStartTLS, Active: true}, "", testActor)
+	svc.CreateRoutingRule(ctx, RoutingRule{TenantID: 1, PoolID: normalPool.ID, Priority: 1}, testActor)
 
 	fixedNow := time.Now()
 	fc := kernel.NewFixedClock(fixedNow)
@@ -240,7 +240,7 @@ func TestEmergencyOverride_ForcesRouteAndAutoExpires(t *testing.T) {
 	if err != nil {
 		t.Fatalf("select route after expiry: %v", err)
 	}
-	if route.Host != "global.relay.test" {
+	if route.Host != "normal.relay.test" {
 		t.Fatalf("expected the override to have auto-expired back to the normal rule, got host=%q", route.Host)
 	}
 }
@@ -271,8 +271,8 @@ func TestEmergencyOverride_RejectsEmptyReason(t *testing.T) {
 func TestSelectRoute_TenantIsolation(t *testing.T) {
 	_, svc := newTestService(t)
 	ctx := context.Background()
-	pool, _ := svc.CreatePool(ctx, Pool{Scope: ScopeTenant, Name: "tenant1-pool", Strategy: StrategyPriority}, testActor)
-	svc.CreateProvider(ctx, Provider{PoolID: pool.ID, Host: "tenant1.relay.test", Port: 587, ConnSecurity: ConnSecurityStartTLS, Active: true}, "", testActor)
+	pool, _ := svc.CreatePool(ctx, Pool{Scope: ScopeTenant, TenantID: 1, Name: "tenant1-pool", Strategy: StrategyPriority}, testActor)
+	svc.CreateProvider(ctx, Provider{PoolID: pool.ID, Scope: ScopeTenant, TenantID: 1, Host: "tenant1.relay.test", Port: 587, ConnSecurity: ConnSecurityStartTLS, Active: true}, "", testActor)
 	svc.CreateRoutingRule(ctx, RoutingRule{TenantID: 1, PoolID: pool.ID, Priority: 1}, testActor)
 
 	routeT2, err := svc.SelectRoute(ctx, RouteRequest{TenantID: 2, RecipientDomain: "external.test"})
