@@ -260,3 +260,28 @@ jobs:
             TestDeliverRemote_BookkeepingFailureNeverRedelivers; do
             grep -q -- "--- PASS: ${name}" "$out" || { echo "::error::missing PASS for ${name}" >&2; exit 1; }
           done
+
+      # ── Queue + delivery-history PostgreSQL portability ──────────────────
+      #
+      # internal/coremail/queue/postgres_portability_test.go existed but was
+      # never invoked with PGHOST set, so it SKIPPED in every workflow and
+      # proved nothing. It covers the outbound queue and the delivery-attempt
+      # history on real PostgreSQL: enqueue returning a real generated id
+      # (never LastInsertId), lease, defer-with-diagnostics, boolean column
+      # round-trips, and attempt recording — the portability class that SQLite
+      # runs structurally cannot catch. It runs its body twice so a
+      # resource-name or ordering dependency fails here rather than in
+      # production.
+      #
+      # The step FAILS if the test merely skips: a silently skipped acceptance
+      # test is indistinguishable from one that never existed.
+      - name: Queue and delivery-history PostgreSQL portability
+        run: |
+          set -euo pipefail
+          out="$(mktemp)"
+          go test ./internal/coremail/queue/... -run 'TestPostgresQueueAndDeliveryHistory' -count=1 -timeout 300s -v | tee "$out"
+          if grep -q -- "--- SKIP: TestPostgresQueueAndDeliveryHistory" "$out"; then
+            echo "::error::TestPostgresQueueAndDeliveryHistory SKIPPED; the PostgreSQL environment is not wired correctly" >&2
+            exit 1
+          fi
+          grep -q -- "--- PASS: TestPostgresQueueAndDeliveryHistory" "$out" || { echo "::error::missing PASS for TestPostgresQueueAndDeliveryHistory against PostgreSQL" >&2; exit 1; }
