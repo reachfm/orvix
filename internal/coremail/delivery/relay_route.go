@@ -99,8 +99,8 @@ type RelaySelector interface {
 // worker to make its retry/temp-fail decision uniformly with direct
 // delivery, without this package needing to know about relay.DeliverResult.
 type RelayDeliverResult struct {
-	Success   bool
-	TempFail  bool
+	Success  bool
+	TempFail bool
 	// Ambiguous is true when the message body was sent to the relay but
 	// the final acceptance response was never received (timeout or
 	// connection drop after DATA). The recipient MAY have received the

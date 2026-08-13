@@ -250,8 +250,8 @@ func connectAndAuth(ctx context.Context, d dialer, p Provider, password string, 
 // deliberately separate from HealthCheckResult so a caller can never
 // confuse "connection tested OK" with "mail was accepted".
 type DeliverResult struct {
-	Success    bool
-	TempFail   bool
+	Success  bool
+	TempFail bool
 	// Ambiguous is true when the DATA payload (including the terminating
 	// dot) was written but the final response was never read: the
 	// recipient MAY have received the message. The caller must NOT

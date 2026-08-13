@@ -1,4 +1,4 @@
-﻿package delivery
+package delivery
 
 import (
 	"context"
@@ -349,11 +349,11 @@ func identityResolver(sel RelaySelector, tid func(context.Context, *queue.QueueE
 		selRec = sel.(*recordingSelector)
 	}
 	w := &DeliveryWorker{
-		Resolver:          resolver,
-		WorkerID:          "f3-test",
-		RelaySelector:     selRec,
-		TenantIDForRelay:  tid,
-		DomainIDForRelay:  did,
+		Resolver:         resolver,
+		WorkerID:         "f3-test",
+		RelaySelector:    selRec,
+		TenantIDForRelay: tid,
+		DomainIDForRelay: did,
 	}
 	return w, resolver, selRec
 }
