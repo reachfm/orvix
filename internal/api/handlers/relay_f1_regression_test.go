@@ -57,6 +57,64 @@ func (e *platformMailControlEnv) tenantRelayDo(t *testing.T, method, path, tenan
 	return resp, raw
 }
 
+func (e *platformMailControlEnv) tenantRelayRawDo(t *testing.T, method, path, tenantToken, tenantCSRF, body string) (*http.Response, []byte) {
+	t.Helper()
+	req := httptest.NewRequest(method, path, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	if tenantToken != "" {
+		req.Header.Set("Authorization", "Bearer "+tenantToken)
+	}
+	if tenantCSRF != "" {
+		req.Header.Set("Cookie", "csrf_token="+tenantCSRF)
+		req.Header.Set("X-CSRF-Token", tenantCSRF)
+	}
+	resp, err := e.router.App().Test(req, fiber.TestConfig{Timeout: 0})
+	if err != nil {
+		t.Fatalf("%s %s: %v", method, path, err)
+	}
+	raw, _ := io.ReadAll(resp.Body)
+	return resp, raw
+}
+
+func TestTenantRelayMalformedJSONIsRejectedWithoutMutation(t *testing.T) {
+	env := f1TenantEnv(t)
+	tenantCSRF := importRouteCSRF(t, env.router, env.tenantAdm)
+	var before int
+	if err := env.db.QueryRow("SELECT COUNT(*) FROM coremail_relay_pools").Scan(&before); err != nil {
+		t.Fatalf("count pools before request: %v", err)
+	}
+
+	resp, raw := env.tenantRelayRawDo(t, http.MethodPost, "/api/v1/enterprise/relay/pools", env.tenantAdm, tenantCSRF, `{"name":"truncated"`)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("malformed JSON must return 400, got %d: %s", resp.StatusCode, raw)
+	}
+	var after int
+	if err := env.db.QueryRow("SELECT COUNT(*) FROM coremail_relay_pools").Scan(&after); err != nil {
+		t.Fatalf("count pools after request: %v", err)
+	}
+	if after != before {
+		t.Fatalf("malformed request mutated relay pools: before=%d after=%d", before, after)
+	}
+}
+
+func TestTenantRelayRouteRejectsPlatformIdentityWithoutTenantContext(t *testing.T) {
+	env := f1TenantEnv(t)
+	psaCSRF := importRouteCSRF(t, env.router, env.psaToken)
+	resp, raw := env.tenantRelayDo(t, http.MethodPost, "/api/v1/enterprise/relay/pools", env.psaToken, psaCSRF, map[string]interface{}{
+		"scope": "tenant", "name": "must-not-exist", "strategy": "priority",
+	})
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("platform identity without tenant context must return 403, got %d: %s", resp.StatusCode, raw)
+	}
+	var count int
+	if err := env.db.QueryRow("SELECT COUNT(*) FROM coremail_relay_pools WHERE name='must-not-exist'").Scan(&count); err != nil {
+		t.Fatalf("count forbidden pool: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("request without tenant context created %d relay pools", count)
+	}
+}
+
 func TestF1_TenantRelayInvalidConnSecurityReturns400AndProcessSurvives(t *testing.T) {
 	env := f1TenantEnv(t)
 	tenantCSRF := importRouteCSRF(t, env.router, env.tenantAdm)

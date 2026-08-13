@@ -28,6 +28,20 @@ func NewService(repo *Repository, clock kernel.Clock, outbox *kernel.OutboxRepos
 	return &Service{repo: repo, secrets: configSecretCodec{}, breaker: NewCircuitBreaker(5, 60*time.Second), clock: clock, outbox: outbox}
 }
 
+// NewAdministrativeService constructs the production administration service.
+// Unlike the delivery-only constructor, administrative mutations require both
+// transactional audit and outbox dependencies and fail startup if either is
+// absent. This prevents a wiring regression from silently committing
+// unaudited routing or credential changes.
+func NewAdministrativeService(repo *Repository, clock kernel.Clock, outbox *kernel.OutboxRepository, auditStore *audit.ExtendedStore) (*Service, error) {
+	if repo == nil || outbox == nil || auditStore == nil {
+		return nil, ErrEvidenceUnavailable
+	}
+	svc := NewService(repo, clock, outbox)
+	svc.audit = auditStore
+	return svc, nil
+}
+
 // WithSecretCodec overrides the secret codec — used by tests to avoid
 // depending on the real on-disk encryption key.
 func (s *Service) WithSecretCodec(c secretCodec) *Service {
@@ -779,8 +793,17 @@ func (s *Service) CreateRoutingRule(ctx context.Context, rule RoutingRule, actor
 	if pool == nil {
 		return nil, ErrPoolNotFound
 	}
-	if pool.TenantID != 0 && rule.TenantID != 0 && pool.TenantID != rule.TenantID {
-		return nil, ErrCrossTenantProvider
+	if rule.TenantID != 0 {
+		if pool.TenantID == 0 {
+			// Global pools are platform policy. A tenant may benefit from a
+			// platform-authored global default during route selection, but must
+			// not bind its own rule to that shared pool without an explicit
+			// platform action.
+			return nil, ErrGlobalPoolRequiresPlatform
+		}
+		if pool.TenantID != rule.TenantID {
+			return nil, ErrCrossTenantProvider
+		}
 	}
 
 	rule.CreatedAt = s.clock.Now()
@@ -848,8 +871,13 @@ func (s *Service) SetEmergencyOverride(ctx context.Context, tenantID, poolID, ac
 	if pool == nil {
 		return nil, ErrPoolNotFound
 	}
-	if pool.TenantID != 0 && tenantID != 0 && pool.TenantID != tenantID {
-		return nil, ErrCrossTenantProvider
+	if tenantID != 0 {
+		if pool.TenantID == 0 {
+			return nil, ErrGlobalPoolRequiresPlatform
+		}
+		if pool.TenantID != tenantID {
+			return nil, ErrCrossTenantProvider
+		}
 	}
 
 	o := EmergencyOverride{TenantID: tenantID, PoolID: poolID, Reason: reason, ActorID: actorID, ExpiresAt: expiresAt, CreatedAt: now}

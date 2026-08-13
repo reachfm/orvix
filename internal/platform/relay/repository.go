@@ -3,6 +3,7 @@ package relay
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"strings"
 	"time"
 
@@ -26,11 +27,22 @@ type Repository struct {
 }
 
 func NewRepository(db *sql.DB) *Repository {
+	repo, err := NewRepositoryChecked(db)
+	if err != nil {
+		// Compatibility constructor for tests and older callers. Production
+		// startup uses NewRepositoryChecked and refuses to enable relay when
+		// the database backend cannot be identified.
+		return &Repository{db: db}
+	}
+	return repo
+}
+
+func NewRepositoryChecked(db *sql.DB) (*Repository, error) {
 	d, err := dbdialect.Detect(db)
 	if err != nil {
-		d = dbdialect.FromDriver("sqlite")
+		return nil, fmt.Errorf("relay dialect detection: %w", err)
 	}
-	return &Repository{db: db, dialect: d}
+	return &Repository{db: db, dialect: d}, nil
 }
 
 func (r *Repository) EnsureSchema(ctx context.Context) error {

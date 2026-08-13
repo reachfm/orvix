@@ -44,6 +44,11 @@ var (
 	ErrOverrideNotFound  = errors.New("emergency override not found or already inactive")
 	ErrNameRequired      = errors.New("relay name is required")
 	ErrRelayNameConflict = errors.New("a relay with this name already exists in the same scope")
+	// ErrEvidenceUnavailable prevents security-sensitive administrative
+	// mutations from running when their transactional audit/outbox evidence
+	// dependencies were not wired. This is a startup/configuration failure,
+	// never permission to commit an unaudited change.
+	ErrEvidenceUnavailable = errors.New("relay audit and outbox evidence unavailable")
 )
 
 // IsRetryableRouteError reports whether a routing failure is TEMPORARY

@@ -20,6 +20,24 @@ func relayActor(c fiber.Ctx) relay.AuditActor {
 	return relay.AuditActor{ID: id, Role: role, RequestID: reqID, IP: c.IP(), UserAgent: c.Get("User-Agent")}
 }
 
+// requireRelayTenant fails closed at the handler boundary. Relay tenant
+// handlers must never reinterpret a missing/malformed auth context as tenant
+// zero, because zero is reserved for platform-owned resources.
+func requireRelayTenant(c fiber.Ctx) (uint, error) {
+	tenantID, err := auth.RequireTenantID(c)
+	if err != nil || tenantID == 0 {
+		return 0, c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "tenant context required"})
+	}
+	return tenantID, nil
+}
+
+func bindRelayJSON(c fiber.Ctx, dst any) error {
+	if err := c.Bind().JSON(dst); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid JSON request body"})
+	}
+	return nil
+}
+
 // relayError converts a service error into a status code and a SAFE client
 // message.
 //
@@ -40,6 +58,8 @@ func relayError(c fiber.Ctx, err error) error {
 		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": err.Error()})
 	case errors.Is(err, relay.ErrCrossTenantProvider), errors.Is(err, relay.ErrCrossTenantPool), errors.Is(err, relay.ErrGlobalPoolRequiresPlatform):
 		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": err.Error()})
+	case errors.Is(err, relay.ErrEvidenceUnavailable):
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "relay service unavailable"})
 	case errors.Is(err, relay.ErrInvalidConnSecurity),
 		errors.Is(err, relay.ErrUnsafeTarget),
 		errors.Is(err, relay.ErrNameRequired),
@@ -63,7 +83,10 @@ func (h *Handler) PostRelayPool(c fiber.Ctx) error {
 	if h.relaySvc == nil {
 		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "relay service not available"})
 	}
-	tenantID, _ := auth.RequireTenantID(c)
+	tenantID, err := requireRelayTenant(c)
+	if err != nil {
+		return err
+	}
 	var req struct {
 		Scope      string `json:"scope"`
 		Name       string `json:"name"`
@@ -71,7 +94,9 @@ func (h *Handler) PostRelayPool(c fiber.Ctx) error {
 		DomainID   uint   `json:"domain_id"`
 		DirectOnly bool   `json:"direct_only"`
 	}
-	c.Bind().JSON(&req)
+	if err := bindRelayJSON(c, &req); err != nil {
+		return err
+	}
 	pool := relay.Pool{Scope: relay.Scope(req.Scope), TenantID: tenantID, DomainID: req.DomainID, Name: req.Name, Strategy: relay.SelectionStrategy(req.Strategy), DirectOnly: req.DirectOnly}
 	created, err := h.relaySvc.CreatePool(c.Context(), pool, relayActor(c))
 	if err != nil {
@@ -95,7 +120,10 @@ func (h *Handler) PostRelayProvider(c fiber.Ctx) error {
 	if h.relaySvc == nil {
 		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "relay service not available"})
 	}
-	tenantID, _ := auth.RequireTenantID(c)
+	tenantID, err := requireRelayTenant(c)
+	if err != nil {
+		return err
+	}
 	var req struct {
 		PoolID          uint   `json:"pool_id"`
 		Scope           string `json:"scope"`
@@ -111,7 +139,9 @@ func (h *Handler) PostRelayProvider(c fiber.Ctx) error {
 		Active          bool   `json:"active"`
 		RateLimitPerMin int    `json:"rate_limit_per_min"`
 	}
-	c.Bind().JSON(&req)
+	if err := bindRelayJSON(c, &req); err != nil {
+		return err
+	}
 	p := relay.Provider{
 		PoolID: req.PoolID, Scope: relay.Scope(req.Scope), Name: req.Name, Host: req.Host, Port: req.Port,
 		Username: req.Username, ConnSecurity: relay.ConnSecurity(req.ConnSecurity), TLSValidation: relay.TLSValidation(req.TLSValidation),
@@ -133,7 +163,10 @@ func (h *Handler) GetRelayPoolProviders(c fiber.Ctx) error {
 	if h.relaySvc == nil {
 		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "relay service not available"})
 	}
-	tenantID, _ := auth.RequireTenantID(c)
+	tenantID, err := requireRelayTenant(c)
+	if err != nil {
+		return err
+	}
 	idVal, err := strconv.ParseUint(c.Params("id"), 10, 64)
 	if err != nil || idVal == 0 {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid pool id"})
@@ -152,7 +185,10 @@ func (h *Handler) PostRelayProviderTest(c fiber.Ctx) error {
 	if h.relaySvc == nil {
 		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "relay service not available"})
 	}
-	tenantID, _ := auth.RequireTenantID(c)
+	tenantID, err := requireRelayTenant(c)
+	if err != nil {
+		return err
+	}
 	idVal, err := strconv.ParseUint(c.Params("id"), 10, 64)
 	if err != nil || idVal == 0 {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid provider id"})
@@ -169,7 +205,10 @@ func (h *Handler) PostRelayRoutingRule(c fiber.Ctx) error {
 	if h.relaySvc == nil {
 		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "relay service not available"})
 	}
-	tenantID, _ := auth.RequireTenantID(c)
+	tenantID, err := requireRelayTenant(c)
+	if err != nil {
+		return err
+	}
 	var req struct {
 		DomainID        uint   `json:"domain_id"`
 		SenderPattern   string `json:"sender_pattern"`
@@ -178,7 +217,9 @@ func (h *Handler) PostRelayRoutingRule(c fiber.Ctx) error {
 		PoolID          uint   `json:"pool_id"`
 		Priority        int    `json:"priority"`
 	}
-	c.Bind().JSON(&req)
+	if err := bindRelayJSON(c, &req); err != nil {
+		return err
+	}
 	rule, err := h.relaySvc.CreateRoutingRule(c.Context(), relay.RoutingRule{
 		TenantID: tenantID, DomainID: req.DomainID, SenderPattern: req.SenderPattern,
 		RecipientDomain: req.RecipientDomain,
@@ -195,14 +236,19 @@ func (h *Handler) PostRelayEmergencyOverride(c fiber.Ctx) error {
 	if h.relaySvc == nil {
 		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "relay service not available"})
 	}
-	tenantID, _ := auth.RequireTenantID(c)
+	tenantID, err := requireRelayTenant(c)
+	if err != nil {
+		return err
+	}
 	actorID, _ := c.Locals("user_id").(uint)
 	var req struct {
 		PoolID       uint   `json:"pool_id"`
 		Reason       string `json:"reason"`
 		ExpiresInMin int    `json:"expires_in_minutes"`
 	}
-	c.Bind().JSON(&req)
+	if err := bindRelayJSON(c, &req); err != nil {
+		return err
+	}
 	if req.ExpiresInMin <= 0 {
 		req.ExpiresInMin = 60
 	}
@@ -226,7 +272,10 @@ func (h *Handler) DeleteRelayEmergencyOverride(c fiber.Ctx) error {
 	if h.relaySvc == nil {
 		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "relay service not available"})
 	}
-	tenantID, _ := auth.RequireTenantID(c)
+	tenantID, err := requireRelayTenant(c)
+	if err != nil {
+		return err
+	}
 	actorID, _ := c.Locals("user_id").(uint)
 	idVal, err := strconv.ParseUint(c.Params("id"), 10, 64)
 	if err != nil || idVal == 0 {
@@ -235,7 +284,11 @@ func (h *Handler) DeleteRelayEmergencyOverride(c fiber.Ctx) error {
 	var req struct {
 		Reason string `json:"reason"`
 	}
-	c.Bind().JSON(&req)
+	if len(c.Body()) > 0 {
+		if err := bindRelayJSON(c, &req); err != nil {
+			return err
+		}
+	}
 	if err := h.relaySvc.RevokeEmergencyOverride(c.Context(), uint(idVal), tenantID, actorID, req.Reason); err != nil {
 		return relayError(c, err)
 	}

@@ -3,6 +3,7 @@ package relay
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"testing"
 	"time"
 
@@ -34,6 +35,26 @@ func newTestService(t *testing.T) (*sql.DB, *Service) {
 	}
 	svc := NewService(repo, nil, nil).WithSecretCodec(fakeSecretCodec{})
 	return db, svc
+}
+
+func TestNewAdministrativeServiceRequiresEvidenceDependencies(t *testing.T) {
+	_, svc := newTestService(t)
+	if _, err := NewAdministrativeService(svc.repo, nil, nil, nil); !errors.Is(err, ErrEvidenceUnavailable) {
+		t.Fatalf("missing administrative evidence dependencies must fail closed, got %v", err)
+	}
+}
+
+func TestNewRepositoryCheckedRejectsUnavailableDatabase(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewRepositoryChecked(db); err == nil {
+		t.Fatal("closed database must not silently fall back to the SQLite dialect")
+	}
 }
 
 func TestCreateProvider_EncryptsCredentialAndRedactsOnList(t *testing.T) {

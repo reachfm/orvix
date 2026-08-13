@@ -211,6 +211,32 @@ func TestF2_RoutingRuleRejectsForeignPool(t *testing.T) {
 	}
 }
 
+func TestF2_TenantRoutingRuleCannotBindPlatformGlobalPool(t *testing.T) {
+	_, svc := newTestService(t)
+	ctx := context.Background()
+	globalPool, err := svc.CreatePool(ctx, Pool{Scope: ScopeGlobal, Name: "global-policy", Strategy: StrategyPriority}, testActor)
+	if err != nil {
+		t.Fatalf("create global pool: %v", err)
+	}
+	_, err = svc.CreateRoutingRule(ctx, RoutingRule{TenantID: 7, PoolID: globalPool.ID, Priority: 1}, testActor)
+	if !errors.Is(err, ErrGlobalPoolRequiresPlatform) {
+		t.Fatalf("tenant-authored rule must not bind a global pool, got %v", err)
+	}
+}
+
+func TestF2_TenantOverrideCannotForcePlatformGlobalPool(t *testing.T) {
+	_, svc := newTestService(t)
+	ctx := context.Background()
+	globalPool, err := svc.CreatePool(ctx, Pool{Scope: ScopeGlobal, Name: "global-emergency", Strategy: StrategyPriority}, testActor)
+	if err != nil {
+		t.Fatalf("create global pool: %v", err)
+	}
+	_, err = svc.SetEmergencyOverride(ctx, 7, globalPool.ID, 11, "tenant attempted global redirect", time.Now().UTC().Add(time.Hour))
+	if !errors.Is(err, ErrGlobalPoolRequiresPlatform) {
+		t.Fatalf("tenant override must not target a global pool, got %v", err)
+	}
+}
+
 // TestF2_FallbackChainRejectsCrossTenantProvider proves fallback
 // construction cannot route through another tenant's provider.
 func TestF2_FallbackChainRejectsCrossTenantProvider(t *testing.T) {

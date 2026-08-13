@@ -20,13 +20,31 @@ type QueueEngine struct {
 
 // NewQueueEngine creates a queue engine with default tenant fairness limits.
 func NewQueueEngine(db *sql.DB) *QueueEngine {
+	repo := NewSQLRepo(db)
 	return &QueueEngine{
 		DB:                  db,
-		Repo:                NewSQLRepo(db),
+		Repo:                repo,
 		MaxWorkersPerTenant: 4,
 		GlobalMaxWorkers:    100,
 		pendingClaims:       make(map[string]int),
 	}
+}
+
+// NewQueueEngineChecked is the production constructor. It refuses startup
+// when the SQL backend cannot be identified, preventing raw SQLite SQL from
+// reaching PostgreSQL through a silent fallback.
+func NewQueueEngineChecked(db *sql.DB) (*QueueEngine, error) {
+	repo, err := NewSQLRepoChecked(db)
+	if err != nil {
+		return nil, err
+	}
+	return &QueueEngine{
+		DB:                  db,
+		Repo:                repo,
+		MaxWorkersPerTenant: 4,
+		GlobalMaxWorkers:    100,
+		pendingClaims:       make(map[string]int),
+	}, nil
 }
 
 // BeginTx starts a new transaction.

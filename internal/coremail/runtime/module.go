@@ -166,7 +166,11 @@ func (m *Module) initCore(cfg *config.Config, sqlDB *sql.DB) error {
 	if err != nil {
 		return fmt.Errorf("coremail mailstore: %w", err)
 	}
-	m.queue = queue.NewQueueEngine(sqlDB)
+	queueEngine, queueErr := queue.NewQueueEngineChecked(sqlDB)
+	if queueErr != nil {
+		return fmt.Errorf("initialize queue repository: %w", queueErr)
+	}
+	m.queue = queueEngine
 	m.obs = observability.NewObservability(1000, 5000)
 
 	// Initialize licensing service (retained for SaaS quota enforcement).
@@ -489,15 +493,21 @@ func (m *Module) initCore(cfg *config.Config, sqlDB *sql.DB) error {
 	// rather than running silently without events.
 	relayDialect, rderr := dbdialect.Detect(sqlDB)
 	if rderr != nil {
-		relayDialect = dbdialect.FromDriver("sqlite")
+		if m.logger != nil {
+			m.logger.Warn("relay database dialect detection failed; outbound relay disabled", zap.Error(rderr))
+		}
 	}
-	relayRepo := relay.NewRepository(sqlDB)
+	relayRepo, relayRepoErr := relay.NewRepositoryChecked(sqlDB)
 	var relayAdapter *relay.DeliveryAdapter
-	if err := relayRepo.EnsureSchema(context.Background()); err != nil {
+	if relayRepoErr != nil {
+		if m.logger != nil {
+			m.logger.Warn("relay repository init failed; outbound relay disabled", zap.Error(relayRepoErr))
+		}
+	} else if err := relayRepo.EnsureSchema(context.Background()); err != nil {
 		if m.logger != nil {
 			m.logger.Warn("relay control plane schema init failed; outbound relay disabled", zap.Error(err))
 		}
-	} else {
+	} else if relayDialect != nil {
 		relayOutbox := kernel.NewOutboxRepository(relayDialect)
 		if oerr := relayOutbox.EnsureSchema(context.Background(), sqlDB); oerr != nil {
 			if m.logger != nil {

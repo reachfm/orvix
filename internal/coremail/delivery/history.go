@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"fmt"
 	"time"
+
+	"github.com/orvix/orvix/internal/dbdialect"
 )
 
 // DeliveryAttempt records a single delivery attempt for persistence.
@@ -26,9 +28,17 @@ type DeliveryAttempt struct {
 
 // AttemptHistoryTable returns DDL for the delivery_attempts table.
 func AttemptHistoryTable() string {
-	return `CREATE TABLE IF NOT EXISTS coremail_delivery_attempts (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		queue_entry_id INTEGER NOT NULL,
+	return AttemptHistoryTableForDialect(dbdialect.FromDriver("sqlite"))
+}
+
+// AttemptHistoryTableForDialect returns portable DDL for the active backend.
+func AttemptHistoryTableForDialect(dialect *dbdialect.Info) string {
+	if dialect == nil {
+		dialect = dbdialect.FromDriver("sqlite")
+	}
+	return fmt.Sprintf(`CREATE TABLE IF NOT EXISTS coremail_delivery_attempts (
+		id %s,
+		queue_entry_id BIGINT NOT NULL,
 		attempt_number INTEGER NOT NULL,
 		status TEXT NOT NULL,
 		remote_host TEXT NOT NULL DEFAULT '',
@@ -36,11 +46,11 @@ func AttemptHistoryTable() string {
 		status_code INTEGER NOT NULL DEFAULT 0,
 		status_msg TEXT NOT NULL DEFAULT '',
 		enhanced_code TEXT NOT NULL DEFAULT '',
-		duration_ms INTEGER NOT NULL DEFAULT 0,
-		tls_used INTEGER NOT NULL DEFAULT 0,
+		duration_ms BIGINT NOT NULL DEFAULT 0,
+		tls_used %s NOT NULL DEFAULT %s,
 		worker_id TEXT NOT NULL DEFAULT '',
-		attempted_at DATETIME NOT NULL
-	)`
+		attempted_at %s NOT NULL
+	)`, dialect.AutoIncrement(), dialect.BooleanType(), map[bool]string{true: "FALSE", false: "0"}[dialect.IsPostgres()], dialect.TimestampType())
 }
 
 // AttemptHistoryIndexes returns index DDL for the delivery_attempts table.
@@ -82,11 +92,31 @@ var _ AttemptHistoryRepository = (*AttemptHistorySQLRepo)(nil)
 
 // AttemptHistorySQLRepo implements AttemptHistoryRepository.
 type AttemptHistorySQLRepo struct {
-	db *sql.DB
+	db      *sql.DB
+	dialect *dbdialect.Info
 }
 
 func NewAttemptHistorySQLRepo(db *sql.DB) *AttemptHistorySQLRepo {
-	return &AttemptHistorySQLRepo{db: db}
+	repo, err := NewAttemptHistorySQLRepoChecked(db)
+	if err != nil {
+		return &AttemptHistorySQLRepo{db: db}
+	}
+	return repo
+}
+
+func NewAttemptHistorySQLRepoChecked(db *sql.DB) (*AttemptHistorySQLRepo, error) {
+	dialect, err := dbdialect.Detect(db)
+	if err != nil {
+		return nil, fmt.Errorf("delivery history dialect detection: %w", err)
+	}
+	return &AttemptHistorySQLRepo{db: db, dialect: dialect}, nil
+}
+
+func (r *AttemptHistorySQLRepo) q(query string) string {
+	if r.dialect == nil {
+		return "/* delivery history dialect unavailable */ " + query
+	}
+	return r.dialect.Rewrite(query)
 }
 
 func (r *AttemptHistorySQLRepo) exec(tx interface{}) interface {
@@ -107,16 +137,28 @@ func (r *AttemptHistorySQLRepo) RecordAttempt(ctx context.Context, a *DeliveryAt
 		a.AttemptedAt = time.Now().UTC()
 	}
 	e := r.exec(tx)
-	res, err := e.ExecContext(ctx, `
+	insertSQL := `
 		INSERT INTO coremail_delivery_attempts
 			(queue_entry_id, attempt_number, status, remote_host, remote_ip,
 			 status_code, status_msg, enhanced_code, duration_ms, tls_used,
 			 worker_id, attempted_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	tlsUsed := interface{}(boolToInt(a.TLSUsed))
+	if r.dialect != nil && r.dialect.IsPostgres() {
+		tlsUsed = a.TLSUsed
+	}
+	args := []interface{}{
 		a.QueueEntryID, a.AttemptNumber, a.Status, a.RemoteHost, a.RemoteIP,
-		a.StatusCode, a.StatusMsg, a.EnhancedCode, a.DurationMs, boolToInt(a.TLSUsed),
+		a.StatusCode, a.StatusMsg, a.EnhancedCode, a.DurationMs, tlsUsed,
 		a.WorkerID, a.AttemptedAt,
-	)
+	}
+	if r.dialect != nil && r.dialect.IsPostgres() {
+		if err := e.QueryRowContext(ctx, r.q(insertSQL+" RETURNING id"), args...).Scan(&a.ID); err != nil {
+			return fmt.Errorf("record attempt: %w", err)
+		}
+		return nil
+	}
+	res, err := e.ExecContext(ctx, r.q(insertSQL), args...)
 	if err != nil {
 		return fmt.Errorf("record attempt: %w", err)
 	}
@@ -130,13 +172,13 @@ func (r *AttemptHistorySQLRepo) RecordAttempt(ctx context.Context, a *DeliveryAt
 
 func (r *AttemptHistorySQLRepo) ListByEntry(ctx context.Context, queueEntryID uint, tx interface{}) ([]DeliveryAttempt, error) {
 	e := r.exec(tx)
-	rows, err := e.QueryContext(ctx, `
+	rows, err := e.QueryContext(ctx, r.q(`
 		SELECT id, queue_entry_id, attempt_number, status, remote_host, remote_ip,
 		       status_code, status_msg, enhanced_code, duration_ms, tls_used,
 		       worker_id, attempted_at
 		FROM coremail_delivery_attempts
 		WHERE queue_entry_id = ?
-		ORDER BY attempt_number ASC`, queueEntryID)
+		ORDER BY attempt_number ASC`), queueEntryID)
 	if err != nil {
 		return nil, err
 	}
@@ -144,13 +186,13 @@ func (r *AttemptHistorySQLRepo) ListByEntry(ctx context.Context, queueEntryID ui
 	var attempts []DeliveryAttempt
 	for rows.Next() {
 		var a DeliveryAttempt
-		var tlsUsed int
+		var tlsUsed interface{}
 		if err := rows.Scan(&a.ID, &a.QueueEntryID, &a.AttemptNumber, &a.Status,
 			&a.RemoteHost, &a.RemoteIP, &a.StatusCode, &a.StatusMsg, &a.EnhancedCode,
 			&a.DurationMs, &tlsUsed, &a.WorkerID, &a.AttemptedAt); err != nil {
 			return nil, fmt.Errorf("scan attempt: %w", err)
 		}
-		a.TLSUsed = tlsUsed == 1
+		a.TLSUsed = databaseBool(tlsUsed)
 		attempts = append(attempts, a)
 	}
 	return attempts, rows.Err()
@@ -178,7 +220,7 @@ func (r *AttemptHistorySQLRepo) ListRecent(ctx context.Context, filter HistoryFi
 	query += " ORDER BY id ASC LIMIT ?"
 	args = append(args, limit)
 
-	rows, err := e.QueryContext(ctx, query, args...)
+	rows, err := e.QueryContext(ctx, r.q(query), args...)
 	if err != nil {
 		return nil, err
 	}
@@ -186,13 +228,13 @@ func (r *AttemptHistorySQLRepo) ListRecent(ctx context.Context, filter HistoryFi
 	var attempts []DeliveryAttempt
 	for rows.Next() {
 		var a DeliveryAttempt
-		var tlsUsed int
+		var tlsUsed interface{}
 		if err := rows.Scan(&a.ID, &a.QueueEntryID, &a.AttemptNumber, &a.Status,
 			&a.RemoteHost, &a.RemoteIP, &a.StatusCode, &a.StatusMsg, &a.EnhancedCode,
 			&a.DurationMs, &tlsUsed, &a.WorkerID, &a.AttemptedAt); err != nil {
 			return nil, fmt.Errorf("scan attempt: %w", err)
 		}
-		a.TLSUsed = tlsUsed == 1
+		a.TLSUsed = databaseBool(tlsUsed)
 		attempts = append(attempts, a)
 	}
 	return attempts, rows.Err()
@@ -201,21 +243,21 @@ func (r *AttemptHistorySQLRepo) ListRecent(ctx context.Context, filter HistoryFi
 func (r *AttemptHistorySQLRepo) CountByEntry(ctx context.Context, queueEntryID uint, tx interface{}) (int, error) {
 	e := r.exec(tx)
 	var count int
-	err := e.QueryRowContext(ctx, "SELECT COUNT(*) FROM coremail_delivery_attempts WHERE queue_entry_id=?", queueEntryID).Scan(&count)
+	err := e.QueryRowContext(ctx, r.q("SELECT COUNT(*) FROM coremail_delivery_attempts WHERE queue_entry_id=?"), queueEntryID).Scan(&count)
 	return count, err
 }
 
 func (r *AttemptHistorySQLRepo) LastAttempt(ctx context.Context, queueEntryID uint, tx interface{}) (*DeliveryAttempt, error) {
 	e := r.exec(tx)
-	row := e.QueryRowContext(ctx, `
+	row := e.QueryRowContext(ctx, r.q(`
 		SELECT id, queue_entry_id, attempt_number, status, remote_host, remote_ip,
 		       status_code, status_msg, enhanced_code, duration_ms, tls_used,
 		       worker_id, attempted_at
 		FROM coremail_delivery_attempts
 		WHERE queue_entry_id = ?
-		ORDER BY attempt_number DESC LIMIT 1`, queueEntryID)
+		ORDER BY attempt_number DESC LIMIT 1`), queueEntryID)
 	var a DeliveryAttempt
-	var tlsUsed int
+	var tlsUsed interface{}
 	err := row.Scan(&a.ID, &a.QueueEntryID, &a.AttemptNumber, &a.Status,
 		&a.RemoteHost, &a.RemoteIP, &a.StatusCode, &a.StatusMsg, &a.EnhancedCode,
 		&a.DurationMs, &tlsUsed, &a.WorkerID, &a.AttemptedAt)
@@ -225,7 +267,7 @@ func (r *AttemptHistorySQLRepo) LastAttempt(ctx context.Context, queueEntryID ui
 		}
 		return nil, fmt.Errorf("scan last attempt: %w", err)
 	}
-	a.TLSUsed = tlsUsed == 1
+	a.TLSUsed = databaseBool(tlsUsed)
 	return &a, nil
 }
 
@@ -234,4 +276,21 @@ func boolToInt(b bool) int {
 		return 1
 	}
 	return 0
+}
+
+func databaseBool(v interface{}) bool {
+	switch x := v.(type) {
+	case bool:
+		return x
+	case int64:
+		return x != 0
+	case int:
+		return x != 0
+	case []byte:
+		return string(x) == "1" || string(x) == "true" || string(x) == "t"
+	case string:
+		return x == "1" || x == "true" || x == "t"
+	default:
+		return false
+	}
 }

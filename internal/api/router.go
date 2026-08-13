@@ -348,13 +348,18 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 				router.h.SetBulkProvisionService(bulkprovision.NewService(bulkProvisionRepo, mailboxAdminSvc, domainAdminSvc, nil, nil, nil))
 			}
 
-			relayRepo := relay.NewRepository(sqlDB)
-			if err := relayRepo.EnsureSchema(context.Background()); err != nil {
+			relayRepo, relayRepoErr := relay.NewRepositoryChecked(sqlDB)
+			if relayRepoErr != nil {
+				logger.Warn("relay control plane dialect detection failed; service disabled", zap.Error(relayRepoErr))
+			} else if err := relayRepo.EnsureSchema(context.Background()); err != nil {
 				logger.Warn("relay control plane schema init failed; service disabled", zap.Error(err))
 			} else {
-				relaySvc := relay.NewService(relayRepo, nil, outboxRepo)
-				relaySvc.WithAuditStore(auditExtendedStore)
-				router.h.SetRelayService(relaySvc)
+				relaySvc, relaySvcErr := relay.NewAdministrativeService(relayRepo, nil, outboxRepo, auditExtendedStore)
+				if relaySvcErr != nil {
+					logger.Warn("relay administrative evidence wiring failed; service disabled", zap.Error(relaySvcErr))
+				} else {
+					router.h.SetRelayService(relaySvc)
+				}
 			}
 
 			dashboardSvc := dashboardsvc.NewDashboardService(sqlDB)
@@ -489,7 +494,12 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 		// (Milestone 8) against the same table the delivery
 		// workers already write to — not a separate history store.
 		if sqlDB, err := db.DB(); err == nil {
-			router.h.SetAttemptHistoryRepo(delivery.NewAttemptHistorySQLRepo(sqlDB))
+			historyRepo, historyErr := delivery.NewAttemptHistorySQLRepoChecked(sqlDB)
+			if historyErr != nil {
+				logger.Warn("delivery history dialect detection failed; history API disabled", zap.Error(historyErr))
+			} else {
+				router.h.SetAttemptHistoryRepo(historyRepo)
+			}
 		}
 		// Wire the cluster node registry service (Milestone 10) from
 		// the same runtime module that self-enrolled at boot — the
