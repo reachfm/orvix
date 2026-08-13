@@ -145,22 +145,46 @@ func (r *Repository) ensureColumn(ctx context.Context, table, column, columnDDL 
 // insertReturningID executes an INSERT and captures the new row's id
 // portably: PostgreSQL uses RETURNING id (LastInsertId is not reliable
 // on Postgres drivers), SQLite uses LastInsertId.
+// execQuerier is the shared subset of *sql.DB and *sql.Tx used by the
+// repository's write helpers, so every insert can participate in a caller's
+// transaction alongside its audit and outbox evidence (Fix G).
+type execQuerier interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
 func (r *Repository) insertReturningID(ctx context.Context, query string, args ...any) (int64, error) {
+	return r.insertReturningIDWith(ctx, r.db, query, args...)
+}
+
+func (r *Repository) insertReturningIDWith(ctx context.Context, q execQuerier, query string, args ...any) (int64, error) {
 	if r.dialect.IsPostgres() {
 		var id int64
-		err := r.db.QueryRowContext(ctx, query+" RETURNING id", args...).Scan(&id)
+		err := q.QueryRowContext(ctx, query+" RETURNING id", args...).Scan(&id)
 		return id, err
 	}
-	res, err := r.db.ExecContext(ctx, query, args...)
+	res, err := q.ExecContext(ctx, query, args...)
 	if err != nil {
 		return 0, err
 	}
 	return res.LastInsertId()
 }
 
+const insertProviderSQL = `INSERT INTO platform_relay_providers (scope, tenant_id, domain_id, pool_id, name, host, port, username, secret_ref, conn_security, tls_validation, priority, weight, active, rate_limit_per_min, circuit_state, version, created_at, updated_at) VALUES (`
+
 func (r *Repository) CreateProvider(ctx context.Context, p *Provider) error {
-	id, err := r.insertReturningID(ctx,
-		`INSERT INTO platform_relay_providers (scope, tenant_id, domain_id, pool_id, name, host, port, username, secret_ref, conn_security, tls_validation, priority, weight, active, rate_limit_per_min, circuit_state, version, created_at, updated_at) VALUES (`+r.dialect.Placeholders(19)+`)`,
+	return r.createProviderWith(ctx, r.db, p)
+}
+
+// CreateProviderTx inserts a provider inside the caller's transaction, so the
+// row, its audit entry, and its outbox event commit or roll back together.
+func (r *Repository) CreateProviderTx(ctx context.Context, tx *sql.Tx, p *Provider) error {
+	return r.createProviderWith(ctx, tx, p)
+}
+
+func (r *Repository) createProviderWith(ctx context.Context, q execQuerier, p *Provider) error {
+	id, err := r.insertReturningIDWith(ctx, q,
+		insertProviderSQL+r.dialect.Placeholders(19)+`)`,
 		p.Scope, p.TenantID, p.DomainID, p.PoolID, p.Name, p.Host, p.Port, p.Username, p.SecretRef, p.ConnSecurity, p.TLSValidation, p.Priority, p.Weight, boolToInt(p.Active), p.RateLimitPerMin, CircuitClosed, 1, p.CreatedAt, p.UpdatedAt)
 	if err != nil {
 		return err
@@ -202,11 +226,25 @@ func (r *Repository) ListProvidersByPool(ctx context.Context, poolID uint) ([]Pr
 	return out, rows.Err()
 }
 
+// UpdateProviderCircuit persists a circuit-breaker transition. It verifies
+// RowsAffected so a transition against a deleted provider is reported instead
+// of silently succeeding — a circuit that believes it recorded an "open" state
+// it never persisted would keep routing to a failing provider.
 func (r *Repository) UpdateProviderCircuit(ctx context.Context, id uint, state CircuitState, failures int, openedAt *time.Time, now time.Time) error {
-	_, err := r.db.ExecContext(ctx,
+	res, err := r.db.ExecContext(ctx,
 		`UPDATE platform_relay_providers SET circuit_state=`+r.dialect.Placeholder(1)+`, circuit_failures=`+r.dialect.Placeholder(2)+`, circuit_opened_at=`+r.dialect.Placeholder(3)+`, version=version+1, updated_at=`+r.dialect.Placeholder(4)+` WHERE id=`+r.dialect.Placeholder(5),
 		state, failures, openedAt, now, id)
-	return err
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrProviderNotFound
+	}
+	return nil
 }
 
 // ── Platform relay administration ─────────────────────────────────
@@ -275,7 +313,18 @@ func (r *Repository) ListProviders(ctx context.Context, f ProviderFilter) ([]Pro
 // caller is responsible for pre-filling unchanged values when a field
 // legitimately needs to be cleared.
 func (r *Repository) UpdateProvider(ctx context.Context, p *Provider) (bool, error) {
-	res, err := r.db.ExecContext(ctx,
+	return r.updateProviderWith(ctx, r.db, p)
+}
+
+// UpdateProviderTx applies the same guarded update inside the caller's
+// transaction so the row change commits atomically with its audit and outbox
+// evidence (Fix G).
+func (r *Repository) UpdateProviderTx(ctx context.Context, tx *sql.Tx, p *Provider) (bool, error) {
+	return r.updateProviderWith(ctx, tx, p)
+}
+
+func (r *Repository) updateProviderWith(ctx context.Context, q execQuerier, p *Provider) (bool, error) {
+	res, err := q.ExecContext(ctx,
 		`UPDATE platform_relay_providers SET
 			scope=`+r.dialect.Placeholder(1)+`, tenant_id=`+r.dialect.Placeholder(2)+`, domain_id=`+r.dialect.Placeholder(3)+`, pool_id=`+r.dialect.Placeholder(4)+`, name=`+r.dialect.Placeholder(5)+`, host=`+r.dialect.Placeholder(6)+`, port=`+r.dialect.Placeholder(7)+`,
 			username=`+r.dialect.Placeholder(8)+`, secret_ref=`+r.dialect.Placeholder(9)+`, conn_security=`+r.dialect.Placeholder(10)+`, tls_validation=`+r.dialect.Placeholder(11)+`,
@@ -362,12 +411,26 @@ func (r *Repository) RotateProviderSecretTx(ctx context.Context, tx *sql.Tx, id 
 	return n > 0, nil
 }
 
-// SetTestResult records the last safe connection-test outcome.
+// SetTestResult records the last safe connection-test outcome. The statement
+// is version-guarded, so RowsAffected==0 means a concurrent modification (or a
+// deleted provider) — reported as ErrVersionConflict rather than swallowed,
+// which previously let the caller believe a test outcome was persisted when it
+// was not.
 func (r *Repository) SetTestResult(ctx context.Context, id uint, at time.Time, result string, version int) error {
-	_, err := r.db.ExecContext(ctx,
+	res, err := r.db.ExecContext(ctx,
 		`UPDATE platform_relay_providers SET last_test_at=`+r.dialect.Placeholder(1)+`, last_test_result=`+r.dialect.Placeholder(2)+`, version=version+1, updated_at=`+r.dialect.Placeholder(3)+` WHERE id=`+r.dialect.Placeholder(4)+` AND version=`+r.dialect.Placeholder(5),
 		at, result, at, id, version)
-	return err
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrVersionConflict
+	}
+	return nil
 }
 
 // DeleteProvider removes a relay endpoint (hard delete — routing rules
@@ -421,14 +484,28 @@ func (r *Repository) GetPool(ctx context.Context, id uint) (*Pool, error) {
 
 // ── Routing rules ────────────────────────────────────────────────
 
+// CreateRoutingRule inserts a routing rule and captures its real generated
+// id. It previously used res.LastInsertId() with the error DISCARDED
+// (`id, _ :=`). On PostgreSQL that call is unsupported and returns an error,
+// so every rule created on the shipping dialect came back with ID 0 — the API
+// reported id 0, the rule could not be addressed for update or delete, and
+// id-based tie-breaking in rule precedence had nothing real to work with.
 func (r *Repository) CreateRoutingRule(ctx context.Context, rule *RoutingRule) error {
-	res, err := r.db.ExecContext(ctx,
+	return r.createRoutingRuleWith(ctx, r.db, rule)
+}
+
+// CreateRoutingRuleTx inserts a routing rule inside the caller's transaction.
+func (r *Repository) CreateRoutingRuleTx(ctx context.Context, tx *sql.Tx, rule *RoutingRule) error {
+	return r.createRoutingRuleWith(ctx, tx, rule)
+}
+
+func (r *Repository) createRoutingRuleWith(ctx context.Context, q execQuerier, rule *RoutingRule) error {
+	id, err := r.insertReturningIDWith(ctx, q,
 		`INSERT INTO platform_relay_routing_rules (tenant_id, domain_id, sender_pattern, recipient_domain, classification, pool_id, priority, created_at) VALUES (`+r.dialect.Placeholders(8)+`)`,
 		rule.TenantID, rule.DomainID, rule.SenderPattern, rule.RecipientDomain, rule.Classification, rule.PoolID, rule.Priority, rule.CreatedAt)
 	if err != nil {
 		return err
 	}
-	id, _ := res.LastInsertId()
 	rule.ID = uint(id)
 	return nil
 }
@@ -461,13 +538,26 @@ func (r *Repository) ListRoutingRules(ctx context.Context, tenantID, domainID ui
 // ── Emergency overrides ─────────────────────────────────────────
 
 func (r *Repository) CreateOverride(ctx context.Context, o *EmergencyOverride) error {
-	res, err := r.db.ExecContext(ctx,
+	return r.createOverrideWith(ctx, r.db, o)
+}
+
+// CreateOverrideTx inserts an emergency override inside the caller's
+// transaction. An emergency control must never exist without the audit record
+// that explains who invoked it and why.
+func (r *Repository) CreateOverrideTx(ctx context.Context, tx *sql.Tx, o *EmergencyOverride) error {
+	return r.createOverrideWith(ctx, tx, o)
+}
+
+func (r *Repository) createOverrideWith(ctx context.Context, q execQuerier, o *EmergencyOverride) error {
+	// Same LastInsertId defect as CreateRoutingRule: an emergency override
+	// created on PostgreSQL came back with ID 0, so it could never be revoked
+	// by id — the one operation an emergency control must always support.
+	id, err := r.insertReturningIDWith(ctx, q,
 		`INSERT INTO platform_relay_overrides (tenant_id, pool_id, reason, actor_id, expires_at, active, created_at) VALUES (`+r.dialect.Placeholders(7)+`)`,
 		o.TenantID, o.PoolID, o.Reason, o.ActorID, o.ExpiresAt, 1, o.CreatedAt)
 	if err != nil {
 		return err
 	}
-	id, _ := res.LastInsertId()
 	o.ID = uint(id)
 	o.Active = true
 	return nil
@@ -507,6 +597,30 @@ func (r *Repository) ActiveOverride(ctx context.Context, tenantID uint, now time
 	return nil, rows.Err()
 }
 
+// RevokeOverrideTx deactivates a single override inside the caller's
+// transaction. The tenant predicate is part of the statement, so one tenant
+// can never revoke another tenant's emergency override (tenant 0 denotes a
+// platform-scope caller and may revoke any). Returns whether a row actually
+// changed, so "already inactive" and "not found" are never reported as
+// success.
+func (r *Repository) RevokeOverrideTx(ctx context.Context, tx *sql.Tx, id, tenantID uint) (bool, error) {
+	q := `UPDATE platform_relay_overrides SET active=0 WHERE id=` + r.dialect.Placeholder(1) + ` AND active=1`
+	args := []any{id}
+	if tenantID != 0 {
+		q += ` AND tenant_id=` + r.dialect.Placeholder(2)
+		args = append(args, tenantID)
+	}
+	res, err := tx.ExecContext(ctx, q, args...)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
 func (r *Repository) ExpireOverrides(ctx context.Context, now time.Time) (int64, error) {
 	res, err := r.db.ExecContext(ctx, `UPDATE platform_relay_overrides SET active=0 WHERE active=1 AND expires_at<=`+r.dialect.Placeholder(1), now)
 	if err != nil {
@@ -534,10 +648,25 @@ func (r *Repository) IncrementAndCheck(ctx context.Context, providerID uint, win
 	// dialect's generic Upsert helper isn't used here because its
 	// SQLite branch does INSERT OR REPLACE, which overwrites the row
 	// (count=1) instead of incrementing it.
-	if _, err := r.db.ExecContext(ctx,
-		`INSERT INTO platform_relay_rate_counters (provider_id, window_start, count) VALUES (`+r.dialect.Placeholders(3)+`)
-		 ON CONFLICT (provider_id, window_start) DO UPDATE SET count = platform_relay_rate_counters.count + 1`,
-		providerID, windowStart, 1); err != nil {
+	upsert := `INSERT INTO platform_relay_rate_counters (provider_id, window_start, count) VALUES (` + r.dialect.Placeholders(3) + `)
+		 ON CONFLICT (provider_id, window_start) DO UPDATE SET count = platform_relay_rate_counters.count + 1`
+
+	if r.dialect.IsPostgres() {
+		// RETURNING reads back the count produced by THIS statement, so the
+		// limit decision is made on the value this caller actually created.
+		// The INSERT-then-SELECT form below leaves a window in which another
+		// caller's increment lands between the two statements, so a caller can
+		// observe a count higher than its own — non-deterministic enforcement
+		// of a security-relevant limit. Retained for SQLite, whose driver
+		// support for RETURNING depends on the compiled library version.
+		var count int
+		if err := r.db.QueryRowContext(ctx, upsert+` RETURNING count`, providerID, windowStart, 1).Scan(&count); err != nil {
+			return false, err
+		}
+		return count <= limit, nil
+	}
+
+	if _, err := r.db.ExecContext(ctx, upsert, providerID, windowStart, 1); err != nil {
 		return false, err
 	}
 	var count int

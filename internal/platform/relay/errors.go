@@ -29,8 +29,12 @@ var (
 	// (plaintext, or opportunistic/unvalidated TLS). The credential is
 	// refused BEFORE decryption, so the secret is never materialized.
 	ErrInsecureCredentialTransport = errors.New("relay credential requires verified TLS")
-	ErrNameRequired                = errors.New("relay name is required")
-	ErrRelayNameConflict           = errors.New("a relay with this name already exists in the same scope")
+	// ErrOverrideNotFound is returned when an emergency override cannot be
+	// revoked: absent, already inactive, or owned by another tenant. All three
+	// are refusals rather than silent successes.
+	ErrOverrideNotFound  = errors.New("emergency override not found or already inactive")
+	ErrNameRequired      = errors.New("relay name is required")
+	ErrRelayNameConflict = errors.New("a relay with this name already exists in the same scope")
 )
 
 // IsRetryableRouteError reports whether a routing failure is TEMPORARY
