@@ -355,3 +355,135 @@ func TestValidateCredentialTransport_Matrix(t *testing.T) {
 		})
 	}
 }
+
+// TestAuthOverUntrustedCertificate_Refused proves strict validation is real:
+// the fixture's certificate is NOT in the trust pool passed to the client, so
+// the handshake must fail and the credential must never be sent.
+func TestAuthOverUntrustedCertificate_Refused(t *testing.T) {
+	log := &wireLog{}
+	host, port, _ := tlsSMTPServer(t, log) // deliberately discard the pool
+	p := Provider{
+		Host: host, Port: port, Username: "relay-user",
+		ConnSecurity: ConnSecurityImplicitTLS, TLSValidation: TLSValidationStrict,
+	}
+	// nil roots => the host trust store, which does not know this test CA.
+	result := dialAndTest(context.Background(), netDialer{}, p, testRelayPassword, nil)
+	if result.AuthOK {
+		t.Fatal("AUTH must not succeed against an untrusted certificate")
+	}
+	if result.TLSNegotiated {
+		t.Fatal("an untrusted certificate must not produce a negotiated session")
+	}
+	if log.containsSecret(t, testRelayPassword) {
+		t.Fatalf("credential leaked to a server with an untrusted certificate; wire log:\n%s", log.all())
+	}
+}
+
+// TestAuthOverWrongHostname_Refused proves hostname verification is enforced,
+// not just chain validation. The fixture certificate is issued for 127.0.0.1
+// only; connecting under a different name must fail even though the CA is
+// trusted.
+func TestAuthOverWrongHostname_Refused(t *testing.T) {
+	log := &wireLog{}
+	_, port, roots := tlsSMTPServer(t, log)
+	p := Provider{
+		// "localhost" resolves to the same listener but is NOT a SAN on the
+		// certificate, which lists only the 127.0.0.1 IP.
+		Host: "localhost", Port: port, Username: "relay-user",
+		ConnSecurity: ConnSecurityImplicitTLS, TLSValidation: TLSValidationStrict,
+	}
+	result := dialAndTest(context.Background(), netDialer{}, p, testRelayPassword, roots)
+	if result.AuthOK {
+		t.Fatal("AUTH must not succeed when the certificate does not cover the hostname")
+	}
+	if log.containsSecret(t, testRelayPassword) {
+		t.Fatalf("credential leaked on a hostname mismatch; wire log:\n%s", log.all())
+	}
+}
+
+// TestAuthOverStrictStartTLS_Succeeds is the second positive control: a
+// STARTTLS upgrade to a verified session may carry the credential.
+func TestAuthOverStrictStartTLS_Succeeds(t *testing.T) {
+	log := &wireLog{}
+	host, port, roots := startTLSSMTPServer(t, log)
+	p := Provider{
+		Host: host, Port: port, Username: "relay-user",
+		ConnSecurity: ConnSecurityStartTLS, TLSValidation: TLSValidationStrict,
+	}
+	result := dialAndTest(context.Background(), netDialer{}, p, testRelayPassword, roots)
+	if !result.Connected {
+		t.Fatalf("expected connected, got %q", result.Error)
+	}
+	if !result.TLSNegotiated {
+		t.Fatalf("expected a STARTTLS upgrade, got %q", result.Error)
+	}
+	if !result.AuthOK {
+		t.Fatalf("AUTH over a verified STARTTLS session must succeed, got %q", result.Error)
+	}
+}
+
+// startTLSSMTPServer speaks plaintext until STARTTLS, then upgrades the same
+// connection — the real STARTTLS flow, so the upgrade path is exercised end to
+// end rather than simulated.
+func startTLSSMTPServer(t *testing.T, log *wireLog) (host string, port int, roots *x509.CertPool) {
+	t.Helper()
+	cert, pool := testCA(t)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { ln.Close() })
+
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				w := func(s string) { c.Write([]byte(s + "\r\n")) }
+				r := bufio.NewReader(c)
+				w("220 orvix-relay-test ESMTP")
+				for {
+					line, err := r.ReadString('\n')
+					if err != nil {
+						return
+					}
+					line = strings.TrimRight(line, "\r\n")
+					if log != nil {
+						log.add(line)
+					}
+					switch {
+					case strings.HasPrefix(line, "EHLO"):
+						w("250-orvix-relay-test")
+						w("250-STARTTLS")
+						w("250 AUTH PLAIN LOGIN")
+					case strings.HasPrefix(line, "STARTTLS"):
+						w("220 2.0.0 Ready to start TLS")
+						tc := tls.Server(c, &tls.Config{
+							Certificates: []tls.Certificate{cert},
+							MinVersion:   tls.VersionTLS12,
+						})
+						if err := tc.Handshake(); err != nil {
+							return
+						}
+						c = tc
+						r = bufio.NewReader(c)
+						w = func(s string) { tc.Write([]byte(s + "\r\n")) }
+					case strings.HasPrefix(line, "AUTH"):
+						w("235 2.7.0 Authentication successful")
+					case strings.HasPrefix(line, "QUIT"):
+						w("221 Bye")
+						return
+					default:
+						w("250 OK")
+					}
+				}
+			}(conn)
+		}
+	}()
+
+	h, p := splitHostPort(t, ln.Addr().String())
+	return h, p, pool
+}

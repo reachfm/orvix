@@ -86,6 +86,13 @@ func (s *Service) TestConnection(ctx context.Context, providerID uint) (*HealthC
 	ctx, cancel := context.WithTimeout(ctx, totalTestTimeout)
 	defer cancel()
 	result := dialAndTest(ctx, newValidatingDialer(), *p, password, nil)
+	// Persisting the last-test summary is a convenience for the admin UI, not
+	// a security control: the authoritative evidence of who ran the test and
+	// what happened is the audit entry written by TestRelay, whose failure IS
+	// reported. This statement is version-guarded, so a concurrent edit of the
+	// provider makes it affect zero rows; that is a benign race, not a lost
+	// security record, and failing the operator's connection test over it
+	// would be actively unhelpful.
 	_ = s.repo.SetTestResult(ctx, providerID, s.clock.Now(), testResultSummary(result), p.Version)
 	return result, nil
 }

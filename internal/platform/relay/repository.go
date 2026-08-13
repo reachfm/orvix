@@ -231,7 +231,18 @@ func (r *Repository) ListProvidersByPool(ctx context.Context, poolID uint) ([]Pr
 // of silently succeeding — a circuit that believes it recorded an "open" state
 // it never persisted would keep routing to a failing provider.
 func (r *Repository) UpdateProviderCircuit(ctx context.Context, id uint, state CircuitState, failures int, openedAt *time.Time, now time.Time) error {
-	res, err := r.db.ExecContext(ctx,
+	return r.updateProviderCircuitWith(ctx, r.db, id, state, failures, openedAt, now)
+}
+
+// UpdateProviderCircuitTx applies the transition inside the caller's
+// transaction so the state change and the operational event that announces it
+// cannot diverge.
+func (r *Repository) UpdateProviderCircuitTx(ctx context.Context, tx *sql.Tx, id uint, state CircuitState, failures int, openedAt *time.Time, now time.Time) error {
+	return r.updateProviderCircuitWith(ctx, tx, id, state, failures, openedAt, now)
+}
+
+func (r *Repository) updateProviderCircuitWith(ctx context.Context, q execQuerier, id uint, state CircuitState, failures int, openedAt *time.Time, now time.Time) error {
+	res, err := q.ExecContext(ctx,
 		`UPDATE platform_relay_providers SET circuit_state=`+r.dialect.Placeholder(1)+`, circuit_failures=`+r.dialect.Placeholder(2)+`, circuit_opened_at=`+r.dialect.Placeholder(3)+`, version=version+1, updated_at=`+r.dialect.Placeholder(4)+` WHERE id=`+r.dialect.Placeholder(5),
 		state, failures, openedAt, now, id)
 	if err != nil {

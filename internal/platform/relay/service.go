@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
-	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -562,8 +561,6 @@ func GenerateRelayCredential() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(buf), nil
 }
 
-var _ = errors.Is
-
 // CreatePool creates a routing pool.
 func (s *Service) CreatePool(ctx context.Context, p Pool) (*Pool, error) {
 	now := s.clock.Now()
@@ -1032,13 +1029,36 @@ func (s *Service) RecordAttemptResult(ctx context.Context, providerID uint, succ
 	} else {
 		nextState, failures, openedAt = s.breaker.OnFailure(p.CircuitState, p.CircuitFailures, now)
 	}
-	if err := s.repo.UpdateProviderCircuit(ctx, providerID, nextState, failures, openedAt, now); err != nil {
+	// The state change and the event announcing it commit together. They were
+	// two independent statements with the enqueue error DISCARDED, so a
+	// provider could trip its circuit open - taking itself out of rotation -
+	// with no operational event ever emitted, leaving operators to discover a
+	// dead relay from delivery metrics instead of an alert.
+	//
+	// This runs on the delivery hot path, AFTER the SMTP transaction has
+	// completed. The returned error therefore tells the caller "bookkeeping
+	// failed", never "redeliver": the delivery worker surfaces it through
+	// RelayBookkeepingFailed and does not retry, because retrying would send
+	// the recipient a second copy of a message the provider already accepted.
+	tx, err := s.repo.db.BeginTx(ctx, nil)
+	if err != nil {
+		return kernel.Wrap(kernel.ErrCodeInternal, "begin relay attempt bookkeeping", err)
+	}
+	defer tx.Rollback()
+
+	if err := s.repo.UpdateProviderCircuitTx(ctx, tx, providerID, nextState, failures, openedAt, now); err != nil {
 		return kernel.Wrap(kernel.ErrCodeInternal, "update relay circuit state", err)
 	}
 	if nextState != p.CircuitState && s.outbox != nil {
-		_ = s.outbox.Enqueue(ctx, s.repo.db, "relay.circuit.transition", fmt.Sprintf("%d", providerID), map[string]any{
+		// Non-secret operational fields only.
+		if err := s.outbox.Enqueue(ctx, tx, "relay.circuit.transition", fmt.Sprintf("%d", providerID), map[string]any{
 			"from": p.CircuitState, "to": nextState, "provider": p.Name,
-		}, now)
+		}, now); err != nil {
+			return kernel.Wrap(kernel.ErrCodeInternal, "enqueue relay circuit event", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return kernel.Wrap(kernel.ErrCodeInternal, "commit relay attempt bookkeeping", err)
 	}
 	return nil
 }
