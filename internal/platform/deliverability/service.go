@@ -120,17 +120,21 @@ func domainOf(addr string) string {
 }
 
 // Metrics returns the aggregated window for one dimension value.
+//
+// The window is validated and UTC-normalized through normalizeWindow, the
+// single window policy shared with the event/aggregate paths: inverted, zero,
+// and excessively large (> 90 day) spans are all rejected here too, so this
+// path cannot be handed an abusive span the others refuse. UTC normalization
+// matters because signals are recorded in UTC (kernel.Clock's contract) and
+// SQLite stores timestamps as TEXT — a local-zoned bound compared against a
+// UTC-zoned stored value is a lexicographic comparison across two offset
+// representations that silently drops matching rows.
 func (s *Service) Metrics(ctx context.Context, dim Dimension, dimValue string, windowStart, windowEnd time.Time) (*WindowMetrics, error) {
-	if !windowEnd.After(windowStart) {
-		return nil, ErrInvalidWindow
+	start, end, err := normalizeWindow(windowStart, windowEnd)
+	if err != nil {
+		return nil, err
 	}
-	// Normalized to UTC regardless of the caller's input zone: signals
-	// are always recorded in UTC (kernel.Clock's contract), and SQLite
-	// stores timestamps as TEXT — a local-zoned bound compared against
-	// a UTC-zoned stored value is a lexicographic string comparison
-	// across two different offset representations, which silently
-	// excludes matching rows rather than erroring.
-	m, err := s.repo.Aggregate(ctx, dim, dimValue, windowStart.UTC(), windowEnd.UTC())
+	m, err := s.repo.Aggregate(ctx, dim, dimValue, start, end)
 	if err != nil {
 		return nil, kernel.Wrap(kernel.ErrCodeInternal, "aggregate deliverability metrics", err)
 	}
