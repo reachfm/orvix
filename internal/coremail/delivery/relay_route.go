@@ -101,6 +101,12 @@ type RelaySelector interface {
 type RelayDeliverResult struct {
 	Success   bool
 	TempFail  bool
+	// Ambiguous is true when the message body was sent to the relay but
+	// the final acceptance response was never received (timeout or
+	// connection drop after DATA). The recipient MAY have received the
+	// message; the delivery chain must NOT immediately re-send through a
+	// fallback provider (F6).
+	Ambiguous bool
 	StatusMsg string
 }
 

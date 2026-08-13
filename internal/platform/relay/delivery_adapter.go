@@ -190,5 +190,5 @@ func (a *DeliveryAdapter) Deliver(ctx context.Context, route *delivery.RelayRout
 		TLSValidation: TLSValidationStrict,
 	}
 	res := Deliver(ctx, p, route.Password, from, to, data)
-	return delivery.RelayDeliverResult{Success: res.Success, TempFail: res.TempFail, StatusMsg: res.StatusMsg}
+	return delivery.RelayDeliverResult{Success: res.Success, TempFail: res.TempFail, Ambiguous: res.Ambiguous, StatusMsg: res.StatusMsg}
 }

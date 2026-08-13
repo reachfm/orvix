@@ -277,7 +277,7 @@ func (w *DeliveryWorker) deliver(ctx context.Context, entry *queue.QueueEntry) e
 			recipientEmail := strings.TrimSpace(entry.ToAddress)
 			w.PushNotifier.NotifyMailboxMessage(ctx, *entry.MailboxID, entry.MessageID, entry.FromAddress, subject, recipientEmail)
 		}
-		return w.Queue.AckDelivered(ctx, entry.ID)
+		return w.Queue.AckDeliveredForOwner(ctx, entry.ID, w.WorkerID)
 
 	case DecisionRetry:
 		w.emitAudit(ctx, entry, EventDeferred, result)
@@ -921,6 +921,18 @@ func (w *DeliveryWorker) deliverViaRelayChain(ctx context.Context, entry *queue.
 		result := &DeliveryResult{
 			Success: relayResult.Success, TempFail: relayResult.TempFail,
 			StatusMsg: relayResult.StatusMsg, RemoteHost: route.Host,
+		}
+		if relayResult.Ambiguous {
+			// F6: the payload was sent (including the terminating dot) but
+			// the final response was never read. The recipient MAY have
+			// received the message, so the chain STOPS here: re-offering
+			// the same message to a fallback provider could deliver a
+			// duplicate copy. The message is deferred for controlled
+			// reconciliation, and the explicit status text tells the
+			// operator the outcome is unknown — never that it failed
+			// cleanly.
+			result.StatusMsg = "relay delivery outcome ambiguous; recipient may have received the message"
+			return result
 		}
 		if result.Success || !result.TempFail {
 			// Success, or a PERMANENT failure: a permanent rejection is a

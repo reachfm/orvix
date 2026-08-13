@@ -1,8 +1,9 @@
-package delivery
+﻿package delivery
 
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/orvix/orvix/internal/coremail/queue"
@@ -86,7 +87,7 @@ func testEntry() *queue.QueueEntry {
 	}
 }
 
-// ── H: suppression ───────────────────────────────────────────────────────
+// â”€â”€ H: suppression â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 func TestDeliverRemote_SuppressionStoreFailureDefersAndNeverDelivers(t *testing.T) {
 	sel := &recordingSelector{}
@@ -112,7 +113,7 @@ func TestDeliverRemote_SuppressionStoreFailureDefersAndNeverDelivers(t *testing.
 	}
 }
 
-// ── A: routing failures defer, never downgrade to direct ─────────────────
+// â”€â”€ A: routing failures defer, never downgrade to direct â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 func TestDeliverRemote_RouteSelectionErrorDefersNeverDirect(t *testing.T) {
 	sel := &recordingSelector{selectErr: errors.New("provider lookup unavailable")}
@@ -131,7 +132,7 @@ func TestDeliverRemote_RouteSelectionErrorDefersNeverDirect(t *testing.T) {
 	// F4: the decisive assertion is a SIDE EFFECT, not a status string.
 	// The worker formats direct-MX failures as "mx lookup: <err>", so
 	// comparing against the literal "mx lookup failed" could never fire
-	// — a regression restoring the direct fallthrough passed the old
+	// â€” a regression restoring the direct fallthrough passed the old
 	// test. A routing failure must never consult the MX resolver at all.
 	if resolver.MXLookups != 0 {
 		t.Fatalf("a routing failure must never fall through to direct MX delivery: %d MX lookups happened", resolver.MXLookups)
@@ -169,14 +170,14 @@ func TestDeliverRemote_ExplicitDirectIsTheOnlyDirectPath(t *testing.T) {
 		t.Fatalf("expected the direct MX failure path, got %+v", result)
 	}
 	// F4 positive control: an explicit Direct policy reaches the MX
-	// resolver exactly once — the side-effect counterpart to the
+	// resolver exactly once â€” the side-effect counterpart to the
 	// fail-closed tests above.
 	if resolver.MXLookups != 1 {
 		t.Fatalf("explicit direct policy must consult the MX resolver exactly once, got %d", resolver.MXLookups)
 	}
 }
 
-// ── B: the real routing context reaches the selector ─────────────────────
+// â”€â”€ B: the real routing context reaches the selector â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 func TestDeliverRemote_PassesRealSenderAndDomainContext(t *testing.T) {
 	sel := &recordingSelector{decision: &RelayRouteDecision{Route: &RelayRoute{Direct: true}}}
@@ -204,7 +205,7 @@ func TestDeliverRemote_PassesRealSenderAndDomainContext(t *testing.T) {
 	}
 }
 
-// ── C: the fallback chain is actually walked ─────────────────────────────
+// â”€â”€ C: the fallback chain is actually walked â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 func TestDeliverRemote_WalksFallbackChainInOrder(t *testing.T) {
 	sel := &recordingSelector{
@@ -241,7 +242,7 @@ func TestDeliverRemote_WalksFallbackChainInOrder(t *testing.T) {
 
 // TestDeliverRemote_ExhaustedChainDefersNeverDirect proves the worker does not
 // quietly fall back to unauthenticated direct delivery once every configured
-// relay has failed — the defect that made a relay outage silently bypass the
+// relay has failed â€” the defect that made a relay outage silently bypass the
 // relay entirely.
 func TestDeliverRemote_ExhaustedChainDefersNeverDirect(t *testing.T) {
 	sel := &recordingSelector{
@@ -290,7 +291,7 @@ func TestDeliverRemote_PermanentRelayFailureStopsTheChain(t *testing.T) {
 	}
 }
 
-// ── I: bookkeeping failure must not duplicate a delivered message ────────
+// â”€â”€ I: bookkeeping failure must not duplicate a delivered message â”€â”€â”€â”€â”€â”€â”€â”€
 
 // TestDeliverRemote_BookkeepingFailureNeverRedelivers is the exactly-once
 // guarantee: the SMTP server has already accepted the message, so a failure to
@@ -417,5 +418,43 @@ func TestF3_ResolvedIdentityStillReachesRouting(t *testing.T) {
 	}
 	if selRec.selectCalls != 1 {
 		t.Fatalf("a resolvable identity must reach routing exactly once, got %d", selRec.selectCalls)
+	}
+}
+
+// - F6: ambiguous acceptance stops the fallback chain --------------------
+
+// TestDeliverRemote_AmbiguousAcceptanceStopsTheChain proves that once a
+// relay has consumed the DATA payload and the final response is lost
+// (timeout/EOF), the worker does NOT immediately re-offer the message
+// to the next fallback provider — the recipient may already have
+// received it. The message defers for controlled reconciliation.
+func TestDeliverRemote_AmbiguousAcceptanceStopsTheChain(t *testing.T) {
+	sel := &recordingSelector{
+		decision: &RelayRouteDecision{
+			Route: &RelayRoute{ProviderID: 1, Host: "a.example.com", Port: 587},
+			Fallbacks: []RelayRoute{
+				{ProviderID: 2, Host: "b.example.com", Port: 587},
+			},
+		},
+		deliverFunc: func(route *RelayRoute) RelayDeliverResult {
+			if route.ProviderID == 1 {
+				return RelayDeliverResult{TempFail: true, Ambiguous: true, StatusMsg: "outcome unknown"}
+			}
+			return RelayDeliverResult{Success: true}
+		},
+	}
+	w, _ := relayWorker(sel)
+	result := w.deliverViaRelayChain(context.Background(), testEntry(), sel.decision, []byte("msg"))
+	if result.Success {
+		t.Fatalf("an ambiguous outcome must not report success, got %+v", result)
+	}
+	if !result.TempFail {
+		t.Fatalf("an ambiguous outcome must defer, got %+v", result)
+	}
+	if len(sel.delivered) != 1 {
+		t.Fatalf("an ambiguous outcome must STOP the chain — the fallback must NOT be dialled; delivered=%v", sel.delivered)
+	}
+	if !strings.Contains(strings.ToLower(result.StatusMsg), "ambiguous") {
+		t.Fatalf("the status must say the outcome is ambiguous, got %q", result.StatusMsg)
 	}
 }

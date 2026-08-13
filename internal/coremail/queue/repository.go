@@ -30,6 +30,11 @@ type Repository interface {
 	// AckDelivered marks a job as successfully delivered.
 	AckDelivered(ctx context.Context, id uint, tx interface{}) error
 
+	// AckDeliveredForOwner completes a job only while it is still
+	// leased by `owner` (F6 fencing). Zero affected rows means the
+	// lease was lost and ErrLeaseLost is returned.
+	AckDeliveredForOwner(ctx context.Context, id uint, owner string, tx interface{}) error
+
 	// Defer reschedules a job for retry with exponential backoff.
 	Defer(ctx context.Context, id uint, nextAttemptAt time.Time, lastError string, tx interface{}) error
 
@@ -419,13 +424,33 @@ func (r *SQLRepo) LeaseNextTenantFair(ctx context.Context, owner string, leaseSe
 	entry.UpdatedAt = now
 	return entry, nil
 }
-
 func (r *SQLRepo) AckDelivered(ctx context.Context, id uint, tx interface{}) error {
 	now := nowFn()
 	e := r.exec(tx)
-	_, err := e.ExecContext(ctx, `UPDATE coremail_queue SET status=?, completed_at=?, updated_at=? WHERE id=? AND deleted_at IS NULL`,
+	_, err := e.ExecContext(ctx, `UPDATE coremail_queue SET status=?, 
+completed_at=?, updated_at=? WHERE id=? AND deleted_at IS NULL`,
 		string(StatusDelivered), now, now, id)
 	return err
+}
+
+// AckDeliveredForOwner is the F6-fenced completion: the row is
+// completed only if it is STILL leased by `owner`. If the lease
+// expired and another worker re-claimed the message, zero rows are
+// affected and the stale worker learns its lease was lost instead of
+// racing the new owner to complete the same message.
+func (r *SQLRepo) AckDeliveredForOwner(ctx context.Context, id uint, owner string, tx interface{}) error {
+	now := nowFn()
+	e := r.exec(tx)
+	res, err := e.ExecContext(ctx, `UPDATE coremail_queue SET status=?, 
+completed_at=?, updated_at=? WHERE id=? AND status=? AND lease_owner=? AND deleted_at IS NULL`,
+		string(StatusDelivered), now, now, id, string(StatusLeased), owner)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrLeaseLost
+	}
+	return nil
 }
 
 func (r *SQLRepo) Defer(ctx context.Context, id uint, nextAttemptAt time.Time, lastError string, tx interface{}) error {
