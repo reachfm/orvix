@@ -13,11 +13,63 @@ package relay
 
 import (
 	"context"
+	"errors"
+	"io"
 	"net"
 	"strings"
 	"testing"
 	"time"
 )
+
+type controlledWriteConn struct {
+	n             int
+	err           error
+	writeDeadline time.Time
+}
+
+func (c *controlledWriteConn) Read([]byte) (int, error)         { return 0, io.EOF }
+func (c *controlledWriteConn) Write([]byte) (int, error)        { return c.n, c.err }
+func (c *controlledWriteConn) Close() error                     { return nil }
+func (c *controlledWriteConn) LocalAddr() net.Addr              { return nil }
+func (c *controlledWriteConn) RemoteAddr() net.Addr             { return nil }
+func (c *controlledWriteConn) SetDeadline(time.Time) error      { return nil }
+func (c *controlledWriteConn) SetReadDeadline(time.Time) error  { return nil }
+func (c *controlledWriteConn) SetWriteDeadline(t time.Time) error { c.writeDeadline = t; return nil }
+
+func TestF6_PartialDataWriteIsAmbiguous(t *testing.T) {
+	conn := &controlledWriteConn{n: 4, err: errors.New("connection reset")}
+	result := writeDataPayload(conn, []byte("message\r\n.\r\n"), time.Now().Add(time.Minute))
+	if result == nil || !result.Ambiguous || !result.TempFail {
+		t.Fatalf("partial DATA write must be ambiguous, got %+v", result)
+	}
+}
+
+func TestF6_ZeroByteDataWriteIsOrdinaryTempFail(t *testing.T) {
+	conn := &controlledWriteConn{n: 0, err: errors.New("connection refused")}
+	result := writeDataPayload(conn, []byte("message\r\n.\r\n"), time.Now().Add(time.Minute))
+	if result == nil || result.Ambiguous || !result.TempFail {
+		t.Fatalf("zero-byte DATA write must be a non-ambiguous temp-fail, got %+v", result)
+	}
+}
+
+func TestF6_ShortWriteWithoutErrorIsAmbiguous(t *testing.T) {
+	conn := &controlledWriteConn{n: 3}
+	result := writeDataPayload(conn, []byte("message\r\n.\r\n"), time.Now().Add(time.Minute))
+	if result == nil || !result.Ambiguous {
+		t.Fatalf("short DATA write must be ambiguous, got %+v", result)
+	}
+}
+
+func TestF6_DataDeadlineNeverExceedsTransactionDeadline(t *testing.T) {
+	txDeadline := time.Now().Add(20 * time.Millisecond)
+	conn := &controlledWriteConn{n: len("message")}
+	if result := writeDataPayload(conn, []byte("message"), txDeadline); result != nil {
+		t.Fatalf("complete write failed: %+v", result)
+	}
+	if conn.writeDeadline.After(txDeadline) {
+		t.Fatalf("write deadline %s exceeds transaction deadline %s", conn.writeDeadline, txDeadline)
+	}
+}
 
 // hangingSMTPServer accepts a connection, sends the greeting, then
 // goes silent forever (never reading, never closing — the read must be

@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/orvix/orvix/internal/platform/kernel"
 )
 
 // HealthCheckResult is the outcome of an operator-triggered connection
@@ -78,7 +80,9 @@ func (s *Service) TestConnection(ctx context.Context, providerID uint) (*HealthC
 	// decrypted at all on this path.
 	if err := ValidateCredentialTransport(*p); err != nil {
 		res := &HealthCheckResult{Error: "refusing SMTP AUTH without verified TLS"}
-		_ = s.repo.SetTestResult(ctx, providerID, s.clock.Now(), "insecure_credential_transport", p.Version)
+		if persistErr := s.repo.SetTestResult(ctx, providerID, s.clock.Now(), "insecure_credential_transport", p.Version); persistErr != nil {
+			return nil, kernel.Wrap(kernel.ErrCodeInternal, "persist relay connection-test result", persistErr)
+		}
 		return res, nil
 	}
 	password, err := s.decryptCredential(*p)
@@ -88,14 +92,12 @@ func (s *Service) TestConnection(ctx context.Context, providerID uint) (*HealthC
 	ctx, cancel := context.WithTimeout(ctx, totalTestTimeout)
 	defer cancel()
 	result := dialAndTest(ctx, newValidatingDialer(), *p, password, nil)
-	// Persisting the last-test summary is a convenience for the admin UI, not
-	// a security control: the authoritative evidence of who ran the test and
-	// what happened is the audit entry written by TestRelay, whose failure IS
-	// reported. This statement is version-guarded, so a concurrent edit of the
-	// provider makes it affect zero rows; that is a benign race, not a lost
-	// security record, and failing the operator's connection test over it
-	// would be actively unhelpful.
-	_ = s.repo.SetTestResult(ctx, providerID, s.clock.Now(), testResultSummary(result), p.Version)
+	// Connection-test state is operator-visible evidence. A failed write must
+	// not be presented as a fully successful administrative operation: doing so
+	// leaves the UI and audit trail disagreeing about what was actually tested.
+	if err := s.repo.SetTestResult(ctx, providerID, s.clock.Now(), testResultSummary(result), p.Version); err != nil {
+		return nil, kernel.Wrap(kernel.ErrCodeInternal, "persist relay connection-test result", err)
+	}
 	return result, nil
 }
 
@@ -320,13 +322,11 @@ func deliverWith(ctx context.Context, d dialer, p Provider, password string, fro
 		return &DeliverResult{TempFail: isTempSMTPErr(err), StatusMsg: redactHealthError(err.Error())}
 	}
 	payload := dataTerminated(data)
-	if err := conn.SetWriteDeadline(time.Now().Add(smtpCommandTimeout)); err != nil {
-		return &DeliverResult{TempFail: true, StatusMsg: redactHealthError(err.Error())}
+	if writeResult := writeDataPayload(conn, payload, transactionDeadline); writeResult != nil {
+		return writeResult
 	}
-	if _, err := conn.Write(payload); err != nil {
-		return &DeliverResult{TempFail: true, StatusMsg: redactHealthError(err.Error())}
-	}
-	if err := conn.SetReadDeadline(time.Now().Add(smtpCommandTimeout)); err != nil {
+	dataReadDeadline := boundedDeadline(time.Now(), smtpCommandTimeout, transactionDeadline)
+	if err := conn.SetReadDeadline(dataReadDeadline); err != nil {
 		return &DeliverResult{TempFail: true, StatusMsg: redactHealthError(err.Error())}
 	}
 	code, msg, err := readSMTPLine(reader)
@@ -349,6 +349,49 @@ func deliverWith(ctx context.Context, d dialer, p Provider, password string, fro
 		return &DeliverResult{Success: true, StatusCode: code, StatusMsg: msg}
 	}
 	return &DeliverResult{StatusCode: code, StatusMsg: msg, TempFail: code >= 400 && code < 500}
+}
+
+// writeDataPayload applies the strict transaction bound and classifies every
+// stream-write outcome. A non-nil result is a delivery failure; nil means the
+// complete dot-terminated payload was written.
+func writeDataPayload(conn net.Conn, payload []byte, transactionDeadline time.Time) *DeliverResult {
+	dataWriteDeadline := boundedDeadline(time.Now(), smtpCommandTimeout, transactionDeadline)
+	if err := conn.SetWriteDeadline(dataWriteDeadline); err != nil {
+		return &DeliverResult{TempFail: true, StatusMsg: redactHealthError(err.Error())}
+	}
+	written, err := conn.Write(payload)
+	if err != nil {
+		// A stream write may return n > 0 together with an error. Once any
+		// DATA octets have crossed the socket boundary we cannot prove that
+		// the relay rejected the transaction: its TCP stack may have received
+		// the complete message even though the local write reported a reset or
+		// timeout. Treat that shape as ambiguous so the caller stops the
+		// fallback chain instead of risking an immediate duplicate delivery.
+		if written > 0 {
+			return &DeliverResult{TempFail: true, Ambiguous: true, StatusMsg: redactHealthError("delivery outcome unknown during DATA write; recipient may have received the message")}
+		}
+		return &DeliverResult{TempFail: true, StatusMsg: redactHealthError(err.Error())}
+	}
+	if written != len(payload) {
+		// io.Writer is allowed to return a short write with no error. The
+		// transport outcome is still unknowable because a prefix of DATA was
+		// transmitted, so fail closed as ambiguous rather than retrying a
+		// second provider.
+		return &DeliverResult{TempFail: true, Ambiguous: true, StatusMsg: redactHealthError("delivery outcome unknown after short DATA write; recipient may have received the message")}
+	}
+	return nil
+}
+
+// boundedDeadline returns the earlier of the per-operation timeout and the
+// transaction deadline. DATA reads/writes previously used now+30s directly,
+// which could extend a nominal 90-second transaction when DATA began near the
+// overall deadline.
+func boundedDeadline(now time.Time, operationTimeout time.Duration, transactionDeadline time.Time) time.Time {
+	operationDeadline := now.Add(operationTimeout)
+	if transactionDeadline.Before(operationDeadline) {
+		return transactionDeadline
+	}
+	return operationDeadline
 }
 
 // dataTerminated appends the SMTP DATA terminator (CRLF.CRLF),
