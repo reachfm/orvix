@@ -83,7 +83,7 @@ func TestSelectRoute_InternalOnlySenderNeverGetsARelayRoute(t *testing.T) {
 	ctx := context.Background()
 	pool, _ := svc.CreatePool(ctx, Pool{Scope: ScopeGlobal, Name: "p", Strategy: StrategyPriority})
 	svc.CreateProvider(ctx, Provider{PoolID: pool.ID, Host: "relay.test", Port: 587, ConnSecurity: ConnSecurityStartTLS, Active: true}, "")
-	svc.CreateRoutingRule(ctx, RoutingRule{PoolID: pool.ID, Priority: 1})
+	svc.CreateRoutingRule(ctx, RoutingRule{PoolID: pool.ID, Priority: 1}, testActor)
 
 	_, err := svc.SelectRoute(ctx, RouteRequest{TenantID: 1, RecipientDomain: "external.test", SenderMailAccessMode: "internal_only"})
 	if err != ErrPolicyBlocked {
@@ -98,8 +98,8 @@ func TestSelectRoute_DomainScopedRuleBeatsGlobal(t *testing.T) {
 	domainPool, _ := svc.CreatePool(ctx, Pool{Scope: ScopeDomain, Name: "domain-specific", Strategy: StrategyPriority})
 	svc.CreateProvider(ctx, Provider{PoolID: globalPool.ID, Host: "global.relay.test", Port: 587, ConnSecurity: ConnSecurityStartTLS, Active: true}, "")
 	svc.CreateProvider(ctx, Provider{PoolID: domainPool.ID, Host: "domain.relay.test", Port: 587, ConnSecurity: ConnSecurityStartTLS, Active: true}, "")
-	svc.CreateRoutingRule(ctx, RoutingRule{PoolID: globalPool.ID, Priority: 1}) // global default
-	svc.CreateRoutingRule(ctx, RoutingRule{DomainID: 5, PoolID: domainPool.ID, Priority: 1})
+	svc.CreateRoutingRule(ctx, RoutingRule{PoolID: globalPool.ID, Priority: 1}, testActor) // global default
+	svc.CreateRoutingRule(ctx, RoutingRule{DomainID: 5, PoolID: domainPool.ID, Priority: 1}, testActor)
 
 	route, err := svc.SelectRoute(ctx, RouteRequest{TenantID: 1, DomainID: 5, RecipientDomain: "external.test"})
 	if err != nil {
@@ -117,7 +117,7 @@ func TestSelectRoute_CircuitOpenProviderIsSkippedInFavorOfFallback(t *testing.T)
 	pool, _ := svc.CreatePool(ctx, Pool{Scope: ScopeGlobal, Name: "p", Strategy: StrategyPriority})
 	primary, _ := svc.CreateProvider(ctx, Provider{PoolID: pool.ID, Host: "primary.relay.test", Port: 587, Priority: 1, ConnSecurity: ConnSecurityStartTLS, Active: true}, "")
 	svc.CreateProvider(ctx, Provider{PoolID: pool.ID, Host: "fallback.relay.test", Port: 587, Priority: 2, ConnSecurity: ConnSecurityStartTLS, Active: true}, "")
-	svc.CreateRoutingRule(ctx, RoutingRule{PoolID: pool.ID, Priority: 1})
+	svc.CreateRoutingRule(ctx, RoutingRule{PoolID: pool.ID, Priority: 1}, testActor)
 
 	// Trip the primary's circuit.
 	if err := svc.RecordAttemptResult(ctx, primary.ID, false); err != nil {
@@ -139,7 +139,7 @@ func TestSelectRoute_AllProvidersUnavailableReturnsNoRoute(t *testing.T) {
 	ctx := context.Background()
 	pool, _ := svc.CreatePool(ctx, Pool{Scope: ScopeGlobal, Name: "p", Strategy: StrategyPriority})
 	only, _ := svc.CreateProvider(ctx, Provider{PoolID: pool.ID, Host: "only.relay.test", Port: 587, ConnSecurity: ConnSecurityStartTLS, Active: true}, "")
-	svc.CreateRoutingRule(ctx, RoutingRule{PoolID: pool.ID, Priority: 1})
+	svc.CreateRoutingRule(ctx, RoutingRule{PoolID: pool.ID, Priority: 1}, testActor)
 	svc.RecordAttemptResult(ctx, only.ID, false)
 
 	_, err := svc.SelectRoute(ctx, RouteRequest{TenantID: 1, RecipientDomain: "external.test"})
@@ -154,7 +154,7 @@ func TestSelectRoute_RateLimitExhaustionSkipsProvider(t *testing.T) {
 	pool, _ := svc.CreatePool(ctx, Pool{Scope: ScopeGlobal, Name: "p", Strategy: StrategyPriority})
 	svc.CreateProvider(ctx, Provider{PoolID: pool.ID, Host: "limited.relay.test", Port: 587, Priority: 1, RateLimitPerMin: 2, ConnSecurity: ConnSecurityStartTLS, Active: true}, "")
 	svc.CreateProvider(ctx, Provider{PoolID: pool.ID, Host: "unlimited.relay.test", Port: 587, Priority: 2, ConnSecurity: ConnSecurityStartTLS, Active: true}, "")
-	svc.CreateRoutingRule(ctx, RoutingRule{PoolID: pool.ID, Priority: 1})
+	svc.CreateRoutingRule(ctx, RoutingRule{PoolID: pool.ID, Priority: 1}, testActor)
 
 	req := RouteRequest{TenantID: 1, RecipientDomain: "external.test"}
 	r1, err := svc.SelectRoute(ctx, req)
@@ -178,7 +178,7 @@ func TestSelectRoute_DirectOnlyPoolNeverReturnsARelayProvider(t *testing.T) {
 	_, svc := newTestService(t)
 	ctx := context.Background()
 	pool, _ := svc.CreatePool(ctx, Pool{Scope: ScopeGlobal, Name: "direct", Strategy: StrategyPriority, DirectOnly: true})
-	svc.CreateRoutingRule(ctx, RoutingRule{PoolID: pool.ID, Priority: 1})
+	svc.CreateRoutingRule(ctx, RoutingRule{PoolID: pool.ID, Priority: 1}, testActor)
 
 	route, err := svc.SelectRoute(ctx, RouteRequest{TenantID: 1, RecipientDomain: "external.test"})
 	if err != nil {
@@ -196,7 +196,7 @@ func TestEmergencyOverride_ForcesRouteAndAutoExpires(t *testing.T) {
 	overridePool, _ := svc.CreatePool(ctx, Pool{Scope: ScopeGlobal, Name: "override", Strategy: StrategyPriority})
 	svc.CreateProvider(ctx, Provider{PoolID: globalPool.ID, Host: "global.relay.test", Port: 587, ConnSecurity: ConnSecurityStartTLS, Active: true}, "")
 	svc.CreateProvider(ctx, Provider{PoolID: overridePool.ID, Host: "override.relay.test", Port: 587, ConnSecurity: ConnSecurityStartTLS, Active: true}, "")
-	svc.CreateRoutingRule(ctx, RoutingRule{PoolID: globalPool.ID, Priority: 1})
+	svc.CreateRoutingRule(ctx, RoutingRule{PoolID: globalPool.ID, Priority: 1}, testActor)
 
 	fixedNow := time.Now()
 	fc := kernel.NewFixedClock(fixedNow)
@@ -252,7 +252,7 @@ func TestSelectRoute_TenantIsolation(t *testing.T) {
 	ctx := context.Background()
 	pool, _ := svc.CreatePool(ctx, Pool{Scope: ScopeTenant, Name: "tenant1-pool", Strategy: StrategyPriority})
 	svc.CreateProvider(ctx, Provider{PoolID: pool.ID, Host: "tenant1.relay.test", Port: 587, ConnSecurity: ConnSecurityStartTLS, Active: true}, "")
-	svc.CreateRoutingRule(ctx, RoutingRule{TenantID: 1, PoolID: pool.ID, Priority: 1})
+	svc.CreateRoutingRule(ctx, RoutingRule{TenantID: 1, PoolID: pool.ID, Priority: 1}, testActor)
 
 	routeT2, err := svc.SelectRoute(ctx, RouteRequest{TenantID: 2, RecipientDomain: "external.test"})
 	if err != nil {

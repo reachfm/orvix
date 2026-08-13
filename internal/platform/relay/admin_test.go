@@ -666,7 +666,10 @@ func TestRelayAdmin_TestConnectionUnsafeTargetNeverDialed(t *testing.T) {
 
 func TestRelayAdmin_GenerateCredentialStrongAndURLSafe(t *testing.T) {
 	for i := 0; i < 20; i++ {
-		c := GenerateRelayCredential()
+		c, err := GenerateRelayCredential()
+		if err != nil {
+			t.Fatalf("generate credential: %v", err)
+		}
 		if len(c) < 40 {
 			t.Fatalf("generated credential too short: %d", len(c))
 		}

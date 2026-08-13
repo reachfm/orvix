@@ -184,14 +184,39 @@ func (s *Service) CreateRelay(ctx context.Context, in RelayCreateInput, actor Au
 	now := s.clock.Now()
 	p.CreatedAt, p.UpdatedAt = now, now
 	p.CircuitState = CircuitClosed
-	if err := s.repo.CreateProvider(ctx, &p); err != nil {
+	// The row, its audit entry, and its outbox event commit together. This
+	// was previously an unguarded insert followed by `_ = s.audit.Record(...)`
+	// outside any transaction, so an audit failure left a relay endpoint
+	// configured with NO record of who created it or when - the exact evidence
+	// an incident review depends on.
+	tx, err := s.repo.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, kernel.Wrap(kernel.ErrCodeInternal, "begin relay create", err)
+	}
+	defer tx.Rollback()
+
+	if err := s.repo.CreateProviderTx(ctx, tx, &p); err != nil {
 		if kernel.IsUniqueViolation(err) {
 			return nil, ErrRelayNameConflict
 		}
 		return nil, kernel.Wrap(kernel.ErrCodeInternal, "create platform relay", err)
 	}
+	if s.outbox != nil {
+		if err := s.outbox.Enqueue(ctx, tx, "relay.provider.created", fmt.Sprintf("%d", p.ID), map[string]any{
+			// Non-secret identifying fields only: never the password, the
+			// secret reference, or the ciphertext.
+			"scope": string(p.Scope), "tenant_id": p.TenantID, "pool_id": p.PoolID,
+		}, now); err != nil {
+			return nil, kernel.Wrap(kernel.ErrCodeInternal, "enqueue relay create event", err)
+		}
+	}
 	if s.audit != nil {
-		_ = s.audit.Record(ctx, s.auditEntry(actor, "platform.relay.create", fmt.Sprintf("relay:%d", p.ID), p.TenantID, "success", ""))
+		if err := s.audit.RecordTx(ctx, tx, s.auditEntry(actor, "platform.relay.create", fmt.Sprintf("relay:%d", p.ID), p.TenantID, "success", "")); err != nil {
+			return nil, kernel.Wrap(kernel.ErrCodeInternal, "record relay create audit", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, kernel.Wrap(kernel.ErrCodeInternal, "commit relay create", err)
 	}
 	r := Redact(p)
 	return &r, nil
@@ -275,9 +300,20 @@ func (s *Service) UpdateRelay(ctx context.Context, id uint, version int, in Rela
 			next.SecretRef = ref
 		}
 	}
-	next.UpdatedAt = s.clock.Now()
+	now := s.clock.Now()
+	next.UpdatedAt = now
 	next.Version = version
-	ok, err := s.repo.UpdateProvider(ctx, &next)
+
+	// Same transactional guarantee as create: an update that changes a relay's
+	// host, credential, or TLS posture must not survive without its audit
+	// entry.
+	tx, err := s.repo.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, kernel.Wrap(kernel.ErrCodeInternal, "begin relay update", err)
+	}
+	defer tx.Rollback()
+
+	ok, err := s.repo.UpdateProviderTx(ctx, tx, &next)
 	if err != nil {
 		return nil, kernel.Wrap(kernel.ErrCodeInternal, "update platform relay", err)
 	}
@@ -285,8 +321,20 @@ func (s *Service) UpdateRelay(ctx context.Context, id uint, version int, in Rela
 		return nil, ErrVersionConflict
 	}
 	next.Version++
+	if s.outbox != nil {
+		if err := s.outbox.Enqueue(ctx, tx, "relay.provider.updated", fmt.Sprintf("%d", next.ID), map[string]any{
+			"tenant_id": next.TenantID,
+		}, now); err != nil {
+			return nil, kernel.Wrap(kernel.ErrCodeInternal, "enqueue relay update event", err)
+		}
+	}
 	if s.audit != nil {
-		_ = s.audit.Record(ctx, s.auditEntry(actor, "platform.relay.update", fmt.Sprintf("relay:%d", next.ID), next.TenantID, "success", ""))
+		if err := s.audit.RecordTx(ctx, tx, s.auditEntry(actor, "platform.relay.update", fmt.Sprintf("relay:%d", next.ID), next.TenantID, "success", "")); err != nil {
+			return nil, kernel.Wrap(kernel.ErrCodeInternal, "record relay update audit", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, kernel.Wrap(kernel.ErrCodeInternal, "commit relay update", err)
 	}
 	r := Redact(next)
 	return &r, nil
@@ -298,6 +346,16 @@ func (s *Service) UpdateRelay(ctx context.Context, id uint, version int, in Rela
 func (s *Service) SetRelayActive(ctx context.Context, id uint, active bool, version int, actor AuditActor) (*RedactedProvider, error) {
 	if version <= 0 {
 		return nil, kernel.NewError(kernel.ErrCodeValidation, "a current version is required for state transitions")
+	}
+	// Load the current row first: the audit entry must name the relay's real
+	// owning tenant, and a transition against a missing relay must be a typed
+	// not-found rather than an indistinguishable version conflict.
+	cur, err := s.repo.GetProvider(ctx, id)
+	if err != nil {
+		return nil, kernel.Wrap(kernel.ErrCodeInternal, "get platform relay", err)
+	}
+	if cur == nil {
+		return nil, ErrProviderNotFound
 	}
 	now := s.clock.Now()
 	tx, err := s.repo.db.BeginTx(ctx, nil)
@@ -314,14 +372,25 @@ func (s *Service) SetRelayActive(ctx context.Context, id uint, active bool, vers
 		return nil, ErrVersionConflict
 	}
 	if s.outbox != nil {
-		_ = s.outbox.Enqueue(ctx, tx, "relay.provider.state", fmt.Sprintf("%d", id), map[string]any{
+		// A dropped outbox event means downstream consumers never learn the
+		// relay was disabled. Failing the transaction is the only outcome
+		// that keeps business state and evidence consistent.
+		if err := s.outbox.Enqueue(ctx, tx, "relay.provider.state", fmt.Sprintf("%d", id), map[string]any{
 			"action": map[bool]string{true: "enabled", false: "disabled"}[active],
-		}, now)
+		}, now); err != nil {
+			return nil, kernel.Wrap(kernel.ErrCodeInternal, "enqueue relay state event", err)
+		}
 	}
 	if s.audit != nil {
-		_ = s.audit.RecordTx(ctx, tx, s.auditEntry(actor,
+		// The tenant is read from the CURRENT row, not hardcoded. This call
+		// previously passed 0, so every enable/disable of a tenant-owned
+		// relay was recorded against tenant 0 - invisible in that tenant's
+		// audit trail and wrong in the platform's.
+		if err := s.audit.RecordTx(ctx, tx, s.auditEntry(actor,
 			map[bool]string{true: "platform.relay.enable", false: "platform.relay.disable"}[active],
-			fmt.Sprintf("relay:%d", id), 0, "success", ""))
+			fmt.Sprintf("relay:%d", id), cur.TenantID, "success", "")); err != nil {
+			return nil, kernel.Wrap(kernel.ErrCodeInternal, "record relay state audit", err)
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, kernel.Wrap(kernel.ErrCodeInternal, "commit relay state transition", err)
@@ -352,7 +421,19 @@ func (s *Service) RotateRelayCredentials(ctx context.Context, id uint, version i
 	generated := false
 	if newPassword == "" {
 		generated = true
-		newPassword = GenerateRelayCredential()
+		pw, gerr := GenerateRelayCredential()
+		if gerr != nil {
+			// Abort BEFORE encrypting, mutating, auditing, or enqueuing
+			// anything: a rotation that cannot produce a strong credential
+			// must leave the existing credential untouched.
+			return nil, "", gerr
+		}
+		newPassword = pw
+	}
+	if strings.TrimSpace(newPassword) == "" {
+		// Defence in depth: an empty credential must never reach the secret
+		// codec or the database, whatever produced it.
+		return nil, "", kernel.NewError(kernel.ErrCodeValidation, "a relay credential must not be empty")
 	}
 	ref, err := s.secrets.Encrypt(newPassword)
 	if err != nil {
@@ -372,10 +453,17 @@ func (s *Service) RotateRelayCredentials(ctx context.Context, id uint, version i
 		return nil, "", ErrVersionConflict
 	}
 	if s.outbox != nil {
-		_ = s.outbox.Enqueue(ctx, tx, "relay.provider.credentials_rotated", fmt.Sprintf("%d", id), map[string]any{}, now)
+		// The payload is intentionally empty: a credential-rotation event
+		// must carry no credential material, no secret reference, and no
+		// ciphertext.
+		if err := s.outbox.Enqueue(ctx, tx, "relay.provider.credentials_rotated", fmt.Sprintf("%d", id), map[string]any{}, now); err != nil {
+			return nil, "", kernel.Wrap(kernel.ErrCodeInternal, "enqueue relay rotation event", err)
+		}
 	}
 	if s.audit != nil {
-		_ = s.audit.RecordTx(ctx, tx, s.auditEntry(actor, "platform.relay.rotate_credentials", fmt.Sprintf("relay:%d", id), cur.TenantID, "success", ""))
+		if err := s.audit.RecordTx(ctx, tx, s.auditEntry(actor, "platform.relay.rotate_credentials", fmt.Sprintf("relay:%d", id), cur.TenantID, "success", "")); err != nil {
+			return nil, "", kernel.Wrap(kernel.ErrCodeInternal, "record relay rotation audit", err)
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, "", kernel.Wrap(kernel.ErrCodeInternal, "commit relay credential rotation", err)
@@ -399,7 +487,19 @@ func (s *Service) TestRelay(ctx context.Context, id uint, actor AuditActor) (*He
 		return nil, err
 	}
 	if s.audit != nil {
-		_ = s.audit.Record(ctx, s.auditEntry(actor, "platform.relay.test", fmt.Sprintf("relay:%d", id), 0, map[bool]string{true: "success", false: "failed"}[result.Connected], ""))
+		// The audited tenant is the relay's OWNER, read from the row. This
+		// previously passed 0, so an operator-triggered connection test
+		// against a tenant-owned relay left no trace in that tenant's audit
+		// trail. The audit failure is reported rather than dropped: a
+		// connection test is a security-relevant administrative action.
+		var tenantID uint
+		if cur, gerr := s.repo.GetProvider(ctx, id); gerr == nil && cur != nil {
+			tenantID = cur.TenantID
+		}
+		if aerr := s.audit.Record(ctx, s.auditEntry(actor, "platform.relay.test", fmt.Sprintf("relay:%d", id), tenantID,
+			map[bool]string{true: "success", false: "failed"}[result.Connected], "")); aerr != nil {
+			return nil, kernel.Wrap(kernel.ErrCodeInternal, "record relay test audit", aerr)
+		}
 	}
 	return result, nil
 }
@@ -428,10 +528,14 @@ func (s *Service) DeleteRelay(ctx context.Context, id uint, actor AuditActor) er
 		return ErrProviderNotFound
 	}
 	if s.outbox != nil {
-		_ = s.outbox.Enqueue(ctx, tx, "relay.provider.deleted", fmt.Sprintf("%d", id), map[string]any{}, now)
+		if err := s.outbox.Enqueue(ctx, tx, "relay.provider.deleted", fmt.Sprintf("%d", id), map[string]any{}, now); err != nil {
+			return kernel.Wrap(kernel.ErrCodeInternal, "enqueue relay delete event", err)
+		}
 	}
 	if s.audit != nil {
-		_ = s.audit.RecordTx(ctx, tx, s.auditEntry(actor, "platform.relay.delete", fmt.Sprintf("relay:%d", id), cur.TenantID, "success", ""))
+		if err := s.audit.RecordTx(ctx, tx, s.auditEntry(actor, "platform.relay.delete", fmt.Sprintf("relay:%d", id), cur.TenantID, "success", "")); err != nil {
+			return kernel.Wrap(kernel.ErrCodeInternal, "record relay delete audit", err)
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return kernel.Wrap(kernel.ErrCodeInternal, "commit relay delete", err)
@@ -439,20 +543,23 @@ func (s *Service) DeleteRelay(ctx context.Context, id uint, actor AuditActor) er
 	return nil
 }
 
-// GenerateRelayCredential returns a strong random credential
-// (256 bits, URL-safe base64) for operator-initiated rotation. It is
-// returned exactly once by RotateRelayCredentials and never stored in
-// plaintext anywhere.
-func GenerateRelayCredential() string {
+// GenerateRelayCredential returns a strong random credential (256 bits,
+// URL-safe base64) for operator-initiated rotation. It is returned exactly
+// once by RotateRelayCredentials and never stored in plaintext anywhere.
+//
+// It previously returned a bare string and, on a crypto/rand failure,
+// returned "" with a comment asserting "the caller will fail the rotation".
+// The caller did no such thing: RotateRelayCredentials encrypted the empty
+// string, persisted it as the provider's credential, audited the rotation as
+// a success, and handed "" to the operator as the new one-time secret. A
+// crypto/rand failure therefore silently replaced a working credential with
+// an empty one. The failure is now typed and unmissable.
+func GenerateRelayCredential() (string, error) {
 	buf := make([]byte, 32)
 	if _, err := rand.Read(buf); err != nil {
-		// crypto/rand failing is effectively unrecoverable; fall back
-		// to a bounded error path by returning an empty string (the
-		// caller will fail the rotation rather than store a weak
-		// credential).
-		return ""
+		return "", kernel.Wrap(kernel.ErrCodeInternal, "generate relay credential", err)
 	}
-	return base64.RawURLEncoding.EncodeToString(buf)
+	return base64.RawURLEncoding.EncodeToString(buf), nil
 }
 
 var _ = errors.Is
@@ -516,10 +623,58 @@ func (s *Service) decryptCredential(p Provider) (string, error) {
 	return s.secrets.Decrypt(p.SecretRef)
 }
 
-func (s *Service) CreateRoutingRule(ctx context.Context, rule RoutingRule) (*RoutingRule, error) {
+// CreateRoutingRule persists a routing rule together with its audit evidence
+// in ONE transaction. A routing rule decides which relay every matching
+// message egresses through, so creating one with no record of who did it is a
+// gap in exactly the evidence an incident review needs; the previous
+// implementation wrote the rule with no audit entry at all.
+//
+// The referenced pool is validated against the rule's tenant BEFORE insert: a
+// tenant-scoped rule pointing at another tenant's pool would route that
+// tenant's mail through infrastructure it does not own.
+func (s *Service) CreateRoutingRule(ctx context.Context, rule RoutingRule, actor AuditActor) (*RoutingRule, error) {
+	if rule.PoolID == 0 {
+		return nil, kernel.ValidationError(map[string]string{"pool_id": "a target pool is required"})
+	}
+	if len(strings.TrimSpace(rule.SenderPattern)) > maxSenderPatternLen {
+		return nil, kernel.ValidationError(map[string]string{"sender_pattern": "pattern is too long"})
+	}
+	pool, err := s.repo.GetPool(ctx, rule.PoolID)
+	if err != nil {
+		return nil, kernel.Wrap(kernel.ErrCodeInternal, "get relay pool", err)
+	}
+	if pool == nil {
+		return nil, ErrPoolNotFound
+	}
+	if pool.TenantID != 0 && rule.TenantID != 0 && pool.TenantID != rule.TenantID {
+		return nil, ErrCrossTenantProvider
+	}
+
 	rule.CreatedAt = s.clock.Now()
-	if err := s.repo.CreateRoutingRule(ctx, &rule); err != nil {
+	tx, err := s.repo.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, kernel.Wrap(kernel.ErrCodeInternal, "begin routing rule create", err)
+	}
+	defer tx.Rollback()
+
+	if err := s.repo.CreateRoutingRuleTx(ctx, tx, &rule); err != nil {
 		return nil, kernel.Wrap(kernel.ErrCodeInternal, "create routing rule", err)
+	}
+	if s.outbox != nil {
+		if err := s.outbox.Enqueue(ctx, tx, "relay.routing_rule.created", fmt.Sprintf("%d", rule.ID), map[string]any{
+			"tenant_id": rule.TenantID, "domain_id": rule.DomainID, "pool_id": rule.PoolID,
+		}, rule.CreatedAt); err != nil {
+			return nil, kernel.Wrap(kernel.ErrCodeInternal, "enqueue routing rule event", err)
+		}
+	}
+	if s.audit != nil {
+		if err := s.audit.RecordTx(ctx, tx, s.auditEntry(actor, "platform.relay.routing_rule.create",
+			fmt.Sprintf("relay_routing_rule:%d", rule.ID), rule.TenantID, "success", "")); err != nil {
+			return nil, kernel.Wrap(kernel.ErrCodeInternal, "record routing rule audit", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, kernel.Wrap(kernel.ErrCodeInternal, "commit routing rule create", err)
 	}
 	return &rule, nil
 }
@@ -538,11 +693,94 @@ func (s *Service) SetEmergencyOverride(ctx context.Context, tenantID, poolID, ac
 	if !expiresAt.After(now) {
 		return nil, kernel.ValidationError(map[string]string{"expires_at": "must be in the future"})
 	}
+	// The override forces traffic through a specific pool; that pool must be
+	// reachable by this tenant.
+	pool, err := s.repo.GetPool(ctx, poolID)
+	if err != nil {
+		return nil, kernel.Wrap(kernel.ErrCodeInternal, "get relay pool", err)
+	}
+	if pool == nil {
+		return nil, ErrPoolNotFound
+	}
+	if pool.TenantID != 0 && tenantID != 0 && pool.TenantID != tenantID {
+		return nil, ErrCrossTenantProvider
+	}
+
 	o := EmergencyOverride{TenantID: tenantID, PoolID: poolID, Reason: reason, ActorID: actorID, ExpiresAt: expiresAt, CreatedAt: now}
-	if err := s.repo.CreateOverride(ctx, &o); err != nil {
+
+	// An emergency override is one of the most security-sensitive mutations in
+	// the platform: it redirects every matching message. It previously carried
+	// no audit entry at all. Row and evidence now commit together.
+	tx, err := s.repo.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, kernel.Wrap(kernel.ErrCodeInternal, "begin emergency override", err)
+	}
+	defer tx.Rollback()
+
+	if err := s.repo.CreateOverrideTx(ctx, tx, &o); err != nil {
 		return nil, kernel.Wrap(kernel.ErrCodeInternal, "create emergency override", err)
 	}
+	if s.outbox != nil {
+		if err := s.outbox.Enqueue(ctx, tx, "relay.override.created", fmt.Sprintf("%d", o.ID), map[string]any{
+			"tenant_id": tenantID, "pool_id": poolID, "expires_at": expiresAt.UTC().Format(time.RFC3339),
+		}, now); err != nil {
+			return nil, kernel.Wrap(kernel.ErrCodeInternal, "enqueue emergency override event", err)
+		}
+	}
+	if s.audit != nil {
+		// The operator-supplied reason is recorded: an emergency control
+		// without a justification on the record is not auditable.
+		if err := s.audit.RecordTx(ctx, tx, s.auditEntry(AuditActor{ID: actorID}, "platform.relay.emergency_override.create",
+			fmt.Sprintf("relay_override:%d", o.ID), tenantID, "success", reason)); err != nil {
+			return nil, kernel.Wrap(kernel.ErrCodeInternal, "record emergency override audit", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, kernel.Wrap(kernel.ErrCodeInternal, "commit emergency override", err)
+	}
+	o.Active = true
 	return &o, nil
+}
+
+// RevokeEmergencyOverride deactivates an override before its natural expiry.
+// Revocation is as security-sensitive as creation - it restores normal
+// routing - so it is transactional and audited on the same terms. Revoking an
+// override that is already inactive or absent is reported, never silently
+// treated as success.
+func (s *Service) RevokeEmergencyOverride(ctx context.Context, id, tenantID, actorID uint, reason string) error {
+	now := s.clock.Now()
+	tx, err := s.repo.db.BeginTx(ctx, nil)
+	if err != nil {
+		return kernel.Wrap(kernel.ErrCodeInternal, "begin emergency override revoke", err)
+	}
+	defer tx.Rollback()
+
+	ok, err := s.repo.RevokeOverrideTx(ctx, tx, id, tenantID)
+	if err != nil {
+		return kernel.Wrap(kernel.ErrCodeInternal, "revoke emergency override", err)
+	}
+	if !ok {
+		// Either no such override, already inactive, or owned by another
+		// tenant. All three are refusals, not successes.
+		return ErrOverrideNotFound
+	}
+	if s.outbox != nil {
+		if err := s.outbox.Enqueue(ctx, tx, "relay.override.revoked", fmt.Sprintf("%d", id), map[string]any{
+			"tenant_id": tenantID,
+		}, now); err != nil {
+			return kernel.Wrap(kernel.ErrCodeInternal, "enqueue emergency override revoke event", err)
+		}
+	}
+	if s.audit != nil {
+		if err := s.audit.RecordTx(ctx, tx, s.auditEntry(AuditActor{ID: actorID}, "platform.relay.emergency_override.revoke",
+			fmt.Sprintf("relay_override:%d", id), tenantID, "success", reason)); err != nil {
+			return kernel.Wrap(kernel.ErrCodeInternal, "record emergency override revoke audit", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return kernel.Wrap(kernel.ErrCodeInternal, "commit emergency override revoke", err)
+	}
+	return nil
 }
 
 // RouteRequest is everything SelectRoute needs to resolve a route,
