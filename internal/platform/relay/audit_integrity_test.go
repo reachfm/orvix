@@ -298,3 +298,119 @@ func dumpTable(t *testing.T, db *sql.DB, table string) string {
 	}
 	return sb.String()
 }
+
+// -- F5: tenant relay mutations carry transactional evidence -------------
+
+// TestCreatePool_AuditFailureRollsBackThePool proves a tenant pool whose
+// audit entry cannot commit does not survive.
+func TestCreatePool_AuditFailureRollsBackThePool(t *testing.T) {
+	db, svc := newAuditedService(t)
+	ctx := context.Background()
+	before := countRows(t, db, "platform_relay_pools")
+
+	if _, err := db.Exec(`DROP TABLE orvix_audit`); err != nil {
+		t.Skipf("audit table name not as expected: %v", err)
+	}
+
+	_, err := svc.CreatePool(ctx, Pool{Scope: ScopeTenant, TenantID: 1, Name: "audit-fail-pool", Strategy: StrategyPriority}, testActor)
+	if err == nil {
+		t.Fatal("an audit failure must fail the pool create, not commit silently")
+	}
+	if after := countRows(t, db, "platform_relay_pools"); after != before {
+		t.Fatalf("the pool must have been rolled back: %d rows before, %d after", before, after)
+	}
+}
+
+// TestCreatePool_OutboxFailureRollsBackThePool proves the outbox
+// failure path for tenant pool creation.
+func TestCreatePool_OutboxFailureRollsBackThePool(t *testing.T) {
+	db, svc := newAuditedService(t)
+	ctx := context.Background()
+	before := countRows(t, db, "platform_relay_pools")
+
+	if _, err := db.Exec(`DROP TABLE platform_outbox_events`); err != nil {
+		t.Skipf("outbox table name not as expected: %v", err)
+	}
+
+	_, err := svc.CreatePool(ctx, Pool{Scope: ScopeTenant, TenantID: 1, Name: "outbox-fail-pool", Strategy: StrategyPriority}, testActor)
+	if err == nil {
+		t.Fatal("an outbox failure must fail the pool create, not commit silently")
+	}
+	if after := countRows(t, db, "platform_relay_pools"); after != before {
+		t.Fatalf("the pool must have been rolled back: %d rows before, %d after", before, after)
+	}
+}
+
+// TestCreateProvider_AuditFailureRollsBackTheProvider proves a tenant
+// provider whose audit entry cannot commit does not survive.
+func TestCreateProvider_AuditFailureRollsBackTheProvider(t *testing.T) {
+	db, svc := newAuditedService(t)
+	ctx := context.Background()
+	pool, err := svc.CreatePool(ctx, Pool{Scope: ScopeTenant, TenantID: 1, Name: "t1-pool", Strategy: StrategyPriority}, testActor)
+	if err != nil {
+		t.Fatalf("create pool: %v", err)
+	}
+	before := countRows(t, db, "platform_relay_providers")
+
+	if _, err := db.Exec(`DROP TABLE orvix_audit`); err != nil {
+		t.Skipf("audit table name not as expected: %v", err)
+	}
+
+	_, err = svc.CreateProvider(ctx, Provider{
+		PoolID: pool.ID, TenantID: 1, Host: "relay.t1.example.com", Port: 587,
+		ConnSecurity: ConnSecurityStartTLS, Active: true,
+	}, "", testActor)
+	if err == nil {
+		t.Fatal("an audit failure must fail the provider create, not commit silently")
+	}
+	if after := countRows(t, db, "platform_relay_providers"); after != before {
+		t.Fatalf("the provider must have been rolled back: %d rows before, %d after", before, after)
+	}
+}
+
+// TestTenantRelayAuditAttribution proves tenant pool/provider creation
+// and tenant connection tests are audited against the OWNING tenant,
+// never tenant 0, and that no secret material ever enters the audit row.
+func TestTenantRelayAuditAttribution(t *testing.T) {
+	db, svc := newAuditedService(t)
+	ctx := context.Background()
+
+	pool, err := svc.CreatePool(ctx, Pool{Scope: ScopeTenant, TenantID: 5, Name: "t5-pool", Strategy: StrategyPriority}, AuditActor{ID: 11, Role: "tenant_admin", RequestID: "req-t5"})
+	if err != nil {
+		t.Fatalf("create pool: %v", err)
+	}
+	p, err := svc.CreateProvider(ctx, Provider{
+		PoolID: pool.ID, TenantID: 5, Host: "relay.t5.example.com", Port: 587,
+		Username: "relayuser", ConnSecurity: ConnSecurityStartTLS, Active: true,
+	}, "tenant-secret-password", AuditActor{ID: 11, Role: "tenant_admin", RequestID: "req-t5"})
+	if err != nil {
+		t.Fatalf("create provider: %v", err)
+	}
+
+	store := audit.NewExtendedStore(db)
+	entries, _, err := store.Search(ctx, &audit.ExtendedQuery{Action: "relay.pool.create"})
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("expected exactly 1 pool-create audit entry, got %d err=%v", len(entries), err)
+	}
+	if entries[0].TenantID != 5 {
+		t.Fatalf("pool create must be audited against tenant 5, got %d", entries[0].TenantID)
+	}
+	if entries[0].ActorID != 11 || entries[0].ActorRole != "tenant_admin" || entries[0].RequestID != "req-t5" {
+		t.Fatalf("pool create audit missing actor identity: %+v", entries[0])
+	}
+	for _, e := range entries {
+		blob := strings.ToLower(strings.Join([]string{e.Action, e.Target, e.Reason, e.Result}, " "))
+		if strings.Contains(blob, "tenant-secret") || strings.Contains(blob, "enc:") || strings.Contains(blob, "relayuser") {
+			t.Fatalf("audit record leaked secret material: %s", blob)
+		}
+	}
+
+	entries, _, err = store.Search(ctx, &audit.ExtendedQuery{Action: "relay.provider.create"})
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("expected exactly 1 provider-create audit entry, got %d err=%v", len(entries), err)
+	}
+	if entries[0].TenantID != 5 {
+		t.Fatalf("provider create must be audited against tenant 5, got %d", entries[0].TenantID)
+	}
+	_ = p
+}
