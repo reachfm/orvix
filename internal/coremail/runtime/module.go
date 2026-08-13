@@ -30,6 +30,7 @@ import (
 	"github.com/orvix/orvix/internal/observability"
 	"github.com/orvix/orvix/internal/platform/cluster"
 	"github.com/orvix/orvix/internal/platform/deliverability"
+	"github.com/orvix/orvix/internal/platform/kernel"
 	"github.com/orvix/orvix/internal/platform/relay"
 	"github.com/orvix/orvix/internal/platform/security"
 	"github.com/orvix/orvix/internal/policy"
@@ -476,6 +477,20 @@ func (m *Module) initCore(cfg *config.Config, sqlDB *sql.DB) error {
 	// init failure disables relay routing for this run; every worker
 	// simply keeps its RelaySelector nil and delivers direct-to-MX
 	// exactly as before this integration existed.
+	//
+	// F9: the runtime relay service is wired with the canonical
+	// transactional outbox, so circuit transitions and other meaningful
+	// relay state changes are published as operational events. It was
+	// constructed with `relay.NewService(relayRepo, nil, nil)`, so
+	// RecordAttemptResult skipped outbox enqueue entirely and a tripped
+	// circuit produced no event for operators. The outbox is a single
+	// canonical instance (same dialect detection as the webhook outbox),
+	// and a failure to initialize it degrades relay routing explicitly
+	// rather than running silently without events.
+	relayDialect, rderr := dbdialect.Detect(sqlDB)
+	if rderr != nil {
+		relayDialect = dbdialect.FromDriver("sqlite")
+	}
 	relayRepo := relay.NewRepository(sqlDB)
 	var relayAdapter *relay.DeliveryAdapter
 	if err := relayRepo.EnsureSchema(context.Background()); err != nil {
@@ -483,7 +498,14 @@ func (m *Module) initCore(cfg *config.Config, sqlDB *sql.DB) error {
 			m.logger.Warn("relay control plane schema init failed; outbound relay disabled", zap.Error(err))
 		}
 	} else {
-		relayAdapter = relay.NewDeliveryAdapter(relay.NewService(relayRepo, nil, nil))
+		relayOutbox := kernel.NewOutboxRepository(relayDialect)
+		if oerr := relayOutbox.EnsureSchema(context.Background(), sqlDB); oerr != nil {
+			if m.logger != nil {
+				m.logger.Warn("relay outbox init failed; outbound relay disabled", zap.Error(oerr))
+			}
+		} else {
+			relayAdapter = relay.NewDeliveryAdapter(relay.NewService(relayRepo, nil, relayOutbox))
+		}
 	}
 	// Sending-identity resolution for relay routing.
 	//
@@ -507,10 +529,6 @@ func (m *Module) initCore(cfg *config.Config, sqlDB *sql.DB) error {
 	// the queue lease (300s), so a hung or locked database cannot pin a
 	// worker goroutine indefinitely.
 	const senderIdentityQueryTimeout = 5 * time.Second
-	relayDialect, rderr := dbdialect.Detect(sqlDB)
-	if rderr != nil {
-		relayDialect = dbdialect.FromDriver("sqlite")
-	}
 	senderIdentityQuery := relayDialect.Rewrite(
 		`SELECT m.tenant_id, m.domain_id, COALESCE(d.mail_access_mode, 'internal_external')
 		 FROM coremail_mailboxes m JOIN coremail_domains d ON d.id = m.domain_id
