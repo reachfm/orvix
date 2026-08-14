@@ -237,3 +237,79 @@ func TestEngineStore_CorruptDomainFailsClosed(t *testing.T) {
 		t.Fatalf("corrupt domain effective=%s want internal_only (fail closed)", id.EffectiveMode)
 	}
 }
+
+// seedPolicyForwarder seeds a mailbox that is configured as a forwarder
+// to forwardTo (which may be an external address — this is a real,
+// legitimate admin configuration: "forward all mail for X to Y").
+func seedPolicyForwarder(t *testing.T, db *sql.DB, email, forwardTo string) {
+	t.Helper()
+	parts := splitAt(email)
+	var domainID uint
+	if err := db.QueryRow(`SELECT id FROM coremail_domains WHERE name=?`, parts[1]).Scan(&domainID); err != nil {
+		t.Fatalf("forwarder domain id: %v", err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO coremail_mailboxes (domain_id, tenant_id, local_part, email, password_hash, auth_scheme, status, is_forwarder, forward_to, mail_access_mode, created_at, updated_at)
+		 VALUES (?, 1, ?, ?, '', 'argon2id', 'active', 1, ?, 'inherit', datetime('now'), datetime('now'))`,
+		domainID, parts[0], email, forwardTo); err != nil {
+		t.Fatalf("seed forwarder: %v", err)
+	}
+}
+
+// TestEngineStore_RecipientIsLocal_AliasToExternalTargetIsNotLocal is the
+// direct regression for the containment-bypass defect: RecipientIsLocal
+// previously returned len(ResolveAddress(addr)) > 0, so an address that
+// resolved SUCCESSFULLY — even to an external mailbox via an alias or a
+// forwarder — was reported as "local". An internal-only sender could then
+// send to "team@internal.test" (an alias configured to forward to a real
+// external partner address) and CheckOutbound would allow it, because
+// RecipientIsLocal("team@internal.test") returned true. The actual message
+// left the organization. RecipientIsLocal must be true ONLY when at least
+// one resolved delivery target is itself a real, active, local mailbox.
+func TestEngineStore_RecipientIsLocal_AliasToExternalTargetIsNotLocal(t *testing.T) {
+	db, eng := policyTestDB(t)
+	seedPolicyMailbox(t, db, "alice@internal.test", string(ModeInternalOnly), string(ModeInternalExternal))
+	// An alias whose target is a genuine external address — a legitimate
+	// admin configuration (e.g. forwarding a role account to a partner).
+	seedPolicyAlias(t, db, "partner-relay@internal.test", "sales@partner.example.com")
+
+	store := &EngineStore{Engine: eng}
+	local, err := store.RecipientIsLocal(context.Background(), "partner-relay@internal.test")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if local {
+		t.Fatal("an alias whose target is an external address must NOT be reported as local")
+	}
+
+	// The same defect via a forwarder mailbox (ForwardTo external).
+	seedPolicyForwarder(t, db, "fwd@internal.test", "escalations@othercompany.example")
+	local, err = store.RecipientIsLocal(context.Background(), "fwd@internal.test")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if local {
+		t.Fatal("a forwarder mailbox whose target is external must NOT be reported as local")
+	}
+}
+
+// TestCheckOutbound_InternalOnlySenderToAliasForwardingExternallyDenied is
+// the end-to-end enforcement proof through the real Policy + EngineStore:
+// an internal-only mailbox sending to a LOCAL address that happens to be an
+// alias pointing at an EXTERNAL mailbox must be denied, exactly as if it had
+// addressed the external mailbox directly.
+func TestCheckOutbound_InternalOnlySenderToAliasForwardingExternallyDenied(t *testing.T) {
+	db, eng := policyTestDB(t)
+	seedPolicyMailbox(t, db, "alice@internal.test", string(ModeInternalOnly), string(ModeInternalExternal))
+	seedPolicyAlias(t, db, "partner-relay@internal.test", "sales@partner.example.com")
+
+	store := &EngineStore{Engine: eng}
+	p := New(store, &recordingSink{})
+	d := p.CheckOutbound(context.Background(), "test", "alice@internal.test", []string{"partner-relay@internal.test"})
+	if d.Allowed {
+		t.Fatal("an internal-only sender must not reach an externally-forwarding alias")
+	}
+	if !d.Denied {
+		t.Fatalf("expected a denial, got %+v", d)
+	}
+}

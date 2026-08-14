@@ -56,19 +56,34 @@ func (s *EngineStore) SenderIdentity(ctx context.Context, mailboxEmail string) (
 	}, nil
 }
 
-// RecipientIsLocal resolves an address to its final delivery
-// targets via the canonical AuthService.ResolveAddress (mailbox,
-// forwarder, alias, catchall). ErrAddressNotFound means the address
-// is not a local recipient.
+// RecipientIsLocal resolves an address and reports whether it is
+// genuinely local — i.e. it resolves (directly, or via forwarder /
+// alias / catchall fan-out) to at least one real, active, locally
+// hosted mailbox.
+//
+// This delegates to RecipientEffectiveMode rather than checking
+// AuthService.ResolveAddress directly, because ResolveAddress returns
+// its raw delivery targets verbatim: an alias's to_addr or a
+// forwarder's forward_to is frequently, and legitimately, an EXTERNAL
+// address (e.g. "forward all mail for sales@ourco.com to
+// sales@partner.example.com"). The earlier implementation treated
+// "ResolveAddress succeeded" as "is local", so an internal-only
+// mailbox sending to a local address that happened to be an
+// externally-forwarding alias was allowed straight through — the
+// message actually left the organization. RecipientEffectiveMode
+// already validates that at least one resolved target is a real local
+// mailbox (it looks each one up and skips anything that isn't), so
+// reusing it here closes that gap instead of duplicating a second,
+// weaker resolution path.
 func (s *EngineStore) RecipientIsLocal(ctx context.Context, address string) (bool, error) {
-	targets, err := s.Engine.Auth.ResolveAddress(ctx, address)
+	_, err := s.RecipientEffectiveMode(ctx, address)
 	if err != nil {
-		if errors.Is(err, coremail.ErrAddressNotFound) {
+		if errors.Is(err, ErrRecipientUnknown) {
 			return false, nil
 		}
 		return false, err
 	}
-	return len(targets) > 0, nil
+	return true, nil
 }
 
 // RecipientEffectiveMode resolves the effective mode of the FINAL
