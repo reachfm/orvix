@@ -686,7 +686,7 @@ fi
 # binary we already verified above instead of executing it.
 VERIFY_DIR="$(mktemp -d -t orvix-verify.XXXXXX)"
 trap 'rm -rf "$WORK_DIR" "$VERIFY_DIR"' EXIT
-tar -C "$VERIFY_DIR" -xzf "$ARCHIVE" orvix/bin/orvix orvix/BUILDINFO \
+tar -C "$VERIFY_DIR" -xzf "$ARCHIVE" orvix/bin/orvix orvix/BUILDINFO orvix/VERSION \
     || fail "could not re-extract binary for verification" 4
 
 if [ "$HOST_OS" = "$TARGET_OS" ] && [ "$HOST_ARCH" = "$TARGET_ARCH" ]; then
