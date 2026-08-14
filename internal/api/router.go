@@ -32,6 +32,7 @@ import (
 	"github.com/orvix/orvix/internal/coremail"
 	"github.com/orvix/orvix/internal/coremail/delivery"
 	"github.com/orvix/orvix/internal/coremail/dkim"
+	"github.com/orvix/orvix/internal/coremail/mailpolicy"
 	"github.com/orvix/orvix/internal/coremail/push"
 	"github.com/orvix/orvix/internal/coremail/queue"
 	"github.com/orvix/orvix/internal/coremail/storage"
@@ -327,7 +328,7 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 			// tenant; the PSA never impersonates a tenant.
 			mailControlRepo := mailcontrol.NewRepository(sqlDB)
 			router.h.SetMailControlService(mailcontrol.NewService(mailControlRepo, mailcontrol.Ports{
-				Domains: domainAdminSvc, Mailboxes: mailboxAdminSvc, Audit: auditExtendedStore,
+				Domains: domainAdminSvc, Mailboxes: mailboxAdminSvc, Audit: auditExtendedStore, Outbox: outboxRepo,
 			}))
 
 			// Platform deliverability / suppression (Milestone 9 bounded
@@ -489,6 +490,17 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 				router.h.SetQueueEngine(qe)
 				logger.Info("queue engine wired for webmail send")
 			}
+		}
+		// Wire the canonical mailbox-level mail-access policy into the
+		// webmail send path (MAILBOX-ACCESS-MODE-PHASE1). The policy
+		// store is built over the same *sql.DB the runtime engine
+		// uses; a schema failure degrades to "policy not wired" (the
+		// pre-policy behavior) with an explicit log line.
+		if sqlDB, err := db.DB(); err == nil {
+			router.h.SetMailAccessPolicy(mailpolicy.New(mailpolicy.NewEngineStoreFromDB(sqlDB), nil))
+			logger.Info("mail access policy wired for webmail send")
+		} else {
+			logger.Warn("mail access policy not wired: failed to get sql.DB", zap.Error(err))
 		}
 		// Wire the immutable delivery-attempt history repo
 		// (Milestone 8) against the same table the delivery
@@ -1932,11 +1944,14 @@ func (r *Router) setupRoutes() {
 	// the canonical domain/mailbox/alias/group permissions.
 	protected.Get("/platform/domains/:tenant_id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermDomainsRead), r.h.ListPlatformDomains)
 	protected.Get("/platform/domains/:tenant_id/:id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermDomainsRead), r.h.GetPlatformDomain)
+	protected.Post("/platform/domains/:tenant_id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermDomainsWrite), r.h.CreatePlatformDomain)
 	protected.Post("/platform/domains/:tenant_id/:id/status", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermDomainsWrite), r.h.SetPlatformDomainStatus)
 	protected.Post("/platform/domains/:tenant_id/:id/mail-access-mode", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermDomainsWrite), r.h.SetPlatformDomainMailAccessMode)
 
 	protected.Get("/platform/mailboxes/:tenant_id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermMailboxesRead), r.h.ListPlatformMailboxes)
 	protected.Get("/platform/mailboxes/:tenant_id/:id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermMailboxesRead), r.h.GetPlatformMailbox)
+	protected.Post("/platform/mailboxes/:tenant_id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermMailboxesWrite), r.h.CreatePlatformMailbox)
+	protected.Post("/platform/mailboxes/:tenant_id/:id/access-mode", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermMailboxesWrite), r.h.SetPlatformMailboxAccessMode)
 	protected.Post("/platform/mailboxes/:tenant_id/:id/status", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermMailboxesWrite), r.h.SetPlatformMailboxStatus)
 	protected.Post("/platform/mailboxes/:tenant_id/:id/quota", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermMailboxesWrite), r.h.SetPlatformMailboxQuota)
 	protected.Post("/platform/mailboxes/:tenant_id/:id/reset-password", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermMailboxesWrite), r.h.ResetPlatformMailboxPassword)

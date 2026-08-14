@@ -113,6 +113,8 @@ var smtpTestMailboxesDDL = []string{
 		auth_scheme TEXT NOT NULL DEFAULT 'argon2id',
 		status TEXT NOT NULL DEFAULT 'active',
 		quota_mb INTEGER NOT NULL DEFAULT 1024,
+		mail_access_mode TEXT NOT NULL DEFAULT 'inherit',
+		version INTEGER NOT NULL DEFAULT 1,
 		created_at DATETIME NOT NULL,
 		updated_at DATETIME NOT NULL,
 		deleted_at DATETIME

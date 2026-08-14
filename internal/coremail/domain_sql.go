@@ -242,6 +242,15 @@ func (r *DomainSQLRepo) Delete(ctx context.Context, id uint, tx interface{}) err
 // here at all — this method only answers "if it is local, what's its
 // policy", so a not-found domain here must not itself cause a
 // different failure mode than an existing default-mode domain.
+//
+// Corrupt values fail closed (MAILBOX-ACCESS-MODE-PHASE1): the empty
+// string is the established pre-column default and keeps resolving to
+// internal_external exactly as before, but any other unrecognized
+// value is treated as internal_only rather than being silently
+// interpreted as unrestricted. The canonical policy service
+// (internal/coremail/mailpolicy) performs the same resolution with a
+// security-event emission and is what the production SMTP wiring uses;
+// this method remains for the legacy domain checker.
 func (r *DomainSQLRepo) GetMailAccessMode(ctx context.Context, name string, tx interface{}) (MailAccessMode, error) {
 	e := r.execer(tx)
 	var mode string
@@ -252,8 +261,11 @@ func (r *DomainSQLRepo) GetMailAccessMode(ctx context.Context, name string, tx i
 	if err != nil {
 		return "", fmt.Errorf("get mail access mode: %w", err)
 	}
-	if mode == "" || !MailAccessMode(mode).IsValid() {
+	if mode == "" {
 		return MailAccessInternalExternal, nil
+	}
+	if !MailAccessMode(mode).IsValid() {
+		return MailAccessInternalOnly, nil
 	}
 	return MailAccessMode(mode), nil
 }

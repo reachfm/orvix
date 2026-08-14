@@ -782,6 +782,40 @@ func (h *Handler) WebmailSend(c fiber.Ctx) error {
 	}
 	allRecipients = unique
 
+	// ── Canonical mail-access policy (MAILBOX-ACCESS-MODE-PHASE1) ──
+	// The authenticated webmail mailbox is the sender identity; the
+	// policy decides BEFORE any quota reservation, storage, or queue
+	// write. An internal-only mailbox sending to an external recipient
+	// is denied with a stable typed error and never consumes delivery
+	// quota as a successful delivery. A policy-evaluation failure
+	// fails closed (503, nothing stored or queued).
+	if h.mailPolicy != nil {
+		recipientAddrs := make([]string, 0, len(allRecipients))
+		for _, a := range allRecipients {
+			recipientAddrs = append(recipientAddrs, strings.ToLower(strings.TrimSpace(a.Address)))
+		}
+		decision := h.mailPolicy.CheckOutbound(c.Context(), "webmail", ctx.Mailbox.Email, recipientAddrs)
+		switch {
+		case decision.Allowed:
+		case decision.Unavailable:
+			h.logger.Warn("webmail send rejected: mail access policy unavailable",
+				zap.String("mailbox", ctx.Mailbox.Email))
+			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+				"error": "mail access policy unavailable",
+				"code":  "MAIL_ACCESS_POLICY_UNAVAILABLE",
+			})
+		case decision.Denied:
+			h.logger.Info("webmail send denied by mail access policy",
+				zap.String("mailbox", ctx.Mailbox.Email),
+				zap.String("reason", string(decision.Reason)))
+			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
+				"error":  "send denied by mail access policy",
+				"code":   "MAIL_ACCESS_DENIED",
+				"reason": string(decision.Reason),
+			})
+		}
+	}
+
 	// Real quota gate: number of unique, valid recipients.
 	// This reserves quota atomically before storage/queue side
 	// effects, then reconciles the reservation to the actual

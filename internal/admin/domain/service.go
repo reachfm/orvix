@@ -167,10 +167,19 @@ func (r *DomainAdminRepo) Create(ctx context.Context, d *AdminDomain) (*AdminDom
 	// unchanged. The legacy CreateDomain entrypoint applies the historic
 	// 500/50/10240 defaults itself so its behaviour is untouched.
 
-	res, err := r.db.ExecContext(ctx,
-		"INSERT INTO coremail_domains (tenant_id, name, status, plan, description, max_mailboxes, max_aliases, max_quota_mb, dkim_enabled, dkim_selector, dmarc_enabled, created_at, updated_at) VALUES ("+r.dialect.Placeholders(13)+")",
-		d.TenantID, d.Name, d.Status, d.Plan, d.Description, d.MaxMailboxes, d.MaxAliases, d.MaxQuotaMB,
-		boolToInt(d.DKIMEnabled), d.DKIMSelector, boolToInt(d.DMARCEnabled), d.CreatedAt, d.UpdatedAt)
+	insert := "INSERT INTO coremail_domains (tenant_id, name, status, plan, description, max_mailboxes, max_aliases, max_quota_mb, dkim_enabled, dkim_selector, dmarc_enabled, created_at, updated_at) VALUES (" + r.dialect.Placeholders(13) + ")"
+	args := []any{d.TenantID, d.Name, d.Status, d.Plan, d.Description, d.MaxMailboxes, d.MaxAliases, d.MaxQuotaMB,
+		r.databaseBool(d.DKIMEnabled), d.DKIMSelector, r.databaseBool(d.DMARCEnabled), d.CreatedAt, d.UpdatedAt}
+	if r.dialect.IsPostgres() {
+		// PostgreSQL has no LastInsertId: the id is returned by the
+		// INSERT itself. This is the same dialect-aware pattern the
+		// organization ownership repository uses.
+		if err := r.db.QueryRowContext(ctx, insert+" RETURNING id", args...).Scan(&d.ID); err != nil {
+			return nil, fmt.Errorf("create domain: %w", err)
+		}
+		return d, nil
+	}
+	res, err := r.db.ExecContext(ctx, insert, args...)
 	if err != nil {
 		return nil, fmt.Errorf("create domain: %w", err)
 	}
@@ -179,11 +188,21 @@ func (r *DomainAdminRepo) Create(ctx context.Context, d *AdminDomain) (*AdminDom
 	return d, nil
 }
 
+// databaseBool encodes a boolean for the active dialect: real bools
+// for PostgreSQL BOOLEAN columns, 0/1 integers for SQLite (same
+// pattern as the queue repository).
+func (r *DomainAdminRepo) databaseBool(b bool) any {
+	if r.dialect.IsPostgres() {
+		return b
+	}
+	return boolToInt(b)
+}
+
 func (r *DomainAdminRepo) Update(ctx context.Context, d *AdminDomain) error {
 	d.UpdatedAt = time.Now().UTC()
 	_, err := r.db.ExecContext(ctx,
 		"UPDATE coremail_domains SET description="+r.dialect.Placeholder(1)+", max_mailboxes="+r.dialect.Placeholder(2)+", max_aliases="+r.dialect.Placeholder(3)+", max_quota_mb="+r.dialect.Placeholder(4)+", dkim_enabled="+r.dialect.Placeholder(5)+", dmarc_enabled="+r.dialect.Placeholder(6)+", updated_at="+r.dialect.Placeholder(7)+" WHERE id="+r.dialect.Placeholder(8)+" AND tenant_id="+r.dialect.Placeholder(9)+" AND deleted_at IS NULL",
-		d.Description, d.MaxMailboxes, d.MaxAliases, d.MaxQuotaMB, boolToInt(d.DKIMEnabled), boolToInt(d.DMARCEnabled), d.UpdatedAt, d.ID, d.TenantID)
+		d.Description, d.MaxMailboxes, d.MaxAliases, d.MaxQuotaMB, r.databaseBool(d.DKIMEnabled), r.databaseBool(d.DMARCEnabled), d.UpdatedAt, d.ID, d.TenantID)
 	return err
 }
 
@@ -262,7 +281,7 @@ func (r *DomainAdminRepo) GetDomainForVerification(ctx context.Context, domainID
 func (r *DomainAdminRepo) UpdateDomainDKIMState(ctx context.Context, domainID, tenantID uint, enabled bool, selector string) error {
 	_, err := r.db.ExecContext(ctx,
 		"UPDATE coremail_domains SET dkim_enabled="+r.dialect.Placeholder(1)+", dkim_selector="+r.dialect.Placeholder(2)+", updated_at="+r.dialect.Placeholder(3)+" WHERE id="+r.dialect.Placeholder(4)+" AND tenant_id="+r.dialect.Placeholder(5)+" AND deleted_at IS NULL",
-		boolToInt(enabled), selector, time.Now().UTC(), domainID, tenantID)
+		r.databaseBool(enabled), selector, time.Now().UTC(), domainID, tenantID)
 	return err
 }
 
