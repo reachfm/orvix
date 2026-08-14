@@ -617,6 +617,19 @@ tar -C "$WORK_DIR" -czf "$ARCHIVE" orvix \
 sha256sum "$ARCHIVE" | awk -v a="$ARCHIVE" '{printf "%s  %s\n", $1, a}' > "$ARCHIVE.sha256"
 info "sha256: $(awk '{print $1}' "$ARCHIVE.sha256")  $ARCHIVE"
 
+# A signed *tarball* is the correct unit for distribution, but
+# release/scripts/upgrade.sh (the in-place update path) verifies a
+# separate PER-BINARY signature sidecar next to the raw orvix binary
+# — it has no tarball-extraction step of its own. Without this, an
+# operator holding a fully verified, signed bundle still has no way
+# to satisfy upgrade.sh's own signature gate short of --dev-unsafe.
+# Copy the exact sealed binary out under the archive's naming
+# convention (<archive>.bin / <archive>.bin.sha256) so it can be
+# signed alongside the tarball/manifest/sbom below, using the SAME
+# already-configured signing secret — no new key or mechanism.
+cp "$BIN_OUT" "$ARCHIVE.bin"
+sha256sum "$ARCHIVE.bin" | awk -v a="$ARCHIVE.bin" '{printf "%s  %s\n", $1, a}' > "$ARCHIVE.bin.sha256"
+
 # Also create stable-channel copies so the public installer can
 # resolve the bundle from a predictable GitHub Releases URL:
 #   orvix-enterprise-mail-stable-linux-amd64.tar.gz
@@ -625,6 +638,8 @@ STABLE_ARCHIVE="$OUTPUT_DIR/orvix-enterprise-mail-${RESOLVED_CHANNEL}-${TARGET_O
 cp "$ARCHIVE" "$STABLE_ARCHIVE"
 sha256sum "$STABLE_ARCHIVE" | awk -v a="$STABLE_ARCHIVE" '{printf "%s  %s\n", $1, a}' > "$STABLE_ARCHIVE.sha256"
 info "stable alias: $STABLE_ARCHIVE"
+cp "$BIN_OUT" "$STABLE_ARCHIVE.bin"
+sha256sum "$STABLE_ARCHIVE.bin" | awk -v a="$STABLE_ARCHIVE.bin" '{printf "%s  %s\n", $1, a}' > "$STABLE_ARCHIVE.bin.sha256"
 
 write_release_manifest() {
     local artifact="$1" output="$2"
@@ -657,12 +672,12 @@ write_release_manifest "$STABLE_ARCHIVE" "$STABLE_ARCHIVE.manifest.json"
 # provide a private Ed25519 key outside the repository. The corresponding
 # public key is distributed through the independently managed trust channel.
 if [ -n "${ORVIX_RELEASE_SIGNING_KEY_FILE:-}" ]; then
-    for artifact in "$ARCHIVE" "$ARCHIVE.manifest.json" "$ARCHIVE.sbom.spdx" "$STABLE_ARCHIVE" "$STABLE_ARCHIVE.manifest.json" "$STABLE_ARCHIVE.sbom.spdx"; do
+    for artifact in "$ARCHIVE" "$ARCHIVE.manifest.json" "$ARCHIVE.sbom.spdx" "$ARCHIVE.bin" "$STABLE_ARCHIVE" "$STABLE_ARCHIVE.manifest.json" "$STABLE_ARCHIVE.sbom.spdx" "$STABLE_ARCHIVE.bin"; do
         bash release/scripts/sign-release-artifact.sh "$artifact" "$ORVIX_RELEASE_SIGNING_KEY_FILE" "$artifact.sig" \
             || fail "release signing failed for $(basename "$artifact")" 4
     done
     if [ -n "${ORVIX_RELEASE_VERIFYING_KEY_FILE:-}" ]; then
-        for artifact in "$ARCHIVE" "$ARCHIVE.manifest.json" "$ARCHIVE.sbom.spdx" "$STABLE_ARCHIVE" "$STABLE_ARCHIVE.manifest.json" "$STABLE_ARCHIVE.sbom.spdx"; do
+        for artifact in "$ARCHIVE" "$ARCHIVE.manifest.json" "$ARCHIVE.sbom.spdx" "$ARCHIVE.bin" "$STABLE_ARCHIVE" "$STABLE_ARCHIVE.manifest.json" "$STABLE_ARCHIVE.sbom.spdx" "$STABLE_ARCHIVE.bin"; do
             bash release/scripts/verify-release-signature.sh "$artifact" "$artifact.sig" "$ORVIX_RELEASE_VERIFYING_KEY_FILE" \
                 || fail "release signature self-check failed for $(basename "$artifact")" 4
         done

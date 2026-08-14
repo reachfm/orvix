@@ -85,7 +85,7 @@ else
 fi
 
 # 5. Expected files, and only the already-verified release outputs.
-for pattern in 'dist/\*\.tar\.gz' 'dist/\*\.sha256' 'dist/\*\.sig' 'dist/\*\.manifest\.json' 'dist/\*\.sbom\.spdx'; do
+for pattern in 'dist/\*\.tar\.gz' 'dist/\*\.sha256' 'dist/\*\.sig' 'dist/\*\.manifest\.json' 'dist/\*\.sbom\.spdx' 'dist/\*\.bin'; do
   if echo "$STEP_BLOCK" | grep -qE "$pattern"; then
     pass "path includes $pattern"
   else

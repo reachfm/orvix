@@ -204,6 +204,7 @@ jobs:
           run_smoke bash-syntax bash -c 'bash -n release/install.sh && bash -n release/install-public.sh && bash -n release/scripts/*.sh && bash -n release/scripts/tests/*.sh'
           run_smoke admin-build-fallback bash release/scripts/tests/test-admin-build.sh
           run_smoke release-artifact-upload-contract bash release/scripts/tests/test-release-artifact-upload.sh
+          run_smoke release-binary-signing-contract bash release/scripts/tests/test-release-binary-signing.sh
           run_smoke smoke-admin-browser bash release/scripts/smoke-admin-browser.sh
           run_smoke smoke-admin-functional-browser bash release/scripts/smoke-admin-functional-browser.sh
           run_smoke smoke-admin-js bash release/scripts/smoke-admin-js.sh
@@ -345,11 +346,19 @@ jobs:
           test -f "$ASSET_BASE.sig" || { echo "::error::missing $ASSET_BASE.sig — refusing to publish an unsigned bundle" >&2; exit 1; }
           test -f "$ASSET_BASE.manifest.json.sig" || { echo "::error::missing $ASSET_BASE.manifest.json.sig — refusing to publish an unsigned bundle" >&2; exit 1; }
           test -f "$ASSET_BASE.sbom.spdx.sig" || { echo "::error::missing $ASSET_BASE.sbom.spdx.sig — refusing to publish an unsigned bundle" >&2; exit 1; }
+          # $ASSET_BASE.bin.sig is a per-binary signature sidecar for
+          # release/scripts/upgrade.sh's own independent signature gate —
+          # upgrade.sh has no tarball-extraction step, so it verifies the
+          # raw orvix binary directly rather than the sealed tarball.
+          test -f "$ASSET_BASE.bin.sig" || { echo "::error::missing $ASSET_BASE.bin.sig — refusing to publish an unsigned bundle" >&2; exit 1; }
           test -f "$ASSET_BASE"
           test -f "$ASSET_BASE.sha256"
           test -f "$ASSET_BASE.manifest.json"
           test -f "$ASSET_BASE.sbom.spdx"
+          test -f "$ASSET_BASE.bin"
+          test -f "$ASSET_BASE.bin.sha256"
           sha256sum -c "$ASSET_BASE.sha256" || { echo "::error::local checksum verification failed" >&2; exit 1; }
+          sha256sum -c "$ASSET_BASE.bin.sha256" || { echo "::error::local binary checksum verification failed" >&2; exit 1; }
           LOCAL_SHA="$(awk '{print $1}' "$ASSET_BASE.sha256")"
           echo "LOCAL_SHA=$LOCAL_SHA"
           echo "LOCAL_SHA=$LOCAL_SHA" >> "$GITHUB_ENV"
@@ -357,6 +366,10 @@ jobs:
             -inkey release/trust/orvix-release-signing.pub.pem \
             -in "$ASSET_BASE" -sigfile "$ASSET_BASE.sig" \
             || { echo "::error::local Ed25519 signature verification failed" >&2; exit 1; }
+          openssl pkeyutl -verify -rawin -pubin \
+            -inkey release/trust/orvix-release-signing.pub.pem \
+            -in "$ASSET_BASE.bin" -sigfile "$ASSET_BASE.bin.sig" \
+            || { echo "::error::local per-binary Ed25519 signature verification failed" >&2; exit 1; }
           echo "SIGNATURE_VERIFIED_LOCALLY=YES"
           echo "SIGNATURE_VERIFIED_LOCALLY=YES" >> "$GITHUB_ENV"
 
@@ -397,6 +410,7 @@ jobs:
             dist/*.sig
             dist/*.manifest.json
             dist/*.sbom.spdx
+            dist/*.bin
           if-no-files-found: error
           retention-days: 3
 
@@ -451,9 +465,12 @@ jobs:
             "$ASSET_BASE.sha256"
             "$ASSET_BASE.manifest.json"
             "$ASSET_BASE.sbom.spdx"
+            "$ASSET_BASE.bin"
+            "$ASSET_BASE.bin.sha256"
             "$ASSET_BASE.sig"
             "$ASSET_BASE.manifest.json.sig"
             "$ASSET_BASE.sbom.spdx.sig"
+            "$ASSET_BASE.bin.sig"
           )
           gh release upload "$TAG" "${assets[@]}" --clobber
           echo "ASSETS_UPLOADED=YES"
@@ -499,7 +516,8 @@ jobs:
           asset_names="$(gh release view "$TAG" --json assets -q '.assets[].name')"
           for required in \
             "$ASSET_NAME.manifest.json" "$ASSET_NAME.manifest.json.sig" \
-            "$ASSET_NAME.sbom.spdx" "$ASSET_NAME.sbom.spdx.sig"; do
+            "$ASSET_NAME.sbom.spdx" "$ASSET_NAME.sbom.spdx.sig" \
+            "$ASSET_NAME.bin" "$ASSET_NAME.bin.sha256" "$ASSET_NAME.bin.sig"; do
             echo "$asset_names" | grep -qxF "$required" \
               || { echo "::error::release is missing expected asset: $required" >&2; exit 1; }
           done
@@ -561,6 +579,9 @@ jobs:
             echo "- $ASSET_NAME.manifest.json.sig"
             echo "- $ASSET_NAME.sbom.spdx"
             echo "- $ASSET_NAME.sbom.spdx.sig"
+            echo "- $ASSET_NAME.bin"
+            echo "- $ASSET_NAME.bin.sha256"
+            echo "- $ASSET_NAME.bin.sig"
             echo
             echo "LOCAL_SHA:"
             echo "${LOCAL_SHA:-}"
