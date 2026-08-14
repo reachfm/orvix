@@ -36,15 +36,16 @@ import (
 )
 
 type bulkEnv struct {
-	router     *api.Router
-	db         *sql.DB
-	psaToken   string
-	psaCSRF    string
-	t1AdmToken string
-	t1AdmCSRF  string
-	t1OpToken  string
-	t2AdmToken string
-	t2AdmCSRF  string
+	router        *api.Router
+	authenticator *auth.Authenticator
+	db            *sql.DB
+	psaToken      string
+	psaCSRF       string
+	t1AdmToken    string
+	t1AdmCSRF     string
+	t1OpToken     string
+	t2AdmToken    string
+	t2AdmCSRF     string
 }
 
 const (
@@ -113,15 +114,16 @@ func buildBulkMailboxEnv(t *testing.T) *bulkEnv {
 	t1OpToken := importRouteLogin(t, router, bulkT1OpEmail, t1Op.Password)
 	t2AdmToken := importRouteLogin(t, router, bulkT2AdmEmail, t2Adm.Password)
 	return &bulkEnv{
-		router:     router,
-		db:         sqlDB,
-		psaToken:   psaToken,
-		psaCSRF:    importRouteCSRF(t, router, psaToken),
-		t1AdmToken: t1AdmToken,
-		t1AdmCSRF:  importRouteCSRF(t, router, t1AdmToken),
-		t1OpToken:  t1OpToken,
-		t2AdmToken: t2AdmToken,
-		t2AdmCSRF:  importRouteCSRF(t, router, t2AdmToken),
+		router:        router,
+		authenticator: authenticator,
+		db:            sqlDB,
+		psaToken:      psaToken,
+		psaCSRF:       importRouteCSRF(t, router, psaToken),
+		t1AdmToken:    t1AdmToken,
+		t1AdmCSRF:     importRouteCSRF(t, router, t1AdmToken),
+		t1OpToken:     t1OpToken,
+		t2AdmToken:    t2AdmToken,
+		t2AdmCSRF:     importRouteCSRF(t, router, t2AdmToken),
 	}
 }
 
@@ -273,6 +275,42 @@ func TestBulkMailbox_Stage_Unauthenticated_Denied(t *testing.T) {
 	resp, _ := env.do(t, "POST", "/api/v1/platform/mailboxes/bulk/1/stage", "", &buf, mw.FormDataContentType(), map[string]string{"Idempotency-Key": "k1"})
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("expected 401 unauthenticated, got %d", resp.StatusCode)
+	}
+}
+
+// TestBulkMailbox_Stage_RevokedSession_Denied proves a platform bulk
+// mailbox route rejects a session that was valid moments earlier but
+// has since been revoked (e.g. logout) — through the REAL router's
+// auth middleware, not a unit-level ValidateAccessToken check.
+func TestBulkMailbox_Stage_RevokedSession_Denied(t *testing.T) {
+	env := buildBulkMailboxEnv(t)
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	fw, _ := mw.CreateFormFile("file", "x.csv")
+	fw.Write([]byte(fmt.Sprintf(bulkTestCSV, "t1.example", "t1.example")))
+	mw.Close()
+
+	// The token is valid before revocation.
+	resp, raw := env.do(t, "GET", "/api/v1/platform/mailboxes/bulk/template", env.psaToken, nil, "", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected the token to still be valid before revocation, got %d: %s", resp.StatusCode, raw)
+	}
+
+	if err := env.authenticator.RevokeAccessToken(env.psaToken); err != nil {
+		t.Fatalf("revoke access token: %v", err)
+	}
+
+	resp2, raw2 := env.do(t, "POST", "/api/v1/platform/mailboxes/bulk/1/stage", env.psaToken, &buf, mw.FormDataContentType(),
+		map[string]string{"Cookie": "csrf_token=" + env.psaCSRF, "X-CSRF-Token": env.psaCSRF, "Idempotency-Key": "k-revoked"})
+	if resp2.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected a revoked session to be denied 401, got %d: %s", resp2.StatusCode, raw2)
+	}
+
+	// The same revoked token must also be denied on a read-only route,
+	// not just mutations.
+	resp3, raw3 := env.do(t, "GET", "/api/v1/platform/mailboxes/bulk/template", env.psaToken, nil, "", nil)
+	if resp3.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected a revoked session to be denied on GET too, got %d: %s", resp3.StatusCode, raw3)
 	}
 }
 
