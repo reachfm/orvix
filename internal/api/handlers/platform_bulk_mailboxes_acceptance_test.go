@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -498,6 +499,169 @@ func TestBulkMailbox_EndToEnd_DryRunThenExecute(t *testing.T) {
 		t.Fatalf("get rows: %d %s", rResp.StatusCode, rRaw)
 	}
 	assertNoSecretLeak(t, rRaw)
+}
+
+// TestBulkMailbox_ConcurrentSameKeyCreatesExactlyOneJob proves the
+// required "concurrent same-key submissions create exactly one
+// durable execution" contract at the HTTP layer: N goroutines POST
+// the identical create-job request with the identical Idempotency-Key
+// concurrently, and the database must end up with exactly one job row
+// — every response body must be identical (a genuine replay, not N
+// independent creates racing).
+func TestBulkMailbox_ConcurrentSameKeyCreatesExactlyOneJob(t *testing.T) {
+	env := buildBulkMailboxEnv(t)
+	domainID := env.createDomain(t, 1, "concurrent.example")
+	csv := []byte(fmt.Sprintf(bulkTestCSV, "concurrent.example", "concurrent.example"))
+
+	stResp, stRaw := env.psaStage(t, 1, "c.csv", csv, "k-concurrent-stage")
+	if stResp.StatusCode != http.StatusCreated {
+		t.Fatalf("stage: %d %s", stResp.StatusCode, stRaw)
+	}
+	var staged struct {
+		StagingID  string `json:"staging_id"`
+		SourceHash string `json:"source_hash"`
+		Format     string `json:"format"`
+	}
+	json.Unmarshal(stRaw, &staged)
+
+	body, _ := json.Marshal(map[string]any{
+		"staging_id": staged.StagingID, "source_hash": staged.SourceHash, "format": staged.Format, "domain_id": domainID,
+	})
+	const n = 8
+	var wg sync.WaitGroup
+	statuses := make([]int, n)
+	bodies := make([][]byte, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			req := httptest.NewRequest("POST", "/api/v1/platform/mailboxes/bulk/1/jobs", bytes.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Authorization", "Bearer "+env.psaToken)
+			req.Header.Set("Cookie", "csrf_token="+env.psaCSRF)
+			req.Header.Set("X-CSRF-Token", env.psaCSRF)
+			req.Header.Set("Idempotency-Key", "k-concurrent-create-job")
+			resp, err := env.router.App().Test(req, fiber.TestConfig{Timeout: 0})
+			if err != nil {
+				t.Errorf("concurrent request %d: %v", i, err)
+				return
+			}
+			raw, _ := io.ReadAll(resp.Body)
+			statuses[i] = resp.StatusCode
+			bodies[i] = raw
+		}(i)
+	}
+	wg.Wait()
+
+	for i, s := range statuses {
+		if s != http.StatusCreated {
+			t.Fatalf("request %d: expected 201, got %d: %s", i, s, bodies[i])
+		}
+	}
+	for i := 1; i < n; i++ {
+		if string(bodies[i]) != string(bodies[0]) {
+			t.Fatalf("concurrent same-key responses diverged (request 0 vs %d):\n%s\nvs\n%s", i, bodies[0], bodies[i])
+		}
+	}
+
+	var jobCount int
+	if err := env.db.QueryRow(`SELECT COUNT(*) FROM platform_bulk_import_jobs WHERE tenant_id = 1 AND idempotency_key = 'k-concurrent-create-job'`).Scan(&jobCount); err != nil {
+		t.Fatal(err)
+	}
+	if jobCount != 1 {
+		t.Fatalf("expected exactly 1 durable job row for the concurrent same-key requests, found %d", jobCount)
+	}
+}
+
+// TestBulkMailbox_RetryEndpoint_ReattemptsOnlyFailedRows drives the
+// actual retry ROUTE (RBAC/CSRF/tenant-scope/response shape), which
+// calls bulkprovision.Service.RetryFailedRows synchronously in-process
+// — no durable-jobs worker involved (that dependency is specific to
+// the /execute route's async submission, not /retry). The job/row
+// state a real partially_failed execution would leave behind is
+// seeded directly against the schema (matching
+// internal/platform/bulkprovision/repository.go's EnsureSchema
+// columns) so this test exercises the retry HTTP contract without
+// needing to solve running the background worker inside this
+// acceptance-test harness — a pre-existing harness gap noted in the R1
+// report, not something this test papers over.
+func TestBulkMailbox_RetryEndpoint_ReattemptsOnlyFailedRows(t *testing.T) {
+	env := buildBulkMailboxEnv(t)
+	domainID := env.createDomain(t, 1, "retry.example")
+	now := time.Now().UTC()
+
+	res, err := env.db.Exec(`INSERT INTO platform_bulk_import_jobs
+		(tenant_id, domain_id, status, strategy, conflict_policy, idempotency_key, source_hash, schema_version,
+		 total_rows, valid_rows, invalid_rows, created_count, failed_count, skipped_count, next_row_number, version, created_by, created_at, updated_at)
+		VALUES (1, ?, 'partially_failed', 'partial', 'fail', 'k-retry-seed', 'hash-retry-seed', 1, 2, 2, 0, 1, 1, 0, 2, 1, 99, ?, ?)`,
+		domainID, now, now)
+	if err != nil {
+		t.Fatalf("seed job: %v", err)
+	}
+	jobID64, err := res.LastInsertId()
+	if err != nil {
+		t.Fatalf("job id: %v", err)
+	}
+	jobID := uint(jobID64)
+
+	if _, err := env.db.Exec(`INSERT INTO platform_bulk_import_rows (job_id, row_number, email, status, mailbox_id, created_at, updated_at)
+		VALUES (?, 2, 'alice@retry.example', 'created', 1, ?, ?)`, jobID, now, now); err != nil {
+		t.Fatalf("seed created row: %v", err)
+	}
+	if _, err := env.db.Exec(`INSERT INTO platform_bulk_import_rows (job_id, row_number, email, status, error_code, error_detail, created_at, updated_at)
+		VALUES (?, 3, 'bob@retry.example', 'failed', 'create_failed', 'address already in use', ?, ?)`, jobID, now, now); err != nil {
+		t.Fatalf("seed failed row: %v", err)
+	}
+
+	rtResp, rtRaw := env.doJSON(t, "POST", fmt.Sprintf("/api/v1/platform/mailboxes/bulk/1/jobs/%d/retry", jobID), env.psaToken, env.psaCSRF, nil, nil)
+	if rtResp.StatusCode != http.StatusOK {
+		t.Fatalf("retry: %d %s", rtResp.StatusCode, rtRaw)
+	}
+	var retryOut struct {
+		Job struct {
+			Status       string `json:"status"`
+			CreatedCount int    `json:"created_count"`
+			FailedCount  int    `json:"failed_count"`
+		} `json:"job"`
+		Rows []struct {
+			Email  string `json:"email"`
+			Status string `json:"status"`
+		} `json:"rows"`
+	}
+	if err := json.Unmarshal(rtRaw, &retryOut); err != nil {
+		t.Fatalf("decode retry response: %v", err)
+	}
+	if retryOut.Job.Status != "completed" || retryOut.Job.CreatedCount != 2 || retryOut.Job.FailedCount != 0 {
+		t.Fatalf("expected the retry to re-succeed the previously-failed row (2 created, 0 failed), got %+v (raw: %s)", retryOut.Job, rtRaw)
+	}
+	var aliceUntouched, bobRetried bool
+	for _, r := range retryOut.Rows {
+		if r.Email == "alice@retry.example" && r.Status == "created" {
+			aliceUntouched = true
+		}
+		if r.Email == "bob@retry.example" && r.Status == "created" {
+			bobRetried = true
+		}
+	}
+	if !aliceUntouched {
+		t.Fatalf("expected alice's already-succeeded row to remain untouched (still created), got rows %+v", retryOut.Rows)
+	}
+	if !bobRetried {
+		t.Fatalf("expected bob's previously-failed row to be re-attempted and succeed, got rows %+v", retryOut.Rows)
+	}
+	assertNoSecretLeak(t, rtRaw)
+}
+
+// TestBulkMailbox_RetryEndpoint_TenantAdminDenied proves the retry
+// route carries the same platform-only gate as every other bulk
+// mailbox route.
+func TestBulkMailbox_RetryEndpoint_TenantAdminDenied(t *testing.T) {
+	env := buildBulkMailboxEnv(t)
+	resp, raw := env.do(t, "POST", "/api/v1/platform/mailboxes/bulk/1/jobs/1/retry", env.t1AdmToken, nil, "application/json",
+		map[string]string{"Cookie": "csrf_token=" + env.t1AdmCSRF, "X-CSRF-Token": env.t1AdmCSRF})
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("tenant admin must be denied the retry route, got %d: %s", resp.StatusCode, raw)
+	}
 }
 
 func assertNoSecretLeak(t *testing.T, raw []byte) {
