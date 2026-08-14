@@ -57,11 +57,20 @@ func (r *SQLRepo) Create(ctx context.Context, cfg *DKIMConfig, tx interface{}) e
 	cfg.CreatedAt = now
 	cfg.UpdatedAt = now
 	e := r.exec(tx)
-	res, err := e.ExecContext(ctx, fmt.Sprintf(`
+	insert := fmt.Sprintf(`
 		INSERT INTO coremail_dkim_config (domain, selector, private_key_pem, enabled, created_at, updated_at)
 		VALUES (%s, %s, %s, %s, %s, %s)`,
-		r.ph(1), r.ph(2), r.ph(3), r.ph(4), r.ph(5), r.ph(6)),
-		cfg.Domain, cfg.Selector, cfg.PrivateKeyPEM, boolToInt(cfg.Enabled), cfg.CreatedAt, cfg.UpdatedAt)
+		r.ph(1), r.ph(2), r.ph(3), r.ph(4), r.ph(5), r.ph(6))
+	args := []interface{}{cfg.Domain, cfg.Selector, cfg.PrivateKeyPEM, r.databaseBool(cfg.Enabled), cfg.CreatedAt, cfg.UpdatedAt}
+	if r.dialect.IsPostgres() {
+		// PostgreSQL has no LastInsertId; the generated id is returned
+		// by the INSERT itself.
+		if err := e.QueryRowContext(ctx, insert+" RETURNING id", args...).Scan(&cfg.ID); err != nil {
+			return fmt.Errorf("create dkim config: %w", err)
+		}
+		return nil
+	}
+	res, err := e.ExecContext(ctx, insert, args...)
 	if err != nil {
 		return fmt.Errorf("create dkim config: %w", err)
 	}
@@ -71,6 +80,15 @@ func (r *SQLRepo) Create(ctx context.Context, cfg *DKIMConfig, tx interface{}) e
 	}
 	cfg.ID = uint(id)
 	return nil
+}
+
+// databaseBool encodes a boolean for the active dialect: real bools
+// for PostgreSQL BOOLEAN columns, 0/1 integers for SQLite.
+func (r *SQLRepo) databaseBool(b bool) interface{} {
+	if r.dialect.IsPostgres() {
+		return b
+	}
+	return boolToInt(b)
 }
 
 func (r *SQLRepo) GetByDomain(ctx context.Context, domain string, tx interface{}) (*DKIMConfig, error) {
@@ -88,7 +106,7 @@ func (r *SQLRepo) Update(ctx context.Context, cfg *DKIMConfig, tx interface{}) e
 		UPDATE coremail_dkim_config SET selector=%s, private_key_pem=%s, enabled=%s, updated_at=%s
 		WHERE domain=%s`,
 		r.ph(1), r.ph(2), r.ph(3), r.ph(4), r.ph(5)),
-		cfg.Selector, cfg.PrivateKeyPEM, boolToInt(cfg.Enabled), cfg.UpdatedAt, cfg.Domain)
+		cfg.Selector, cfg.PrivateKeyPEM, r.databaseBool(cfg.Enabled), cfg.UpdatedAt, cfg.Domain)
 	return err
 }
 

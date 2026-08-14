@@ -114,17 +114,29 @@ func (r *AdminMailboxRepo) Create(ctx context.Context, m *AdminMailbox, password
 		m.Status = AdminMailboxActive
 	}
 
-	res, err := r.db.ExecContext(ctx,
-		`INSERT INTO coremail_mailboxes
+	insert := `INSERT INTO coremail_mailboxes
 			(domain_id, tenant_id, local_part, email, name, password_hash, auth_scheme,
 			 status, quota_mb, is_admin, allow_smtp, allow_imap, allow_pop3, allow_jmap,
 			 allow_webmail, send_limit_per_hour, recv_limit_per_hour, mail_access_mode, version, created_at, updated_at)
-		VALUES (`+r.dialect.Placeholders(21)+`)`,
+		VALUES (` + r.dialect.Placeholders(21) + `)`
+	args := []any{
 		m.DomainID, m.TenantID, m.LocalPart, m.Email, m.Name, passwordHash, string(MailboxAuthSchemeArgon2id),
-		string(m.Status), m.QuotaMB, boolToInt(m.IsAdmin),
-		boolToInt(m.AllowSMTP), boolToInt(m.AllowIMAP), boolToInt(m.AllowPOP3), boolToInt(m.AllowJMAP),
-		true, m.SendLimit, 1000, NormalizeMailAccessMode(m.MailAccessMode), 1, m.CreatedAt, m.UpdatedAt,
-	)
+		string(m.Status), m.QuotaMB, r.databaseBool(m.IsAdmin),
+		r.databaseBool(m.AllowSMTP), r.databaseBool(m.AllowIMAP), r.databaseBool(m.AllowPOP3), r.databaseBool(m.AllowJMAP),
+		r.databaseBool(true), m.SendLimit, 1000, NormalizeMailAccessMode(m.MailAccessMode), 1, m.CreatedAt, m.UpdatedAt,
+	}
+	if r.dialect.IsPostgres() {
+		// PostgreSQL has no LastInsertId: the id is returned by the
+		// INSERT itself (same dialect-aware pattern as the domain and
+		// organization repositories).
+		if err := r.db.QueryRowContext(ctx, insert+" RETURNING id", args...).Scan(&m.ID); err != nil {
+			return nil, fmt.Errorf("create mailbox: %w", err)
+		}
+		m.MailAccessMode = string(NormalizeMailAccessMode(m.MailAccessMode))
+		m.Version = 1
+		return m, nil
+	}
+	res, err := r.db.ExecContext(ctx, insert, args...)
 	if err != nil {
 		return nil, fmt.Errorf("create mailbox: %w", err)
 	}
@@ -133,6 +145,16 @@ func (r *AdminMailboxRepo) Create(ctx context.Context, m *AdminMailbox, password
 	m.MailAccessMode = string(NormalizeMailAccessMode(m.MailAccessMode))
 	m.Version = 1
 	return m, nil
+}
+
+// databaseBool encodes a boolean for the active dialect: real bools
+// for PostgreSQL BOOLEAN columns, 0/1 integers for SQLite (same
+// pattern as the queue repository).
+func (r *AdminMailboxRepo) databaseBool(b bool) any {
+	if r.dialect.IsPostgres() {
+		return b
+	}
+	return boolToInt(b)
 }
 
 func (r *AdminMailboxRepo) Update(ctx context.Context, m *AdminMailbox) error {

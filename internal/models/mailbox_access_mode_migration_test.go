@@ -227,27 +227,3 @@ func TestMigrateAllPostgres_MailboxAccessMode(t *testing.T) {
 		t.Fatalf("legacy mailbox version=%d want 1", version)
 	}
 }
-
-// MigrateAllPostgresRaw applies the PostgreSQL schema migrations over a
-// *sql.DB (test helper mirror of MigrateAllPostgres's table+index+column
-// passes).
-func MigrateAllPostgresRaw(db *sql.DB) error {
-	for _, ddl := range postgresTables() {
-		if _, err := db.Exec(ddl); err != nil {
-			return fmt.Errorf("postgres migrate: create table: %w\nDDL: %s", err, ddl)
-		}
-	}
-	for _, ddl := range postgresIndexes() {
-		if _, err := db.Exec(ddl); err != nil {
-			return fmt.Errorf("postgres migrate: create index: %w\nDDL: %s", err, ddl)
-		}
-	}
-	for _, ddl := range postgresColumnAdditions() {
-		if _, err := db.Exec(ddl); err != nil {
-			// IF NOT EXISTS makes this idempotent; a failure here is
-			// still surfaced rather than swallowed.
-			return fmt.Errorf("postgres migrate: add column: %w\nDDL: %s", err, ddl)
-		}
-	}
-	return nil
-}
