@@ -38,11 +38,14 @@ import (
 type bulkEnv struct {
 	router        *api.Router
 	authenticator *auth.Authenticator
+	apikeys       *auth.APIKeyManager
 	db            *sql.DB
 	psaToken      string
 	psaCSRF       string
+	psaUserID     uint
 	t1AdmToken    string
 	t1AdmCSRF     string
+	t1AdmUserID   uint
 	t1OpToken     string
 	t2AdmToken    string
 	t2AdmCSRF     string
@@ -101,7 +104,14 @@ func buildBulkMailboxEnv(t *testing.T) *bulkEnv {
 	t1Op := seedTenantOperator(t, sqlDB, bulkT1OpEmail, 1)
 	t2Adm := seedTenantAdminWithPassword(t, sqlDB, bulkT2AdmEmail, 2, bulkT2AdmPass)
 	psaHash, _ := authenticator.HashPassword(bulkPSAPass)
-	exec("INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified) VALUES (?, ?, '"+bulkPSAEmail+"', ?, 'platform_super_admin', NULL, 1, 1)", now, now, psaHash)
+	psaRes, perr := sqlDB.Exec("INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified) VALUES (?, ?, '"+bulkPSAEmail+"', ?, 'platform_super_admin', NULL, 1, 1)", now, now, psaHash)
+	if perr != nil {
+		t.Fatalf("seed PSA user: %v", perr)
+	}
+	psaUserID64, perr := psaRes.LastInsertId()
+	if perr != nil {
+		t.Fatalf("psa user id: %v", perr)
+	}
 
 	router := api.NewRouter(cfg, authenticator, logger, db, modules.NewRegistry(logger), license.NewFeatureFlags(logger), nil)
 	t.Cleanup(func() {
@@ -116,11 +126,14 @@ func buildBulkMailboxEnv(t *testing.T) *bulkEnv {
 	return &bulkEnv{
 		router:        router,
 		authenticator: authenticator,
+		apikeys:       auth.NewAPIKeyManager(db, logger),
 		db:            sqlDB,
 		psaToken:      psaToken,
 		psaCSRF:       importRouteCSRF(t, router, psaToken),
+		psaUserID:     uint(psaUserID64),
 		t1AdmToken:    t1AdmToken,
 		t1AdmCSRF:     importRouteCSRF(t, router, t1AdmToken),
+		t1AdmUserID:   t1Adm.ID,
 		t1OpToken:     t1OpToken,
 		t2AdmToken:    t2AdmToken,
 		t2AdmCSRF:     importRouteCSRF(t, router, t2AdmToken),
@@ -275,6 +288,40 @@ func TestBulkMailbox_Stage_Unauthenticated_Denied(t *testing.T) {
 	resp, _ := env.do(t, "POST", "/api/v1/platform/mailboxes/bulk/1/stage", "", &buf, mw.FormDataContentType(), map[string]string{"Idempotency-Key": "k1"})
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("expected 401 unauthenticated, got %d", resp.StatusCode)
+	}
+}
+
+// TestBulkMailbox_Template_PlatformAPIKey_Succeeds proves the platform
+// API-key portal contract: a real orv_-prefixed API key minted for the
+// PSA's own current role authenticates through apikeys.Middleware (not
+// a session token), bypasses CSRF entirely (the established contract
+// for API-key auth — see auth/csrf.go's auth_method=="apikey" check),
+// and is authorized on a platform bulk mailbox route.
+func TestBulkMailbox_Template_PlatformAPIKey_Succeeds(t *testing.T) {
+	env := buildBulkMailboxEnv(t)
+	key, _, err := env.apikeys.Generate("psa-bulk-key", env.psaUserID, 0, "platform_super_admin", nil, 0)
+	if err != nil {
+		t.Fatalf("generate platform API key: %v", err)
+	}
+	resp, raw := env.do(t, "GET", "/api/v1/platform/mailboxes/bulk/template", key, nil, "", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected the platform API key to be authorized, got %d: %s", resp.StatusCode, raw)
+	}
+}
+
+// TestBulkMailbox_Stage_TenantScopedAPIKey_Denied proves a tenant-scoped
+// API key (even one minted for a tenant_admin) cannot invoke a
+// platformMW-gated bulk mailbox route — only a platform_super_admin
+// role, session or API-key, is authorized here.
+func TestBulkMailbox_Stage_TenantScopedAPIKey_Denied(t *testing.T) {
+	env := buildBulkMailboxEnv(t)
+	key, _, err := env.apikeys.Generate("t1-admin-bulk-key", env.t1AdmUserID, 1, "tenant_admin", nil, 0)
+	if err != nil {
+		t.Fatalf("generate tenant-scoped API key: %v", err)
+	}
+	resp, raw := env.do(t, "GET", "/api/v1/platform/mailboxes/bulk/template", key, nil, "", nil)
+	if resp.StatusCode != http.StatusForbidden && resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected a tenant-scoped API key to be denied on a platform route, got %d: %s", resp.StatusCode, raw)
 	}
 }
 
