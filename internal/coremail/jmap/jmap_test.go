@@ -92,6 +92,7 @@ func coremailTables() []string {
 			abuse_contact TEXT NOT NULL DEFAULT '',
 			labels TEXT NOT NULL DEFAULT '',
 			mailbox_count INTEGER NOT NULL DEFAULT 0,
+			mail_access_mode TEXT NOT NULL DEFAULT 'internal_external',
 			created_at DATETIME NOT NULL,
 			updated_at DATETIME NOT NULL,
 			deleted_at DATETIME

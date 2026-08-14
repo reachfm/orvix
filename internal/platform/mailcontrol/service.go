@@ -79,6 +79,22 @@ func (s *Service) verifyTenantEligible(ctx context.Context, tenantID uint) error
 	return nil
 }
 
+// mapTenantError converts the lifecycle sentinel errors into the typed
+// platform contract so handlers return correct status codes (404 for
+// absent/deleted, 409 for suspended, 400 for tenant 0) instead of
+// falling through to INTERNAL.
+func mapTenantError(err error) error {
+	switch err {
+	case ErrTenantRequired:
+		return kernel.ValidationError(map[string]string{"tenant_id": "an explicit target tenant_id is required"})
+	case ErrTenantNotFound, ErrTenantDeleted:
+		return kernel.NotFound("tenant")
+	case ErrTenantSuspended:
+		return kernel.Conflict("tenant is suspended or inactive")
+	}
+	return err
+}
+
 func (s *Service) auditRecord(ctx context.Context, actorID uint, action, target string, tenantID uint, result, reason string) {
 	if s.audit == nil {
 		return
@@ -109,7 +125,7 @@ func (s *Service) auditRecord(ctx context.Context, actorID uint, action, target 
 // asserts DNS is verified — verification is a separate operator action.
 func (s *Service) CreateDomain(ctx context.Context, req PlatformCreateDomainRequest, tenantID, actorID uint, dnsRequirements []PlatformDNSRequirement) (*PlatformCreateDomainResult, error) {
 	if err := s.verifyTenantEligible(ctx, tenantID); err != nil {
-		return nil, err
+		return nil, mapTenantError(err)
 	}
 
 	adminReq := admindomain.CreateDomainRequest{
@@ -344,7 +360,7 @@ func (s *Service) SetMailAccessMode(ctx context.Context, id, tenantID uint, mode
 // used once to derive the hash and is never returned or logged.
 func (s *Service) CreateMailbox(ctx context.Context, req PlatformCreateMailboxRequest, tenantID, actorID uint) (*PlatformCreateMailboxResult, error) {
 	if err := s.verifyTenantEligible(ctx, tenantID); err != nil {
-		return nil, err
+		return nil, mapTenantError(err)
 	}
 	// The platform route requires an explicit mode and accepts only
 	// the two concrete values. "inherit" is rejected here by design:

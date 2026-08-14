@@ -418,7 +418,9 @@ func TestExecute_ConcurrentImportsNeverExceedDomainQuota(t *testing.T) {
 		msg_count INTEGER NOT NULL DEFAULT 0, is_admin INTEGER NOT NULL DEFAULT 0, allow_smtp INTEGER NOT NULL DEFAULT 1,
 		allow_imap INTEGER NOT NULL DEFAULT 1, allow_pop3 INTEGER NOT NULL DEFAULT 1, allow_jmap INTEGER NOT NULL DEFAULT 1,
 		allow_webmail INTEGER NOT NULL DEFAULT 1, mfa_enabled INTEGER NOT NULL DEFAULT 0, send_limit_per_hour INTEGER NOT NULL DEFAULT 0,
-		recv_limit_per_hour INTEGER NOT NULL DEFAULT 0, last_login DATETIME, last_ip TEXT, created_at DATETIME, updated_at DATETIME, deleted_at DATETIME);
+		recv_limit_per_hour INTEGER NOT NULL DEFAULT 0, last_login DATETIME, last_ip TEXT,
+		mail_access_mode TEXT NOT NULL DEFAULT 'inherit', version INTEGER NOT NULL DEFAULT 1,
+		created_at DATETIME, updated_at DATETIME, deleted_at DATETIME);
 	CREATE TABLE coremail_aliases (id INTEGER PRIMARY KEY, domain_id INTEGER, tenant_id INTEGER, deleted_at DATETIME);`); err != nil {
 		t.Fatal(err)
 	}
