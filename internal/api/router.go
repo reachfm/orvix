@@ -327,7 +327,7 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 			// tenant; the PSA never impersonates a tenant.
 			mailControlRepo := mailcontrol.NewRepository(sqlDB)
 			router.h.SetMailControlService(mailcontrol.NewService(mailControlRepo, mailcontrol.Ports{
-				Domains: domainAdminSvc, Mailboxes: mailboxAdminSvc, Audit: auditExtendedStore,
+				Domains: domainAdminSvc, Mailboxes: mailboxAdminSvc, Audit: auditExtendedStore, Outbox: outboxRepo,
 			}))
 
 			// Platform deliverability / suppression (Milestone 9 bounded
@@ -1932,6 +1932,7 @@ func (r *Router) setupRoutes() {
 	// the canonical domain/mailbox/alias/group permissions.
 	protected.Get("/platform/domains/:tenant_id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermDomainsRead), r.h.ListPlatformDomains)
 	protected.Get("/platform/domains/:tenant_id/:id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermDomainsRead), r.h.GetPlatformDomain)
+	protected.Post("/platform/domains/:tenant_id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermDomainsWrite), r.h.CreatePlatformDomain)
 	protected.Post("/platform/domains/:tenant_id/:id/status", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermDomainsWrite), r.h.SetPlatformDomainStatus)
 	protected.Post("/platform/domains/:tenant_id/:id/mail-access-mode", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermDomainsWrite), r.h.SetPlatformDomainMailAccessMode)
 

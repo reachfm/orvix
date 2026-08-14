@@ -186,3 +186,109 @@ var ErrTenantRequired = &mailControlError{"an explicit target tenant_id is requi
 type mailControlError struct{ msg string }
 
 func (e *mailControlError) Error() string { return e.msg }
+
+// ── Platform domain creation ───────────────────────────────────────
+
+// PlatformCreateDomainRequest is the Platform Super Admin domain
+// creation contract (POST /api/v1/platform/domains/:tenant_id).
+// mail_access_mode is deliberately ABSENT: mail-access policy is a
+// per-mailbox concern in this release, so a domain create cannot
+// pin it. The legacy domain mail-access APIs remain operational for
+// compatibility (deprecated).
+type PlatformCreateDomainRequest struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Status      string `json:"status,omitempty"`
+	// Limits are optional typed allocation controls (see
+	// admin/domain.DomainLimits sentinel semantics).
+	Limits *PlatformDomainLimits `json:"limits,omitempty"`
+	// DKIM optionally requests in-transaction DKIM provisioning. The
+	// generated private key is never returned, logged, or audited.
+	DKIM *PlatformDKIMOptions `json:"dkim,omitempty"`
+}
+
+type PlatformDomainLimits struct {
+	MaxMailboxes          *int   `json:"max_mailboxes,omitempty"`
+	MaxAliases            *int   `json:"max_aliases,omitempty"`
+	DefaultMailboxQuotaMB *int64 `json:"default_mailbox_quota_mb,omitempty"`
+	MaxMailboxQuotaMB     *int64 `json:"max_mailbox_quota_mb,omitempty"`
+}
+
+type PlatformDKIMOptions struct {
+	Generate bool   `json:"generate"`
+	Selector string `json:"selector,omitempty"`
+}
+
+// PlatformDNSRequirement is one publishable DNS record the tenant
+// must create. It carries only public values (name/type/value/ttl/
+// priority) — never DKIM private material or provider credentials.
+type PlatformDNSRequirement struct {
+	Name     string `json:"name"`
+	Type     string `json:"type"`
+	Value    string `json:"value"`
+	TTL      int    `json:"ttl"`
+	Priority int    `json:"priority,omitempty"`
+	Required bool   `json:"required"`
+	Purpose  string `json:"purpose,omitempty"`
+}
+
+// PlatformCreateDomainResult is the safe post-create contract. It
+// contains only publishable data: the created domain, the resolved
+// effective limits, the PUBLIC DKIM DNS record, and the DNS records
+// the tenant must publish. No private key, password, or token is ever
+// placed on this struct.
+type PlatformCreateDomainResult struct {
+	Domain           PlatformDomain           `json:"domain"`
+	EffectiveLimits  PlatformEffectiveLimits  `json:"effective_limits"`
+	DKIM             *PlatformDKIMResult      `json:"dkim,omitempty"`
+	DNSRequirements  []PlatformDNSRequirement `json:"dns_requirements,omitempty"`
+	DNSNextStep      string                   `json:"dns_next_step"`
+	PublicDNSChanged bool                     `json:"public_dns_changed"`
+	Plan             *PlatformPlanSummary     `json:"plan,omitempty"`
+	Idempotent       bool                     `json:"idempotent"`
+}
+
+// PlatformEffectiveLimits is the resolved allocation view (mirrors
+// admin/domain.EffectiveLimits without importing its Go type into the
+// JSON contract — see PlatformDomain for the same reasoning).
+type PlatformEffectiveLimits struct {
+	MaxMailboxes                   int   `json:"max_mailboxes"`
+	MaxMailboxesUnlimited          bool  `json:"max_mailboxes_unlimited"`
+	MaxMailboxesInherited          bool  `json:"max_mailboxes_inherited"`
+	MaxAliases                     int   `json:"max_aliases"`
+	MaxAliasesUnlimited            bool  `json:"max_aliases_unlimited"`
+	MaxAliasesInherited            bool  `json:"max_aliases_inherited"`
+	DefaultMailboxQuotaMB          int64 `json:"default_mailbox_quota_mb"`
+	MaxMailboxQuotaMB              int64 `json:"max_mailbox_quota_mb"`
+	MaxMailboxQuotaUnlimited       bool  `json:"max_mailbox_quota_mb_unlimited"`
+	MaxMailboxQuotaInherited       bool  `json:"max_mailbox_quota_mb_inherited"`
+	DefaultMailboxQuotaMBInherited bool  `json:"default_mailbox_quota_mb_inherited"`
+}
+
+// PlatformDKIMResult carries only the PUBLIC DKIM DNS record.
+type PlatformDKIMResult struct {
+	Selector      string `json:"selector"`
+	PublicDNSTxt  string `json:"public_dns_txt"`
+	DNSRecordName string `json:"dns_record_name"`
+}
+
+// PlatformPlanSummary is the post-create plan/usage view.
+type PlatformPlanSummary struct {
+	Plan                  string `json:"plan"`
+	MaxDomains            int    `json:"max_domains"`
+	MaxDomainsUnlimited   bool   `json:"max_domains_unlimited"`
+	DomainsUsed           int    `json:"domains_used"`
+	RemainingDomains      *int   `json:"remaining_domains"`
+	MaxMailboxes          int    `json:"max_mailboxes"`
+	MaxMailboxesUnlimited bool   `json:"max_mailboxes_unlimited"`
+	MailboxesUsed         int    `json:"mailboxes_used"`
+	RemainingMailboxes    *int   `json:"remaining_mailboxes"`
+}
+
+// Platform errors for provisioning.
+var (
+	ErrTenantNotFound  = &mailControlError{"tenant not found"}
+	ErrTenantSuspended = &mailControlError{"tenant is suspended or inactive"}
+	ErrTenantDeleted   = &mailControlError{"tenant is deleted"}
+	ErrProvisionFailed = &mailControlError{"provisioning failed"}
+)
