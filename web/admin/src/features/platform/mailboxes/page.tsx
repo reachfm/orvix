@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Loader2, AlertCircle, Search, Plus } from "lucide-react";
 import TenantScopeBanner from "../tenant-context/components/TenantScopeBanner";
 import { useTenantScope } from "../tenant-context/queries";
@@ -26,6 +26,7 @@ export default function MailboxesPage() {
   const [page, setPage] = useState(0);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [showCreate, setShowCreate] = useState(false);
+  const createTriggerRef = useRef<HTMLButtonElement>(null);
 
   const tenantId = scope?.tenantId ?? null;
 
@@ -51,6 +52,7 @@ export default function MailboxesPage() {
         </div>
         {tenantId !== null && (
           <button
+            ref={createTriggerRef}
             type="button"
             onClick={() => setShowCreate(true)}
             className="inline-flex items-center gap-1.5 px-3 py-2 text-sm rounded bg-[var(--accent)] text-white shrink-0"
@@ -130,7 +132,13 @@ export default function MailboxesPage() {
       )}
 
       {tenantId !== null && showCreate && (
-        <CreateMailboxDialog tenantId={tenantId} onClose={() => setShowCreate(false)} />
+        <CreateMailboxDialog
+          tenantId={tenantId}
+          onClose={() => {
+            setShowCreate(false);
+            requestAnimationFrame(() => createTriggerRef.current?.focus());
+          }}
+        />
       )}
     </div>
   );

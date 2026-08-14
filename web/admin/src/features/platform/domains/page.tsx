@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Loader2, AlertCircle, Search, Plus } from "lucide-react";
 import TenantScopeBanner from "../tenant-context/components/TenantScopeBanner";
 import { useTenantScope } from "../tenant-context/queries";
@@ -26,6 +26,7 @@ export default function DomainsPage() {
   const [page, setPage] = useState(0);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [showCreate, setShowCreate] = useState(false);
+  const createTriggerRef = useRef<HTMLButtonElement>(null);
 
   const tenantId = scope?.tenantId ?? null;
 
@@ -51,6 +52,7 @@ export default function DomainsPage() {
         </div>
         {tenantId !== null && (
           <button
+            ref={createTriggerRef}
             type="button"
             onClick={() => setShowCreate(true)}
             className="inline-flex items-center gap-1.5 px-3 py-2 text-sm rounded bg-[var(--accent)] text-white shrink-0"
@@ -130,7 +132,16 @@ export default function DomainsPage() {
       )}
 
       {tenantId !== null && showCreate && (
-        <CreateDomainDialog tenantId={tenantId} onClose={() => setShowCreate(false)} />
+        <CreateDomainDialog
+          tenantId={tenantId}
+          onClose={() => {
+            setShowCreate(false);
+            // The dialog unmounts on close rather than staying mounted with
+            // open=false, so Radix's own close-focus-restoration effect
+            // never gets to run — restore focus to the trigger explicitly.
+            requestAnimationFrame(() => createTriggerRef.current?.focus());
+          }}
+        />
       )}
     </div>
   );

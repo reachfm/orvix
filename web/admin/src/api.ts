@@ -163,9 +163,9 @@ export async function request<T>(path: string, options?: RequestOptions): Promis
   }
 
   const res = await fetch(`${BASE}${path}`, {
+    ...options,
     credentials: "include",
     headers,
-    ...options,
   });
 
   if (!res.ok) {

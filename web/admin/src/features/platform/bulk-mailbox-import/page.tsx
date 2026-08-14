@@ -47,6 +47,7 @@ export default function BulkMailboxImportPage() {
   const [stageIdemKey, setStageIdemKey] = useState<string | null>(null);
   const [createIdemKey, setCreateIdemKey] = useState<string | null>(null);
   const [workflowError, setWorkflowError] = useState<unknown>(null);
+  const [fileError, setFileError] = useState<string | null>(null);
   const [createdJobId, setCreatedJobId] = useState<number | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -66,6 +67,7 @@ export default function BulkMailboxImportPage() {
     setStageIdemKey(null);
     setCreateIdemKey(null);
     setWorkflowError(null);
+    setFileError(null);
     setCreatedJobId(null);
     if (fileInputRef.current) fileInputRef.current.value = "";
   };
@@ -95,7 +97,7 @@ export default function BulkMailboxImportPage() {
     if (!file || tenantId === null) return;
     const lower = file.name.toLowerCase();
     if (!ALLOWED_EXTENSIONS.some((ext) => lower.endsWith(ext))) {
-      setWorkflowError(new Error("Only .csv or .xlsx files are accepted."));
+      setFileError("Only .csv or .xlsx files are accepted.");
       return;
     }
     const key = crypto.randomUUID();
@@ -228,6 +230,13 @@ export default function BulkMailboxImportPage() {
             </span>
             {stageMut.isPending && <Loader2 size={14} className="animate-spin text-[var(--accent)]" />}
           </label>
+
+          {fileError !== null && (
+            <div className="border border-[var(--danger)]/30 rounded-lg p-3 text-sm flex items-start gap-2" role="alert">
+              <AlertCircle size={16} className="text-[var(--danger)] shrink-0 mt-0.5" />
+              <p className="text-[var(--danger)] font-medium">{fileError}</p>
+            </div>
+          )}
 
           {workflowError !== null && (
             <div className="border border-[var(--danger)]/30 rounded-lg p-3 text-sm flex items-start gap-2" role="alert">
