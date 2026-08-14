@@ -125,6 +125,8 @@ export function resetCSRFToken(): void {
 interface RequestOptions extends RequestInit {
   skipCSRF?: boolean;
   _csrfRetried?: boolean;
+  /** When true, resolves with the raw Response body as a Blob instead of parsing JSON — for file downloads (e.g. the bulk mailbox template). */
+  responseType?: "json" | "blob";
 }
 
 // Exported so feature modules under src/features/**/api.ts can perform
@@ -140,9 +142,14 @@ export async function request<T>(path: string, options?: RequestOptions): Promis
     await initCSRF();
   }
 
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-  };
+  const isFormData = typeof FormData !== "undefined" && options?.body instanceof FormData;
+
+  const headers: Record<string, string> = {};
+  if (!isFormData) {
+    // multipart/form-data requires a browser-generated boundary in the
+    // Content-Type header — never set it manually for a FormData body.
+    headers["Content-Type"] = "application/json";
+  }
 
   if (options?.headers) {
     const incoming = options.headers as Record<string, string>;
@@ -179,6 +186,10 @@ export async function request<T>(path: string, options?: RequestOptions): Promis
 
   if (res.status === 204) {
     return undefined as unknown as T;
+  }
+
+  if (options?.responseType === "blob") {
+    return (await res.blob()) as unknown as T;
   }
 
   return res.json();
