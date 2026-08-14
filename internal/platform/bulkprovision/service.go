@@ -333,12 +333,37 @@ func (s *Service) CreateJob(ctx context.Context, tenantID, domainID, actorID uin
 		InvalidRows: result.InvalidRows, CreatedBy: actorID, CreatedAt: now, UpdatedAt: now,
 	}
 	if err := s.repo.CreateJob(ctx, job, result.Rows); err != nil {
+		// The initial GetJobByIdempotencyKey check above is inherently
+		// check-then-act: under real concurrency, two requests carrying
+		// the identical idempotency key can both pass that check before
+		// either has inserted. The schema's own unique index on
+		// (tenant_id, idempotency_key) then rejects whichever INSERT
+		// loses the race — that rejection is not a genuine server
+		// fault, it means a concurrent identical request just won.
+		// Recheck before reporting a false internal error, mirroring
+		// the same insert-then-reconcile pattern kernel.IdempotencyStore
+		// already uses for exactly this class of race.
+		if idempotencyKey != "" {
+			if existing, gerr := s.repo.GetJobByIdempotencyKey(ctx, tenantID, idempotencyKey); gerr == nil && existing != nil {
+				return existing, nil
+			}
+		}
 		return nil, kernel.Wrap(kernel.ErrCodeInternal, "create import job", err)
 	}
 	if s.audit != nil {
 		s.recordAudit(ctx, actorID, "bulkprovision.job.created", job, "success", "")
 	}
-	return job, nil
+	// Return the DB-canonical row rather than the locally-constructed
+	// struct: this guarantees the WINNING request's response is
+	// byte-identical to what a losing, reconciled concurrent request
+	// above returns (both reads go through the same GetJob path), never
+	// diverging on timestamp serialization precision between the
+	// pre-insert Go value and its DB round-trip.
+	canonical, gerr := s.repo.GetJob(ctx, job.ID, tenantID)
+	if gerr != nil {
+		return nil, kernel.Wrap(kernel.ErrCodeInternal, "reload created import job", gerr)
+	}
+	return canonical, nil
 }
 
 // ExecuteHooks lets a durable-job wrapper observe/steer batch-bounded

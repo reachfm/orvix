@@ -328,6 +328,60 @@ func TestCreateJob_SameIdempotencyKeyReturnsSameJob(t *testing.T) {
 	}
 }
 
+// TestCreateJob_ConcurrentSameIdempotencyKeyResolvesToOneJob proves the
+// fix for the real CI failure this test class caught: CreateJob's
+// initial GetJobByIdempotencyKey check is check-then-act, so under true
+// concurrency two callers can both pass it before either has inserted.
+// The schema's unique index on (tenant_id, idempotency_key) then
+// rejects whichever INSERT loses the race — CreateJob must reconcile
+// that rejection into "return the winner's job", never surface it as a
+// raw internal error. This mirrors kernel_test.go's
+// TestIdempotency_ConcurrentBeginsOnlyOneProceeds pattern: real
+// goroutines, not a synthetic hook.
+func TestCreateJob_ConcurrentSameIdempotencyKeyResolvesToOneJob(t *testing.T) {
+	_, repo := newTestRepo(t)
+	svc := NewService(repo, newFakeMailboxes(0), fakeAccessMode{domain.MailAccessInternalExternal}, nil, nil, nil, nil)
+	ctx := context.Background()
+
+	res, err := svc.Validate(ctx, 1, 1, "x.test", "test-hash-concurrent", []RawRow{{RowNumber: 2, Email: "race@x.test"}})
+	if err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+
+	const n = 12
+	var wg sync.WaitGroup
+	jobs := make([]*Job, n)
+	errs := make([]error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			jobs[i], errs[i] = svc.CreateJob(ctx, 1, 1, 99, StrategyPartial, ConflictFail, "concurrent-race-key", res)
+		}(i)
+	}
+	wg.Wait()
+
+	var firstID uint
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("request %d: expected no error (a raced INSERT must reconcile to the winner, not surface as a failure), got: %v", i, err)
+		}
+		if firstID == 0 {
+			firstID = jobs[i].ID
+		} else if jobs[i].ID != firstID {
+			t.Fatalf("request %d: expected every concurrent same-key call to resolve to job %d, got %d", i, firstID, jobs[i].ID)
+		}
+	}
+
+	var jobCount int
+	if err := repo.db.QueryRow(`SELECT COUNT(*) FROM platform_bulk_import_jobs WHERE tenant_id = 1 AND idempotency_key = 'concurrent-race-key'`).Scan(&jobCount); err != nil {
+		t.Fatal(err)
+	}
+	if jobCount != 1 {
+		t.Fatalf("expected exactly 1 durable job row despite %d concurrent same-key CreateJob calls, found %d", n, jobCount)
+	}
+}
+
 // ── cancel / retry ────────────────────────────────────────────────
 
 func TestCancel_ReadyJobCanBeCancelled(t *testing.T) {
