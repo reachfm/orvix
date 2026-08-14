@@ -297,6 +297,21 @@ func TestSetMailAccessMode_ConcurrentGuardedWritesOneWins(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		// Matches the production convention (internal/config/database.go)
+		// and every other file-backed SQLite fixture in this package.
+		// Without it, database/sql opens SEVERAL physical connections to
+		// the same file and lets goroutines race across them for
+		// SQLite's file-level write lock; under real host contention that
+		// race can exhaust the busy_timeout on ALL eight writers at once
+		// (every writer reports an error, not "exactly one winner"),
+		// which is a false failure of the harness, not evidence that the
+		// optimistic-concurrency guard itself let more than one writer
+		// through. Pinning MaxOpenConns(1) makes Go's own connection-pool
+		// queue serialize every access through one physical connection —
+		// identical to how the real server is configured — so the
+		// guarded UPDATE always runs strictly one-at-a-time and the test
+		// is deterministic.
+		db.SetMaxOpenConns(1)
 		if _, err := db.Exec(`CREATE TABLE coremail_domains (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			tenant_id INTEGER NOT NULL DEFAULT 0,
