@@ -4,9 +4,13 @@
 import { request } from "../../../api";
 import type {
   DeletePlatformMailboxResponse,
+  PlatformCreateMailboxRequest,
+  PlatformCreateMailboxResult,
   PlatformMailbox,
+  PlatformMailboxAccessModeResult,
   PlatformMailboxFilter,
   PlatformMailboxList,
+  PlatformSetMailboxAccessModeRequest,
   ResetPlatformMailboxPasswordResponse,
   SetPlatformMailboxQuotaRequest,
   SetPlatformMailboxQuotaResponse,
@@ -27,6 +31,36 @@ export function listPlatformMailboxes(tenantId: number, filter: PlatformMailboxF
 
 export function getPlatformMailbox(tenantId: number, id: number): Promise<PlatformMailbox> {
   return request<PlatformMailbox>(`/platform/mailboxes/${tenantId}/${id}`);
+}
+
+/**
+ * Sensitive mutation: the backend sends Cache-Control: no-store on
+ * this response (it never carries the password, but callers must not
+ * assume otherwise or cache it regardless).
+ */
+export function createPlatformMailbox(
+  tenantId: number,
+  body: PlatformCreateMailboxRequest,
+  idempotencyKey: string,
+): Promise<PlatformCreateMailboxResult> {
+  return request<PlatformCreateMailboxResult>(`/platform/mailboxes/${tenantId}`, {
+    method: "POST",
+    body: JSON.stringify(body),
+    headers: { "Idempotency-Key": idempotencyKey },
+  });
+}
+
+export function setPlatformMailboxAccessMode(
+  tenantId: number,
+  id: number,
+  body: PlatformSetMailboxAccessModeRequest,
+  idempotencyKey: string,
+): Promise<PlatformMailboxAccessModeResult> {
+  return request<PlatformMailboxAccessModeResult>(`/platform/mailboxes/${tenantId}/${id}/access-mode`, {
+    method: "POST",
+    body: JSON.stringify(body),
+    headers: { "Idempotency-Key": idempotencyKey },
+  });
 }
 
 export function setPlatformMailboxStatus(

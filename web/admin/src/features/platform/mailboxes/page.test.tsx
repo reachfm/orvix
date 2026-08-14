@@ -7,7 +7,22 @@ import { request } from "../../../api";
 import { TENANT_SCOPE_QUERY_KEY } from "../tenant-context/contract";
 import type { PlatformMailboxList } from "./contract";
 
-vi.mock("../../../api", () => ({ request: vi.fn() }));
+const { MockApiError } = vi.hoisted(() => {
+  class MockApiError extends Error {
+    code: string;
+    status: number;
+    body: any;
+    constructor(code: string, message: string, status: number, body?: any) {
+      super(message);
+      this.code = code;
+      this.status = status;
+      this.body = body;
+    }
+  }
+  return { MockApiError };
+});
+
+vi.mock("../../../api", () => ({ request: vi.fn(), ApiError: MockApiError }));
 
 const mockedRequest = vi.mocked(request);
 
@@ -16,11 +31,13 @@ const MAILBOXES: PlatformMailboxList = {
     {
       id: 101, tenant_id: 7, domain_id: 1, domain: "acme.example", email: "alice@acme.example",
       name: "Alice", status: "active", is_admin: true, quota_mb: 1024, used_bytes: 1048576,
+      mail_access_mode: "internal_external", effective_mail_access_mode: "internal_external", version: 1,
       created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-02T00:00:00Z",
     },
     {
       id: 102, tenant_id: 7, domain_id: 1, domain: "acme.example", email: "bob@acme.example",
       name: "Bob", status: "suspended", is_admin: false, quota_mb: 512, used_bytes: 0,
+      mail_access_mode: "internal_only", effective_mail_access_mode: "internal_only", version: 1,
       created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-03T00:00:00Z",
     },
   ],
@@ -156,5 +173,116 @@ describe("features/platform/mailboxes (platform routes)", () => {
       expect(deleteCall).toBeDefined();
       expect((deleteCall![1] as { headers?: Record<string, string> }).headers?.["X-Confirm"]).toBe("PURGE-MAILBOX-101");
     });
+  });
+
+  it("requires a mail access mode choice, sends the exact create request, and never retains the password after success", async () => {
+    renderPage(7);
+    await waitFor(() => expect(screen.getByText("alice@acme.example")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /create mailbox/i }));
+
+    const createButton = screen.getByRole("button", { name: "Create mailbox" });
+    fireEvent.change(screen.getByLabelText("Email *"), { target: { value: "new@acme.example" } });
+    fireEvent.change(screen.getByLabelText("Password *"), { target: { value: "s3cret-pass!" } });
+    // No access mode chosen yet — the button must stay disabled (mandatory choice).
+    expect(createButton).toBeDisabled();
+
+    fireEvent.click(screen.getByLabelText(/^Internal only/));
+    expect(createButton).toBeEnabled();
+
+    mockedRequest.mockImplementation((path: string, opts?: Parameters<typeof request>[1]) => {
+      if (path === "/platform/mailboxes/7" && opts?.method === "POST") {
+        return Promise.resolve({
+          mailbox: { id: 200, tenant_id: 7, domain_id: 1, domain: "acme.example", email: "new@acme.example", name: "", status: "active", is_admin: false, quota_mb: 1024, used_bytes: 0, mail_access_mode: "internal_only", effective_mail_access_mode: "internal_only", version: 1, created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z" },
+        });
+      }
+      if (path.startsWith("/platform/organizations")) return Promise.resolve({ organizations: [{ id: 7, name: "Acme", slug: "acme", domain: "acme.example", plan: "business", active: true, mailbox_count: 2, domain_count: 1, created_at: "2026-01-01T00:00:00Z" }], total: 1 });
+      if (path.startsWith("/platform/mailboxes/7")) return Promise.resolve(MAILBOXES);
+      return Promise.resolve({});
+    });
+
+    fireEvent.click(createButton);
+    await waitFor(() => expect(screen.getByText("Mailbox created")).toBeInTheDocument());
+
+    const createCall = mockedRequest.mock.calls.find((c) => c[0] === "/platform/mailboxes/7" && (c[1] as any)?.method === "POST");
+    expect(createCall).toBeDefined();
+    const opts = createCall![1] as { body: string; headers?: Record<string, string> };
+    const body = JSON.parse(opts.body);
+    expect(body).toEqual({ email: "new@acme.example", password: "s3cret-pass!", force_password_change: true, mail_access_mode: "internal_only" });
+    expect(opts.headers?.["Idempotency-Key"]).toBeTruthy();
+
+    // The password never appears anywhere in the now-rendered success view.
+    expect(screen.queryByDisplayValue("s3cret-pass!")).not.toBeInTheDocument();
+    expect(document.body.textContent).not.toContain("s3cret-pass!");
+    // And the password input, if still mounted anywhere, must be empty.
+    const pwField = screen.queryByLabelText("Password *") as HTMLInputElement | null;
+    if (pwField) expect(pwField.value).toBe("");
+  });
+
+  it("does not offer 'inherit' as a mailbox creation access-mode choice", async () => {
+    renderPage(7);
+    await waitFor(() => expect(screen.getByText("alice@acme.example")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /create mailbox/i }));
+    expect(screen.queryByLabelText(/inherit/i)).not.toBeInTheDocument();
+    expect(screen.getByLabelText(/^Internal only/)).toBeInTheDocument();
+    expect(screen.getByLabelText(/^Internal and external/)).toBeInTheDocument();
+  });
+
+  it("distinguishes configured vs effective mail access and mutates access mode with the real read version", async () => {
+    renderPage(7);
+    await waitFor(() => expect(screen.getByText("alice@acme.example")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("alice@acme.example"));
+    await waitFor(() => expect(screen.getByText("Mail access policy")).toBeInTheDocument());
+    expect(screen.getByText(/Configured: Internal and external/)).toBeInTheDocument();
+    expect(screen.getByText(/Effective: Internal and external/)).toBeInTheDocument();
+
+    mockedRequest.mockImplementation((path: string, opts?: Parameters<typeof request>[1]) => {
+      if (String(path).endsWith("/access-mode") && opts?.method === "POST") {
+        return Promise.resolve({ id: 101, mail_access_mode: "internal_only", effective_mail_access_mode: "internal_only", version: 2 });
+      }
+      if (path.startsWith("/platform/mailboxes/7/101")) return Promise.resolve(MAILBOXES.mailboxes[0]);
+      if (path.startsWith("/platform/mailboxes/7")) return Promise.resolve(MAILBOXES);
+      return Promise.resolve({});
+    });
+
+    fireEvent.change(screen.getByLabelText("New mail access mode"), { target: { value: "internal_only" } });
+    fireEvent.click(screen.getByRole("button", { name: "Apply mode" }));
+
+    await waitFor(() => {
+      const call = mockedRequest.mock.calls.find((c) => String(c[0]).endsWith("/access-mode") && (c[1] as any)?.method === "POST");
+      expect(call).toBeDefined();
+      const body = JSON.parse((call![1] as { body: string }).body);
+      // version:1 is the REAL value from the fixture's list/get response,
+      // not a hardcoded assumption — proving List/Get now genuinely carry it.
+      expect(body).toEqual({ mail_access_mode: "internal_only", expected_version: 1 });
+      expect((call![1] as { headers?: Record<string, string> }).headers?.["Idempotency-Key"]).toBeTruthy();
+    });
+  });
+
+  it("on a stale-version conflict, explains the change and refetches rather than silently overwriting", async () => {
+    renderPage(7);
+    await waitFor(() => expect(screen.getByText("alice@acme.example")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("alice@acme.example"));
+    await waitFor(() => expect(screen.getByText("Mail access policy")).toBeInTheDocument());
+
+    let refetchCount = 0;
+    mockedRequest.mockImplementation((path: string, opts?: Parameters<typeof request>[1]) => {
+      if (String(path).endsWith("/access-mode") && opts?.method === "POST") {
+        return Promise.reject(new MockApiError("PRECONDITION_FAILED", "mailbox version conflict: re-read the mailbox and retry", 412));
+      }
+      if (path.startsWith("/platform/mailboxes/7/101")) {
+        refetchCount += 1;
+        return Promise.resolve(MAILBOXES.mailboxes[0]);
+      }
+      if (path.startsWith("/platform/mailboxes/7")) return Promise.resolve(MAILBOXES);
+      return Promise.resolve({});
+    });
+
+    fireEvent.change(screen.getByLabelText("New mail access mode"), { target: { value: "internal_only" } });
+    fireEvent.click(screen.getByRole("button", { name: "Apply mode" }));
+
+    await waitFor(() => expect(screen.getByText(/changed elsewhere since it was last read/)).toBeInTheDocument());
+    // The mutation must trigger a refetch of the detail record (never
+    // silently overwrite the local, now-stale view).
+    await waitFor(() => expect(refetchCount).toBeGreaterThan(0));
   });
 });

@@ -7,13 +7,14 @@ import { usePlatformMailbox } from "../queries";
 import {
   useDeleteMailboxMutation,
   useResetMailboxPasswordMutation,
+  useSetMailboxAccessModeMutation,
   useSetMailboxQuotaMutation,
   useSetMailboxStatusMutation,
 } from "../mutations";
-import { allowedMailboxTransitions, formatBytes, mailboxStatusLabel, mailboxStatusTone } from "../formatters";
-import { mailboxPurgeConfirmation } from "../contract";
+import { allowedMailboxTransitions, formatBytes, mailAccessModeLabel, mailboxStatusLabel, mailboxStatusTone } from "../formatters";
+import { mailboxPurgeConfirmation, MAILBOX_ACCESS_MODE_OPTIONS, type MailAccessMode } from "../contract";
 import PasswordResetDialog from "./PasswordResetDialog";
-import { safeErrorInfo } from "../../errors";
+import { safeErrorInfo, errorCodeOf } from "../../errors";
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
@@ -37,14 +38,17 @@ export default function MailboxDetailDrawer({
   const statusMut = useSetMailboxStatusMutation(tenantId);
   const quotaMut = useSetMailboxQuotaMutation(tenantId);
   const deleteMut = useDeleteMailboxMutation(tenantId);
+  const accessModeMut = useSetMailboxAccessModeMutation(tenantId);
 
   const [statusDraft, setStatusDraft] = useState("");
   const [quotaDraft, setQuotaDraft] = useState("");
+  const [accessModeDraft, setAccessModeDraft] = useState<MailAccessMode | "">("");
+  const [accessModeConflict, setAccessModeConflict] = useState(false);
   const [showPasswordReset, setShowPasswordReset] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [mutationError, setMutationError] = useState<unknown>(null);
 
-  const submitting = statusMut.isPending || quotaMut.isPending || deleteMut.isPending;
+  const submitting = statusMut.isPending || quotaMut.isPending || deleteMut.isPending || accessModeMut.isPending;
   const transitions = mailbox ? allowedMailboxTransitions(mailbox.status) : [];
 
   return (
@@ -88,6 +92,8 @@ export default function MailboxDetailDrawer({
                 <Field label="Quota">{mailbox.quota_mb > 0 ? `${mailbox.quota_mb} MB` : "unlimited"}</Field>
                 <Field label="Used">{formatBytes(mailbox.used_bytes)}</Field>
                 <Field label="Created">{new Date(mailbox.created_at).toLocaleString()}</Field>
+                <Field label="Configured mail access">{mailAccessModeLabel(mailbox.mail_access_mode)}</Field>
+                <Field label="Effective mail access">{mailAccessModeLabel(mailbox.effective_mail_access_mode)}</Field>
               </dl>
 
               {mailbox.status !== "deleted" && (
@@ -152,6 +158,52 @@ export default function MailboxDetailDrawer({
                         className="px-3 py-1.5 text-sm rounded bg-[var(--accent)] text-white disabled:opacity-40"
                       >
                         {quotaMut.isPending ? "Saving…" : "Set quota"}
+                      </button>
+                    </div>
+                  </section>
+
+                  {/* Mail-access policy — guarded by real optimistic concurrency */}
+                  <section aria-label="Mail access policy" className="border border-[var(--border)] rounded-lg p-4">
+                    <h3 className="text-sm font-semibold text-[var(--text-primary)] mb-2">Mail access policy</h3>
+                    <p className="text-xs text-[var(--text-secondary)] mb-2">
+                      Configured: {mailAccessModeLabel(mailbox.mail_access_mode)} · Effective: {mailAccessModeLabel(mailbox.effective_mail_access_mode)}
+                    </p>
+                    {accessModeConflict && (
+                      <p className="text-xs text-[var(--warning)] mb-2" role="alert">
+                        This mailbox changed elsewhere since it was last read. The record has been refreshed — review the
+                        current policy before trying again.
+                      </p>
+                    )}
+                    <div className="flex flex-wrap items-center gap-2">
+                      <select
+                        aria-label="New mail access mode"
+                        value={accessModeDraft}
+                        onChange={(e) => setAccessModeDraft(e.target.value as MailAccessMode)}
+                        className="px-3 py-1.5 bg-[var(--bg-elevated)] border border-[var(--border)] rounded text-sm text-[var(--text-primary)]"
+                      >
+                        <option value="">— Choose mode —</option>
+                        {MAILBOX_ACCESS_MODE_OPTIONS.map((o) => (
+                          <option key={o.value} value={o.value}>{o.label}</option>
+                        ))}
+                      </select>
+                      <button
+                        type="button"
+                        disabled={!accessModeDraft || submitting}
+                        onClick={() =>
+                          accessModeMut.mutate(
+                            { id: mailbox.id, mailAccessMode: accessModeDraft as MailAccessMode, expectedVersion: mailbox.version, idempotencyKey: crypto.randomUUID() },
+                            {
+                              onSuccess: () => { setAccessModeDraft(""); setAccessModeConflict(false); },
+                              onError: (e) => {
+                                setMutationError(e);
+                                if (errorCodeOf(e) === "PRECONDITION_FAILED") setAccessModeConflict(true);
+                              },
+                            },
+                          )
+                        }
+                        className="px-3 py-1.5 text-sm rounded bg-[var(--accent)] text-white disabled:opacity-40"
+                      >
+                        {accessModeMut.isPending ? "Saving…" : "Apply mode"}
                       </button>
                     </div>
                   </section>
