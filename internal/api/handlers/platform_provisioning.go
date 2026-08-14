@@ -140,6 +140,102 @@ func mapDNSPlanRequirements(plan *dnsops.Plan) []mailcontrol.PlatformDNSRequirem
 	return out
 }
 
+// ── Platform mailbox creation ──────────────────────────────────────
+
+// CreatePlatformMailbox handles
+// POST /api/v1/platform/mailboxes/:tenant_id. mail_access_mode is
+// REQUIRED (internal_only | internal_external). The password is
+// hashed by the canonical Argon2id service and is NEVER included in
+// the response; sensitive mutations carry Cache-Control: no-store.
+func (h *Handler) CreatePlatformMailbox(c fiber.Ctx) error {
+	svc, err := h.mailControl()
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	// Sensitive mutation: never cache the response (applies to the
+	// live response AND any idempotent replay).
+	c.Set("Cache-Control", "no-store")
+	tenantID, err := parseTenantParam(c)
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	body, err := platformMutationBody(c)
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	var req mailcontrol.PlatformCreateMailboxRequest
+	if err := bindStrictJSONBytes(body, &req); err != nil {
+		return strictJSONError(c, err)
+	}
+	if strings.TrimSpace(req.Email) == "" {
+		return errorResponse(c, kernel.ValidationError(map[string]string{"email": "email is required"}))
+	}
+	if req.Password == "" {
+		return errorResponse(c, kernel.ValidationError(map[string]string{"password": "password is required"}))
+	}
+
+	actorID := h.platformActorID(c)
+	scope := "platform.mailbox.create:POST:/platform/mailboxes/" + strconv.FormatUint(uint64(tenantID), 10) + ":actor:" + strconv.FormatUint(uint64(actorID), 10)
+
+	return h.platformIdempotent(c, scope, func() (int, any, any, error) {
+		result, err := svc.CreateMailbox(c.Context(), req, tenantID, actorID)
+		if err != nil {
+			return 0, nil, nil, err
+		}
+		// The result contains no password and no hash — safe to store
+		// verbatim for idempotent replay.
+		return fiber.StatusCreated, result, result, nil
+	})
+}
+
+// SetPlatformMailboxAccessMode handles
+// POST /api/v1/platform/mailboxes/:tenant_id/:id/access-mode with
+// {"mail_access_mode": "...", "expected_version": N}. Ownership is
+// enforced in the SQL mutation predicate; a stale version is a
+// precondition failure; idempotent retries replay the original
+// result.
+func (h *Handler) SetPlatformMailboxAccessMode(c fiber.Ctx) error {
+	svc, err := h.mailControl()
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	// Sensitive mutation: never cache the response.
+	c.Set("Cache-Control", "no-store")
+	tenantID, err := parseTenantParam(c)
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	id, err := parseIDParam(c, "id")
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	body, err := platformMutationBody(c)
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	var req mailcontrol.PlatformSetMailboxAccessModeRequest
+	if err := bindStrictJSONBytes(body, &req); err != nil {
+		return strictJSONError(c, err)
+	}
+	if strings.TrimSpace(req.MailAccessMode) == "" {
+		return errorResponse(c, kernel.ValidationError(map[string]string{"mail_access_mode": "mail_access_mode is required"}))
+	}
+	if req.ExpectedVersion < 1 {
+		return errorResponse(c, kernel.ValidationError(map[string]string{"expected_version": "a positive expected_version is required"}))
+	}
+
+	actorID := h.platformActorID(c)
+	scope := "platform.mailbox.access_mode:POST:/platform/mailboxes/" + strconv.FormatUint(uint64(tenantID), 10) + "/" + strconv.FormatUint(uint64(id), 10) + "/access-mode:actor:" + strconv.FormatUint(uint64(actorID), 10)
+
+	return h.platformIdempotent(c, scope, func() (int, any, any, error) {
+		result, err := svc.SetMailboxAccessMode(c.Context(), id, tenantID, req, actorID)
+		if err != nil {
+			return 0, nil, nil, err
+		}
+		return fiber.StatusOK, result, result, nil
+	})
+}
+
 // bindStrictJSONBytes parses a raw body with DisallowUnknownFields
 // and rejects trailing data, exactly like bindStrictJSON but for a
 // pre-read body (so the size limit can be enforced first).

@@ -333,6 +333,132 @@ func (s *Service) SetMailAccessMode(ctx context.Context, id, tenantID uint, mode
 
 // ── Mailboxes ──────────────────────────────────────────────────────
 
+// CreateMailbox is the Platform Super Admin mailbox provisioning entry
+// point. It reuses the canonical admin mailbox service's transactional
+// creation (domain ownership + lifecycle eligibility, atomic domain
+// cap enforcement, quota bounds, Argon2id hashing through the shared
+// hasher, transactional audit, and in-transaction system-folder
+// provisioning). The platform layer adds: explicit tenant lifecycle
+// verification, the REQUIRED explicit mail-access mode, the operator
+// audit record, and the transactional outbox event. The password is
+// used once to derive the hash and is never returned or logged.
+func (s *Service) CreateMailbox(ctx context.Context, req PlatformCreateMailboxRequest, tenantID, actorID uint) (*PlatformCreateMailboxResult, error) {
+	if err := s.verifyTenantEligible(ctx, tenantID); err != nil {
+		return nil, err
+	}
+	// The platform route requires an explicit mode and accepts only
+	// the two concrete values. "inherit" is rejected here by design:
+	// platform provisioning must make an explicit per-mailbox decision.
+	mode, ok := adminmailbox.ParseMailAccessMode(req.MailAccessMode)
+	if !ok || mode == adminmailbox.MailAccessInherit {
+		return nil, kernel.ValidationError(map[string]string{"mail_access_mode": "must be internal_only or internal_external"})
+	}
+	modeStr := string(mode)
+
+	adminReq := adminmailbox.CreateMailboxRequest{
+		Email:               req.Email,
+		Name:                req.Name,
+		Password:            req.Password,
+		QuotaMB:             req.QuotaMB,
+		SendLimit:           req.SendLimitPerHour,
+		ForcePasswordChange: req.ForcePasswordChange,
+		MailAccessMode:      &modeStr,
+	}
+
+	created, err := s.mailboxes.CreateMailboxWithFolders(ctx, adminReq, tenantID)
+	if err != nil {
+		return nil, s.mapMailboxCreateError(err)
+	}
+
+	s.auditRecord(ctx, actorID, "platform.mailbox.create", fmt.Sprintf("mailbox:%d", created.Mailbox.ID), tenantID, "success", fmt.Sprintf("email:%s mode:%s", created.Mailbox.Email, modeStr))
+	if s.outbox != nil {
+		_ = s.outbox.Enqueue(ctx, s.repo.db, "platform.mailbox.provisioned", fmt.Sprintf("mailbox:%d", created.Mailbox.ID), map[string]any{
+			"mailbox_id":       created.Mailbox.ID,
+			"email":            created.Mailbox.Email,
+			"tenant_id":        tenantID,
+			"mail_access_mode": modeStr,
+		}, s.now())
+	}
+
+	return &PlatformCreateMailboxResult{
+		Mailbox: PlatformMailbox{
+			ID: created.Mailbox.ID, TenantID: tenantID, DomainID: created.Mailbox.DomainID,
+			Email: created.Mailbox.Email, Name: created.Mailbox.Name,
+			Status: string(created.Mailbox.Status), IsAdmin: created.Mailbox.IsAdmin,
+			QuotaMB: created.Mailbox.QuotaMB, UsedBytes: created.Mailbox.UsedBytes,
+			MailAccessMode:          created.Mailbox.MailAccessMode,
+			EffectiveMailAccessMode: created.Mailbox.EffectiveMailAccessMode,
+			CreatedAt:               created.Mailbox.CreatedAt, UpdatedAt: created.Mailbox.UpdatedAt,
+		},
+	}, nil
+}
+
+// mapMailboxCreateError maps canonical admin mailbox/domain errors to
+// the typed platform contract. Cross-tenant domain lookups resolve to
+// not-found without disclosing the other tenant.
+func (s *Service) mapMailboxCreateError(err error) error {
+	switch {
+	case errors.Is(err, adminmailbox.ErrInvalidEmail):
+		return kernel.ValidationError(map[string]string{"email": "invalid email address"})
+	case errors.Is(err, adminmailbox.ErrPasswordRequired):
+		return kernel.ValidationError(map[string]string{"password": "password is required"})
+	case errors.Is(err, adminmailbox.ErrMailboxExists):
+		return kernel.Conflict("mailbox already exists")
+	case errors.Is(err, adminmailbox.ErrInvalidQuota):
+		return kernel.ValidationError(map[string]string{"quota_mb": "invalid quota value"})
+	case errors.Is(err, admindomain.ErrDomainNotFound):
+		return kernel.NotFound("domain")
+	case errors.Is(err, admindomain.ErrDomainDisabled):
+		return kernel.Conflict("domain is disabled")
+	case errors.Is(err, admindomain.ErrDomainSuspended):
+		return kernel.Conflict("domain is suspended")
+	case errors.Is(err, admindomain.ErrDomainLocked):
+		return kernel.Conflict("domain is locked")
+	case errors.Is(err, admindomain.ErrDomainUnavailable):
+		return kernel.Conflict("domain is unavailable")
+	case errors.Is(err, admindomain.ErrMailboxLimitReached):
+		return kernel.QuotaExceeded("domain mailbox limit reached")
+	case errors.Is(err, admindomain.ErrQuotaExceedsDomain):
+		return kernel.QuotaExceeded("requested quota exceeds the domain maximum")
+	}
+	return kernel.Wrap(kernel.ErrCodeInternal, "platform mailbox provisioning failed", err)
+}
+
+// SetMailboxAccessMode is the guarded per-mailbox access-mode mutation.
+// Tenant ownership is enforced in the SQL mutation predicate; the
+// version guard provides optimistic concurrency; the canonical audit
+// record and the transactional outbox event provide evidence. A
+// cross-tenant id resolves to NOT_FOUND (zero rows affected, no
+// disclosure); a stale version resolves to a precondition failure.
+func (s *Service) SetMailboxAccessMode(ctx context.Context, id, tenantID uint, req PlatformSetMailboxAccessModeRequest, actorID uint) (*PlatformMailboxAccessModeResult, error) {
+	if err := s.requireTenant(tenantID); err != nil {
+		return nil, err
+	}
+	cfg, eff, newVersion, err := s.mailboxes.SetMailAccessMode(ctx, id, tenantID, req.MailAccessMode, req.ExpectedVersion)
+	if err != nil {
+		switch {
+		case errors.Is(err, adminmailbox.ErrMailboxNotFound):
+			return nil, kernel.NotFound("mailbox")
+		case errors.Is(err, adminmailbox.ErrMailboxVersionConflict):
+			return nil, kernel.NewError(kernel.ErrCodePreconditionFail, "mailbox version conflict: re-read the mailbox and retry")
+		case errors.Is(err, adminmailbox.ErrInvalidMailAccessMode):
+			return nil, kernel.ValidationError(map[string]string{"mail_access_mode": "must be inherit, internal_only, or internal_external"})
+		}
+		return nil, kernel.Wrap(kernel.ErrCodeInternal, "set mailbox access mode", err)
+	}
+	s.auditRecord(ctx, actorID, "platform.mailbox.access_mode", fmt.Sprintf("mailbox:%d mode:%s version:%d", id, cfg, newVersion), tenantID, "success", "")
+	if s.outbox != nil {
+		_ = s.outbox.Enqueue(ctx, s.repo.db, "mailbox.access_mode.changed", fmt.Sprintf("mailbox:%d", id), map[string]any{
+			"mailbox_id":       id,
+			"tenant_id":        tenantID,
+			"mail_access_mode": cfg,
+		}, s.now())
+	}
+	return &PlatformMailboxAccessModeResult{
+		ID: id, MailAccessMode: cfg, EffectiveMailAccessMode: eff, Version: newVersion,
+	}, nil
+}
+
 func (s *Service) ListMailboxes(ctx context.Context, f PlatformMailboxFilter) (*PlatformMailboxList, error) {
 	if err := s.requireTenant(f.TenantID); err != nil {
 		return nil, err
@@ -355,13 +481,35 @@ func (s *Service) ListMailboxes(ctx context.Context, f PlatformMailboxFilter) (*
 	}
 	out := make([]PlatformMailbox, 0, len(boxes))
 	for _, m := range boxes {
-		out = append(out, PlatformMailbox{
-			ID: m.ID, TenantID: f.TenantID, DomainID: m.DomainID, Email: m.Email, Name: m.Name,
-			Status: string(m.Status), IsAdmin: m.IsAdmin, QuotaMB: m.QuotaMB, UsedBytes: m.UsedBytes,
-			CreatedAt: m.CreatedAt, UpdatedAt: m.UpdatedAt,
-		})
+		out = append(out, s.projectMailbox(m, f.TenantID))
 	}
 	return &PlatformMailboxList{Mailboxes: out, Total: total, Limit: sanitizeLimit(f.Limit), Offset: f.Offset}, nil
+}
+
+// projectMailbox maps an admin mailbox into the platform contract,
+// attaching the configured and effective mail-access modes.
+func (s *Service) projectMailbox(m adminmailbox.AdminMailbox, tenantID uint) PlatformMailbox {
+	effective := m.EffectiveMailAccessMode
+	if effective == "" {
+		effective = string(adminmailbox.MailAccessInherit)
+	}
+	// Best-effort effective-mode resolution for reads that predate the
+	// field (the service attaches it on Get; List keeps it cheap).
+	if m.EffectiveMailAccessMode == "" {
+		if _, eff, _, err := s.mailboxes.MailAccessModeState(context.Background(), m.ID, tenantID); err == nil && eff != "" {
+			effective = eff
+		}
+	}
+	configured := m.MailAccessMode
+	if configured == "" {
+		configured = string(adminmailbox.MailAccessInherit)
+	}
+	return PlatformMailbox{
+		ID: m.ID, TenantID: tenantID, DomainID: m.DomainID, Email: m.Email, Name: m.Name,
+		Status: string(m.Status), IsAdmin: m.IsAdmin, QuotaMB: m.QuotaMB, UsedBytes: m.UsedBytes,
+		MailAccessMode: configured, EffectiveMailAccessMode: effective,
+		CreatedAt: m.CreatedAt, UpdatedAt: m.UpdatedAt,
+	}
 }
 
 func (s *Service) GetMailbox(ctx context.Context, id, tenantID uint) (*PlatformMailbox, error) {
@@ -381,7 +529,9 @@ func (s *Service) GetMailbox(ctx context.Context, id, tenantID uint) (*PlatformM
 	return &PlatformMailbox{
 		ID: m.ID, TenantID: tenantID, DomainID: m.DomainID, Email: m.Email, Name: m.Name,
 		Status: string(m.Status), IsAdmin: m.IsAdmin, QuotaMB: m.QuotaMB, UsedBytes: m.UsedBytes,
-		CreatedAt: m.CreatedAt, UpdatedAt: m.UpdatedAt,
+		MailAccessMode:          m.MailAccessMode,
+		EffectiveMailAccessMode: m.EffectiveMailAccessMode,
+		CreatedAt:               m.CreatedAt, UpdatedAt: m.UpdatedAt,
 	}, nil
 }
 

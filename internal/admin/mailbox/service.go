@@ -426,6 +426,23 @@ func (s *Service) hashPassword(password string) (string, error) {
 	return hash, nil
 }
 
+// MailAccessModeState is a read-only passthrough exposing the
+// configured + effective access mode and the current version for a
+// mailbox. It is tenant-scoped exactly like every other read.
+func (s *Service) MailAccessModeState(ctx context.Context, id, tenantID uint) (configured, effective string, version int, err error) {
+	configured, effective, version, err = s.repo.GetMailAccessModeState(ctx, id, tenantID)
+	if err != nil {
+		return "", "", 0, err
+	}
+	if configured == "" {
+		configured = string(MailAccessInherit)
+	}
+	if effective == "" {
+		effective = string(MailAccessInternalExternal)
+	}
+	return configured, effective, version, nil
+}
+
 // SetMailAccessMode is the guarded per-mailbox access-mode mutation.
 // It validates the mode, re-verifies tenant ownership INSIDE the SQL
 // predicate, applies optimistic concurrency via expectedVersion, and

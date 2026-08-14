@@ -61,18 +61,24 @@ type PlatformDomainFilter struct {
 // ── Platform mailbox views ─────────────────────────────────────────
 
 type PlatformMailbox struct {
-	ID         uint      `json:"id"`
-	TenantID   uint      `json:"tenant_id"`
-	DomainID   uint      `json:"domain_id"`
-	DomainName string    `json:"domain"`
-	Email      string    `json:"email"`
-	Name       string    `json:"name"`
-	Status     string    `json:"status"`
-	IsAdmin    bool      `json:"is_admin"`
-	QuotaMB    int64     `json:"quota_mb"`
-	UsedBytes  int64     `json:"used_bytes"`
-	CreatedAt  time.Time `json:"created_at"`
-	UpdatedAt  time.Time `json:"updated_at"`
+	ID         uint   `json:"id"`
+	TenantID   uint   `json:"tenant_id"`
+	DomainID   uint   `json:"domain_id"`
+	DomainName string `json:"domain"`
+	Email      string `json:"email"`
+	Name       string `json:"name"`
+	Status     string `json:"status"`
+	IsAdmin    bool   `json:"is_admin"`
+	QuotaMB    int64  `json:"quota_mb"`
+	UsedBytes  int64  `json:"used_bytes"`
+	// MailAccessMode is the CONFIGURED per-mailbox policy;
+	// EffectiveMailAccessMode is the RESOLVED policy after inherit
+	// falls back to the domain. The two are distinct fields so they
+	// can never be confused.
+	MailAccessMode          string    `json:"mail_access_mode"`
+	EffectiveMailAccessMode string    `json:"effective_mail_access_mode"`
+	CreatedAt               time.Time `json:"created_at"`
+	UpdatedAt               time.Time `json:"updated_at"`
 }
 
 type PlatformMailboxList struct {
@@ -89,6 +95,51 @@ type PlatformMailboxFilter struct {
 	Status   string
 	Limit    int
 	Offset   int
+}
+
+// ── Platform mailbox creation ──────────────────────────────────────
+
+// PlatformCreateMailboxRequest is the Platform Super Admin mailbox
+// creation contract (POST /api/v1/platform/mailboxes/:tenant_id).
+// mail_access_mode is REQUIRED on this route and accepts only
+// internal_only or internal_external — "inherit" is deliberately not
+// accepted here because the whole point of the platform route is an
+// explicit per-mailbox decision. Tenant-admin and Public API create
+// paths keep omitting the field (persisting inherit) unchanged.
+type PlatformCreateMailboxRequest struct {
+	Email               string `json:"email"`
+	Name                string `json:"name,omitempty"`
+	Password            string `json:"password"`
+	QuotaMB             int64  `json:"quota_mb,omitempty"`
+	SendLimitPerHour    int    `json:"send_limit_per_hour,omitempty"`
+	ForcePasswordChange bool   `json:"force_password_change,omitempty"`
+	MailAccessMode      string `json:"mail_access_mode"`
+}
+
+// PlatformCreateMailboxResult is the safe post-create contract. It
+// NEVER carries the password (or any hash): the caller-supplied
+// password is used once to derive the Argon2id hash and is never
+// stored, logged, or returned.
+type PlatformCreateMailboxResult struct {
+	Mailbox PlatformMailbox `json:"mailbox"`
+}
+
+// PlatformSetMailboxAccessModeRequest is the guarded access-mode
+// mutation body. expected_version is the mailbox's current version
+// from a prior read; a stale value is a precondition failure.
+type PlatformSetMailboxAccessModeRequest struct {
+	MailAccessMode  string `json:"mail_access_mode"`
+	ExpectedVersion int    `json:"expected_version"`
+}
+
+// PlatformMailboxAccessModeResult reports the post-mutation state:
+// the configured value and the resolved effective value, which must
+// never be confused.
+type PlatformMailboxAccessModeResult struct {
+	ID                      uint   `json:"id"`
+	MailAccessMode          string `json:"mail_access_mode"`
+	EffectiveMailAccessMode string `json:"effective_mail_access_mode"`
+	Version                 int    `json:"version"`
 }
 
 // ── Platform alias views ───────────────────────────────────────────

@@ -1938,6 +1938,8 @@ func (r *Router) setupRoutes() {
 
 	protected.Get("/platform/mailboxes/:tenant_id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermMailboxesRead), r.h.ListPlatformMailboxes)
 	protected.Get("/platform/mailboxes/:tenant_id/:id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermMailboxesRead), r.h.GetPlatformMailbox)
+	protected.Post("/platform/mailboxes/:tenant_id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermMailboxesWrite), r.h.CreatePlatformMailbox)
+	protected.Post("/platform/mailboxes/:tenant_id/:id/access-mode", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermMailboxesWrite), r.h.SetPlatformMailboxAccessMode)
 	protected.Post("/platform/mailboxes/:tenant_id/:id/status", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermMailboxesWrite), r.h.SetPlatformMailboxStatus)
 	protected.Post("/platform/mailboxes/:tenant_id/:id/quota", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermMailboxesWrite), r.h.SetPlatformMailboxQuota)
 	protected.Post("/platform/mailboxes/:tenant_id/:id/reset-password", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermMailboxesWrite), r.h.ResetPlatformMailboxPassword)
