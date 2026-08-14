@@ -210,6 +210,26 @@ func (s *Service) GetJobWithRows(ctx context.Context, jobID, tenantID uint) (*Jo
 	return job, rows, nil
 }
 
+// ListRowsPage is the bounded, paginated row-result read the HTTP
+// report endpoint uses.
+func (s *Service) ListRowsPage(ctx context.Context, jobID uint, limit, offset int) ([]Row, int, error) {
+	rows, total, err := s.repo.ListRowsPage(ctx, jobID, nil, limit, offset)
+	if err != nil {
+		return nil, 0, kernel.Wrap(kernel.ErrCodeInternal, "list import rows", err)
+	}
+	return rows, total, nil
+}
+
+// ListJobs is the bounded, paginated tenant job list the HTTP list
+// endpoint uses.
+func (s *Service) ListJobs(ctx context.Context, tenantID uint, limit, offset int) ([]Job, int, error) {
+	jobs, total, err := s.repo.ListJobs(ctx, tenantID, limit, offset)
+	if err != nil {
+		return nil, 0, kernel.Wrap(kernel.ErrCodeInternal, "list import jobs", err)
+	}
+	return jobs, total, nil
+}
+
 // CreateJob persists a validated import as a durable job (state
 // "ready" if every row validated, "failed" if none did) — this is the
 // hand-off point between the pure dry-run above and the stateful,

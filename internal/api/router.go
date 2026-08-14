@@ -355,6 +355,25 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 				bulkProvisionSvc := bulkprovision.NewService(bulkProvisionRepo, mailboxAdminSvc, domainAdminSvc, router.platformIdem, outboxRepo, auditExtendedStore, nil)
 				router.bulkProvisionSvc = bulkProvisionSvc
 				router.h.SetBulkProvisionService(bulkProvisionSvc)
+
+				// Bulk mailbox uploads are staged through the SAME confined
+				// staging primitive internal/platform/importer already
+				// implements (confined paths, random server-generated IDs,
+				// atomic fsync+rename writes, symlink rejection, hash
+				// verification) — a dedicated subdirectory, not a second
+				// staging subsystem.
+				bulkStagingDir := cfg.Imports.StagingDir
+				if bulkStagingDir == "" {
+					bulkStagingDir = filepath.Join(os.TempDir(), "orvix-imports")
+				}
+				bulkStagingDir = filepath.Join(bulkStagingDir, "bulk-mailboxes")
+				if err := os.MkdirAll(bulkStagingDir, 0o700); err != nil {
+					logger.Warn("bulk mailbox staging directory could not be created; staging disabled", zap.Error(err))
+				} else if bulkStaging, err := platformimporter.NewStagingService(bulkStagingDir); err != nil {
+					logger.Warn("bulk mailbox staging initialization failed; staging disabled", zap.Error(err))
+				} else {
+					router.h.SetBulkMailboxStaging(bulkStaging)
+				}
 			}
 
 			relayRepo, relayRepoErr := relay.NewRepositoryChecked(sqlDB)
@@ -1971,6 +1990,18 @@ func (r *Router) setupRoutes() {
 	protected.Post("/platform/mailboxes/:tenant_id/:id/reset-password", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermMailboxesWrite), r.h.ResetPlatformMailboxPassword)
 	protected.Delete("/platform/mailboxes/:tenant_id/:id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermMailboxesWrite), r.h.DeletePlatformMailbox)
 	protected.Post("/platform/mailboxes/:tenant_id/bulk/status", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermMailboxesWrite), r.h.BulkPlatformMailboxStatus)
+
+	// ── Platform bulk mailbox provisioning (Stage 8) ─────────────
+	protected.Get("/platform/mailboxes/bulk/template", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermMailboxesRead), r.h.GetPlatformBulkMailboxTemplate)
+	protected.Post("/platform/mailboxes/bulk/:tenant_id/stage", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermMailboxesWrite), r.h.PostPlatformBulkMailboxStage)
+	protected.Post("/platform/mailboxes/bulk/:tenant_id/validate", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermMailboxesWrite), r.h.PostPlatformBulkMailboxValidate)
+	protected.Post("/platform/mailboxes/bulk/:tenant_id/jobs", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermMailboxesWrite), r.h.PostPlatformBulkMailboxCreateJob)
+	protected.Get("/platform/mailboxes/bulk/:tenant_id/jobs", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermMailboxesRead), r.h.GetPlatformBulkMailboxJobs)
+	protected.Get("/platform/mailboxes/bulk/:tenant_id/jobs/:jobId", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermMailboxesRead), r.h.GetPlatformBulkMailboxJob)
+	protected.Get("/platform/mailboxes/bulk/:tenant_id/jobs/:jobId/rows", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermMailboxesRead), r.h.GetPlatformBulkMailboxJobRows)
+	protected.Post("/platform/mailboxes/bulk/:tenant_id/jobs/:jobId/execute", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermMailboxesWrite), r.h.PostPlatformBulkMailboxExecute)
+	protected.Post("/platform/mailboxes/bulk/:tenant_id/jobs/:jobId/cancel", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermMailboxesWrite), r.h.PostPlatformBulkMailboxCancel)
+	protected.Post("/platform/mailboxes/bulk/:tenant_id/jobs/:jobId/retry", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermMailboxesWrite), r.h.PostPlatformBulkMailboxRetry)
 
 	protected.Get("/platform/aliases/:tenant_id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermAliasesRead), r.h.ListPlatformAliases)
 	protected.Get("/platform/aliases/:tenant_id/:id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermAliasesRead), r.h.GetPlatformAlias)

@@ -38,7 +38,7 @@ var errInvalidImportJobPayload = errors.New("invalid bulk mailbox import job pay
 func RegisterImportJob(registry *jobs.Registry, svc *Service) error {
 	return registry.Register(jobs.Definition{
 		Type:           ImportJobType,
-		Scope:          jobs.ScopePlatform,
+		Scope:          jobs.ScopeTenant,
 		PayloadVersion: ImportJobPayloadVersion,
 		// Generous: a single batch of DefaultBatchSize mailbox creations
 		// (each doing real password hashing + folder provisioning) can
