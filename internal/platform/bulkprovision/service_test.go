@@ -142,9 +142,9 @@ func TestParseJSON_ParsesArray(t *testing.T) {
 
 func TestValidate_DetectsDuplicateInFile(t *testing.T) {
 	_, repo := newTestRepo(t)
-	svc := NewService(repo, newFakeMailboxes(0), fakeAccessMode{domain.MailAccessInternalExternal}, nil, nil, nil)
+	svc := NewService(repo, newFakeMailboxes(0), fakeAccessMode{domain.MailAccessInternalExternal}, nil, nil, nil, nil)
 	raw := []RawRow{{RowNumber: 2, Email: "dup@x.test"}, {RowNumber: 3, Email: "DUP@x.test"}}
-	res, err := svc.Validate(context.Background(), 1, 1, "x.test", raw)
+	res, err := svc.Validate(context.Background(), 1, 1, "x.test", "test-hash", raw)
 	if err != nil {
 		t.Fatalf("validate: %v", err)
 	}
@@ -160,8 +160,8 @@ func TestValidate_DetectsDuplicateInDatabase(t *testing.T) {
 	_, repo := newTestRepo(t)
 	fm := newFakeMailboxes(0)
 	fm.byEmail["existing@x.test"] = 1
-	svc := NewService(repo, fm, fakeAccessMode{domain.MailAccessInternalExternal}, nil, nil, nil)
-	res, err := svc.Validate(context.Background(), 1, 1, "x.test", []RawRow{{RowNumber: 2, Email: "existing@x.test"}})
+	svc := NewService(repo, fm, fakeAccessMode{domain.MailAccessInternalExternal}, nil, nil, nil, nil)
+	res, err := svc.Validate(context.Background(), 1, 1, "x.test", "test-hash", []RawRow{{RowNumber: 2, Email: "existing@x.test"}})
 	if err != nil {
 		t.Fatalf("validate: %v", err)
 	}
@@ -172,8 +172,8 @@ func TestValidate_DetectsDuplicateInDatabase(t *testing.T) {
 
 func TestValidate_RejectsInvalidEmail(t *testing.T) {
 	_, repo := newTestRepo(t)
-	svc := NewService(repo, newFakeMailboxes(0), fakeAccessMode{domain.MailAccessInternalExternal}, nil, nil, nil)
-	res, err := svc.Validate(context.Background(), 1, 1, "x.test", []RawRow{{RowNumber: 2, Email: "not-an-email"}})
+	svc := NewService(repo, newFakeMailboxes(0), fakeAccessMode{domain.MailAccessInternalExternal}, nil, nil, nil, nil)
+	res, err := svc.Validate(context.Background(), 1, 1, "x.test", "test-hash", []RawRow{{RowNumber: 2, Email: "not-an-email"}})
 	if err != nil {
 		t.Fatalf("validate: %v", err)
 	}
@@ -184,8 +184,8 @@ func TestValidate_RejectsInvalidEmail(t *testing.T) {
 
 func TestValidate_EmptyFileIsRejected(t *testing.T) {
 	_, repo := newTestRepo(t)
-	svc := NewService(repo, newFakeMailboxes(0), fakeAccessMode{domain.MailAccessInternalExternal}, nil, nil, nil)
-	if _, err := svc.Validate(context.Background(), 1, 1, "x.test", nil); err != ErrEmptyFile {
+	svc := NewService(repo, newFakeMailboxes(0), fakeAccessMode{domain.MailAccessInternalExternal}, nil, nil, nil, nil)
+	if _, err := svc.Validate(context.Background(), 1, 1, "x.test", "test-hash", nil); err != ErrEmptyFile {
 		t.Fatalf("expected ErrEmptyFile, got %v", err)
 	}
 }
@@ -195,14 +195,14 @@ func TestValidate_EmptyFileIsRejected(t *testing.T) {
 func TestExecute_PartialStrategyIsolatesRowFailures(t *testing.T) {
 	_, repo := newTestRepo(t)
 	fm := newFakeMailboxes(0)
-	svc := NewService(repo, fm, fakeAccessMode{domain.MailAccessInternalExternal}, nil, nil, nil)
+	svc := NewService(repo, fm, fakeAccessMode{domain.MailAccessInternalExternal}, nil, nil, nil, nil)
 	ctx := context.Background()
 
-	res, err := svc.Validate(ctx, 1, 1, "x.test", []RawRow{{RowNumber: 2, Email: "a@x.test"}, {RowNumber: 3, Email: "b@x.test"}})
+	res, err := svc.Validate(ctx, 1, 1, "x.test", "test-hash", []RawRow{{RowNumber: 2, Email: "a@x.test"}, {RowNumber: 3, Email: "b@x.test"}})
 	if err != nil {
 		t.Fatalf("validate: %v", err)
 	}
-	job, err := svc.CreateJob(ctx, 1, 1, 99, StrategyPartial, "", res)
+	job, err := svc.CreateJob(ctx, 1, 1, 99, StrategyPartial, ConflictFail, "", res)
 	if err != nil {
 		t.Fatalf("create job: %v", err)
 	}
@@ -212,7 +212,7 @@ func TestExecute_PartialStrategyIsolatesRowFailures(t *testing.T) {
 	// after validation).
 	fm.byEmail["b@x.test"] = 999
 
-	finalJob, rows, err := svc.Execute(ctx, job.ID, 1, 1, "x.test")
+	finalJob, rows, err := svc.Execute(ctx, job.ID, 1, 1, "x.test", "test-hash", nil)
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -242,20 +242,20 @@ func TestExecute_PartialStrategyIsolatesRowFailures(t *testing.T) {
 func TestExecute_AtomicStrategyRollsBackAllOnAnyFailure(t *testing.T) {
 	_, repo := newTestRepo(t)
 	fm := newFakeMailboxes(0)
-	svc := NewService(repo, fm, fakeAccessMode{domain.MailAccessInternalExternal}, nil, nil, nil)
+	svc := NewService(repo, fm, fakeAccessMode{domain.MailAccessInternalExternal}, nil, nil, nil, nil)
 	ctx := context.Background()
 
-	res, err := svc.Validate(ctx, 1, 1, "x.test", []RawRow{{RowNumber: 2, Email: "a@x.test"}, {RowNumber: 3, Email: "b@x.test"}})
+	res, err := svc.Validate(ctx, 1, 1, "x.test", "test-hash", []RawRow{{RowNumber: 2, Email: "a@x.test"}, {RowNumber: 3, Email: "b@x.test"}})
 	if err != nil {
 		t.Fatalf("validate: %v", err)
 	}
-	job, err := svc.CreateJob(ctx, 1, 1, 99, StrategyAtomic, "", res)
+	job, err := svc.CreateJob(ctx, 1, 1, 99, StrategyAtomic, ConflictFail, "", res)
 	if err != nil {
 		t.Fatalf("create job: %v", err)
 	}
 	fm.byEmail["b@x.test"] = 999 // sabotage the second row
 
-	finalJob, _, err := svc.Execute(ctx, job.ID, 1, 1, "x.test")
+	finalJob, _, err := svc.Execute(ctx, job.ID, 1, 1, "x.test", "test-hash", nil)
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -275,18 +275,18 @@ func TestExecute_AtomicStrategyRollsBackAllOnAnyFailure(t *testing.T) {
 
 func TestCreateJob_SameIdempotencyKeyReturnsSameJob(t *testing.T) {
 	_, repo := newTestRepo(t)
-	svc := NewService(repo, newFakeMailboxes(0), fakeAccessMode{domain.MailAccessInternalExternal}, nil, nil, nil)
+	svc := NewService(repo, newFakeMailboxes(0), fakeAccessMode{domain.MailAccessInternalExternal}, nil, nil, nil, nil)
 	ctx := context.Background()
 
-	res, err := svc.Validate(ctx, 1, 1, "x.test", []RawRow{{RowNumber: 2, Email: "a@x.test"}})
+	res, err := svc.Validate(ctx, 1, 1, "x.test", "test-hash", []RawRow{{RowNumber: 2, Email: "a@x.test"}})
 	if err != nil {
 		t.Fatalf("validate: %v", err)
 	}
-	job1, err := svc.CreateJob(ctx, 1, 1, 99, StrategyPartial, "retry-key-1", res)
+	job1, err := svc.CreateJob(ctx, 1, 1, 99, StrategyPartial, ConflictFail, "retry-key-1", res)
 	if err != nil {
 		t.Fatalf("create job 1: %v", err)
 	}
-	job2, err := svc.CreateJob(ctx, 1, 1, 99, StrategyPartial, "retry-key-1", res)
+	job2, err := svc.CreateJob(ctx, 1, 1, 99, StrategyPartial, ConflictFail, "retry-key-1", res)
 	if err != nil {
 		t.Fatalf("create job 2: %v", err)
 	}
@@ -299,10 +299,10 @@ func TestCreateJob_SameIdempotencyKeyReturnsSameJob(t *testing.T) {
 
 func TestCancel_ReadyJobCanBeCancelled(t *testing.T) {
 	_, repo := newTestRepo(t)
-	svc := NewService(repo, newFakeMailboxes(0), fakeAccessMode{domain.MailAccessInternalExternal}, nil, nil, nil)
+	svc := NewService(repo, newFakeMailboxes(0), fakeAccessMode{domain.MailAccessInternalExternal}, nil, nil, nil, nil)
 	ctx := context.Background()
-	res, _ := svc.Validate(ctx, 1, 1, "x.test", []RawRow{{RowNumber: 2, Email: "a@x.test"}})
-	job, _ := svc.CreateJob(ctx, 1, 1, 99, StrategyPartial, "", res)
+	res, _ := svc.Validate(ctx, 1, 1, "x.test", "test-hash", []RawRow{{RowNumber: 2, Email: "a@x.test"}})
+	job, _ := svc.CreateJob(ctx, 1, 1, 99, StrategyPartial, ConflictFail, "", res)
 
 	cancelled, err := svc.Cancel(ctx, job.ID, 1)
 	if err != nil {
@@ -315,11 +315,11 @@ func TestCancel_ReadyJobCanBeCancelled(t *testing.T) {
 
 func TestCancel_CompletedJobCannotBeCancelled(t *testing.T) {
 	_, repo := newTestRepo(t)
-	svc := NewService(repo, newFakeMailboxes(0), fakeAccessMode{domain.MailAccessInternalExternal}, nil, nil, nil)
+	svc := NewService(repo, newFakeMailboxes(0), fakeAccessMode{domain.MailAccessInternalExternal}, nil, nil, nil, nil)
 	ctx := context.Background()
-	res, _ := svc.Validate(ctx, 1, 1, "x.test", []RawRow{{RowNumber: 2, Email: "a@x.test"}})
-	job, _ := svc.CreateJob(ctx, 1, 1, 99, StrategyPartial, "", res)
-	if _, _, err := svc.Execute(ctx, job.ID, 1, 1, "x.test"); err != nil {
+	res, _ := svc.Validate(ctx, 1, 1, "x.test", "test-hash", []RawRow{{RowNumber: 2, Email: "a@x.test"}})
+	job, _ := svc.CreateJob(ctx, 1, 1, 99, StrategyPartial, ConflictFail, "", res)
+	if _, _, err := svc.Execute(ctx, job.ID, 1, 1, "x.test", "test-hash", nil); err != nil {
 		t.Fatalf("execute: %v", err)
 	}
 	if _, err := svc.Cancel(ctx, job.ID, 1); err != ErrJobNotCancellable {
@@ -330,14 +330,14 @@ func TestCancel_CompletedJobCannotBeCancelled(t *testing.T) {
 func TestRetryFailedRows_OnlyRetriesFailedNotCreated(t *testing.T) {
 	_, repo := newTestRepo(t)
 	fm := newFakeMailboxes(0)
-	svc := NewService(repo, fm, fakeAccessMode{domain.MailAccessInternalExternal}, nil, nil, nil)
+	svc := NewService(repo, fm, fakeAccessMode{domain.MailAccessInternalExternal}, nil, nil, nil, nil)
 	ctx := context.Background()
 
-	res, _ := svc.Validate(ctx, 1, 1, "x.test", []RawRow{{RowNumber: 2, Email: "a@x.test"}, {RowNumber: 3, Email: "b@x.test"}})
-	job, _ := svc.CreateJob(ctx, 1, 1, 99, StrategyPartial, "", res)
+	res, _ := svc.Validate(ctx, 1, 1, "x.test", "test-hash", []RawRow{{RowNumber: 2, Email: "a@x.test"}, {RowNumber: 3, Email: "b@x.test"}})
+	job, _ := svc.CreateJob(ctx, 1, 1, 99, StrategyPartial, ConflictFail, "", res)
 	fm.byEmail["b@x.test"] = 999 // b will fail on first execute
 
-	finalJob, _, err := svc.Execute(ctx, job.ID, 1, 1, "x.test")
+	finalJob, _, err := svc.Execute(ctx, job.ID, 1, 1, "x.test", "test-hash", nil)
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -366,11 +366,11 @@ func TestRetryFailedRows_OnlyRetriesFailedNotCreated(t *testing.T) {
 
 func TestRetryFailedRows_NoFailedRowsIsRejected(t *testing.T) {
 	_, repo := newTestRepo(t)
-	svc := NewService(repo, newFakeMailboxes(0), fakeAccessMode{domain.MailAccessInternalExternal}, nil, nil, nil)
+	svc := NewService(repo, newFakeMailboxes(0), fakeAccessMode{domain.MailAccessInternalExternal}, nil, nil, nil, nil)
 	ctx := context.Background()
-	res, _ := svc.Validate(ctx, 1, 1, "x.test", []RawRow{{RowNumber: 2, Email: "a@x.test"}})
-	job, _ := svc.CreateJob(ctx, 1, 1, 99, StrategyPartial, "", res)
-	svc.Execute(ctx, job.ID, 1, 1, "x.test")
+	res, _ := svc.Validate(ctx, 1, 1, "x.test", "test-hash", []RawRow{{RowNumber: 2, Email: "a@x.test"}})
+	job, _ := svc.CreateJob(ctx, 1, 1, 99, StrategyPartial, ConflictFail, "", res)
+	svc.Execute(ctx, job.ID, 1, 1, "x.test", "test-hash", nil)
 
 	if _, _, err := svc.RetryFailedRows(ctx, job.ID, 1, "x.test"); err != ErrJobNotRetryable {
 		t.Fatalf("expected ErrJobNotRetryable, got %v", err)
@@ -381,10 +381,10 @@ func TestRetryFailedRows_NoFailedRowsIsRejected(t *testing.T) {
 
 func TestGetJob_CrossTenantIsNotFound(t *testing.T) {
 	_, repo := newTestRepo(t)
-	svc := NewService(repo, newFakeMailboxes(0), fakeAccessMode{domain.MailAccessInternalExternal}, nil, nil, nil)
+	svc := NewService(repo, newFakeMailboxes(0), fakeAccessMode{domain.MailAccessInternalExternal}, nil, nil, nil, nil)
 	ctx := context.Background()
-	res, _ := svc.Validate(ctx, 1, 1, "x.test", []RawRow{{RowNumber: 2, Email: "a@x.test"}})
-	job, _ := svc.CreateJob(ctx, 1, 1, 99, StrategyPartial, "", res)
+	res, _ := svc.Validate(ctx, 1, 1, "x.test", "test-hash", []RawRow{{RowNumber: 2, Email: "a@x.test"}})
+	job, _ := svc.CreateJob(ctx, 1, 1, 99, StrategyPartial, ConflictFail, "", res)
 
 	if _, err := svc.Cancel(ctx, job.ID, 2); err != ErrJobNotFound {
 		t.Fatalf("expected ErrJobNotFound for a different tenant, got %v", err)
@@ -444,7 +444,7 @@ func TestExecute_ConcurrentImportsNeverExceedDomainQuota(t *testing.T) {
 	if err := repo.EnsureSchema(context.Background()); err != nil {
 		t.Fatalf("ensure schema: %v", err)
 	}
-	svc := NewService(repo, mboxSvc, fakeAccessMode{domain.MailAccessInternalExternal}, nil, nil, nil)
+	svc := NewService(repo, mboxSvc, fakeAccessMode{domain.MailAccessInternalExternal}, nil, nil, nil, nil)
 
 	const goroutines = 10
 	var wg sync.WaitGroup
@@ -455,15 +455,15 @@ func TestExecute_ConcurrentImportsNeverExceedDomainQuota(t *testing.T) {
 			defer wg.Done()
 			ctx := context.Background()
 			raw := []RawRow{{RowNumber: 2, Email: fmt.Sprintf("racer%d@race.test", i)}}
-			res, err := svc.Validate(ctx, 1, 1, "race.test", raw)
+			res, err := svc.Validate(ctx, 1, 1, "race.test", "test-hash", raw)
 			if err != nil {
 				return
 			}
-			job, err := svc.CreateJob(ctx, 1, 1, 1, StrategyPartial, "", res)
+			job, err := svc.CreateJob(ctx, 1, 1, 1, StrategyPartial, ConflictFail, "", res)
 			if err != nil {
 				return
 			}
-			finalJob, _, _ := svc.Execute(ctx, job.ID, 1, 1, "race.test")
+			finalJob, _, _ := svc.Execute(ctx, job.ID, 1, 1, "race.test", "test-hash", nil)
 			results[i] = finalJob
 		}(i)
 	}

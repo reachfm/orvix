@@ -479,6 +479,8 @@ func (h *Handler) SetAutomationJobs(service *platformjobs.Service, worker *platf
 	h.jobWorker = worker
 }
 
+func (h *Handler) AutomationJobsService() *platformjobs.Service { return h.jobSvc }
+
 func (h *Handler) StartAutomationWorker(ctx context.Context) {
 	if h.jobWorker == nil {
 		return

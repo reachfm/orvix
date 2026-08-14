@@ -3,6 +3,7 @@ package bulkprovision
 import (
 	"context"
 	"database/sql"
+	"strings"
 	"time"
 
 	"github.com/orvix/orvix/internal/dbdialect"
@@ -30,12 +31,17 @@ func (r *Repository) EnsureSchema(ctx context.Context) error {
 		domain_id INTEGER NOT NULL,
 		status TEXT NOT NULL,
 		strategy TEXT NOT NULL,
+		conflict_policy TEXT NOT NULL DEFAULT 'fail',
 		idempotency_key TEXT NOT NULL DEFAULT '',
+		source_hash TEXT NOT NULL DEFAULT '',
+		schema_version INTEGER NOT NULL DEFAULT 1,
 		total_rows INTEGER NOT NULL DEFAULT 0,
 		valid_rows INTEGER NOT NULL DEFAULT 0,
 		invalid_rows INTEGER NOT NULL DEFAULT 0,
 		created_count INTEGER NOT NULL DEFAULT 0,
 		failed_count INTEGER NOT NULL DEFAULT 0,
+		skipped_count INTEGER NOT NULL DEFAULT 0,
+		next_row_number INTEGER NOT NULL DEFAULT 0,
 		version INTEGER NOT NULL DEFAULT 1,
 		created_by INTEGER NOT NULL DEFAULT 0,
 		created_at `+ts+` NOT NULL,
@@ -51,13 +57,15 @@ func (r *Repository) EnsureSchema(ctx context.Context) error {
 		// block schema setup entirely.
 		_ = err
 	}
-	_, err := r.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS platform_bulk_import_rows (
+	if _, err := r.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS platform_bulk_import_rows (
 		id `+autoInc+`,
 		job_id INTEGER NOT NULL,
 		row_number INTEGER NOT NULL,
+		external_ref TEXT NOT NULL DEFAULT '',
 		email TEXT NOT NULL,
 		name TEXT NOT NULL DEFAULT '',
 		quota_mb INTEGER NOT NULL DEFAULT 0,
+		access_mode TEXT NOT NULL DEFAULT '',
 		status TEXT NOT NULL,
 		error_code TEXT NOT NULL DEFAULT '',
 		error_detail TEXT NOT NULL DEFAULT '',
@@ -65,8 +73,62 @@ func (r *Repository) EnsureSchema(ctx context.Context) error {
 		setup_token_hash TEXT NOT NULL DEFAULT '',
 		created_at `+ts+` NOT NULL,
 		updated_at `+ts+` NOT NULL
-	)`)
+	)`); err != nil {
+		return err
+	}
+	if _, err := r.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_bulk_import_rows_job_row ON platform_bulk_import_rows (job_id, row_number)`); err != nil {
+		return err
+	}
+	// Additive migrations for databases created before these columns
+	// existed (mirrors the ensureColumn convention used elsewhere in
+	// this codebase: ADD COLUMN, tolerate an "already exists" error so
+	// re-running is idempotent).
+	migrations := []struct{ table, column, ddl string }{
+		{"platform_bulk_import_jobs", "conflict_policy", "TEXT NOT NULL DEFAULT 'fail'"},
+		{"platform_bulk_import_jobs", "source_hash", "TEXT NOT NULL DEFAULT ''"},
+		{"platform_bulk_import_jobs", "schema_version", "INTEGER NOT NULL DEFAULT 1"},
+		{"platform_bulk_import_jobs", "skipped_count", "INTEGER NOT NULL DEFAULT 0"},
+		{"platform_bulk_import_jobs", "next_row_number", "INTEGER NOT NULL DEFAULT 0"},
+		{"platform_bulk_import_rows", "external_ref", "TEXT NOT NULL DEFAULT ''"},
+		{"platform_bulk_import_rows", "access_mode", "TEXT NOT NULL DEFAULT ''"},
+	}
+	for _, m := range migrations {
+		if err := r.ensureColumn(ctx, m.table, m.column, m.ddl); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *Repository) ensureColumn(ctx context.Context, table, column, columnDDL string) error {
+	_, err := r.db.ExecContext(ctx, `ALTER TABLE `+table+` ADD COLUMN `+column+` `+columnDDL)
+	if err == nil {
+		return nil
+	}
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "duplicate column") || strings.Contains(msg, "already exists") {
+		return nil
+	}
 	return err
+}
+
+// insertReturningID executes an INSERT and returns the real generated
+// id portably: PostgreSQL has no LastInsertId, so it uses
+// INSERT ... RETURNING id; SQLite uses LastInsertId.
+func (r *Repository) insertReturningID(ctx context.Context, q interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}, query string, args ...any) (int64, error) {
+	if r.dialect.IsPostgres() {
+		var id int64
+		err := q.QueryRowContext(ctx, query+" RETURNING id", args...).Scan(&id)
+		return id, err
+	}
+	res, err := q.ExecContext(ctx, query, args...)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
 }
 
 func (r *Repository) CreateJob(ctx context.Context, j *Job, rows []Row) error {
@@ -77,15 +139,15 @@ func (r *Repository) CreateJob(ctx context.Context, j *Job, rows []Row) error {
 	defer tx.Rollback()
 
 	now := j.CreatedAt
-	res, err := tx.ExecContext(ctx,
-		`INSERT INTO platform_bulk_import_jobs (tenant_id, domain_id, status, strategy, idempotency_key, total_rows, valid_rows, invalid_rows, version, created_by, created_at, updated_at) VALUES (`+r.dialect.Placeholders(12)+`)`,
-		j.TenantID, j.DomainID, j.Status, j.Strategy, j.IdempotencyKey, j.TotalRows, j.ValidRows, j.InvalidRows, 1, j.CreatedBy, now, now)
+	id, err := r.insertReturningID(ctx, tx,
+		`INSERT INTO platform_bulk_import_jobs (tenant_id, domain_id, status, strategy, conflict_policy, idempotency_key, source_hash, schema_version, total_rows, valid_rows, invalid_rows, next_row_number, version, created_by, created_at, updated_at) VALUES (`+r.dialect.Placeholders(16)+`)`,
+		j.TenantID, j.DomainID, j.Status, j.Strategy, j.ConflictPolicy, j.IdempotencyKey, j.SourceHash, j.SchemaVersion, j.TotalRows, j.ValidRows, j.InvalidRows, 1, 1, j.CreatedBy, now, now)
 	if err != nil {
 		return err
 	}
-	id, _ := res.LastInsertId()
 	j.ID = uint(id)
 	j.Version = 1
+	j.NextRowNumber = 1
 
 	for i := range rows {
 		rows[i].JobID = j.ID
@@ -97,21 +159,21 @@ func (r *Repository) CreateJob(ctx context.Context, j *Job, rows []Row) error {
 }
 
 func (r *Repository) insertRow(ctx context.Context, tx *sql.Tx, row *Row) error {
-	res, err := tx.ExecContext(ctx,
-		`INSERT INTO platform_bulk_import_rows (job_id, row_number, email, name, quota_mb, status, error_code, error_detail, created_at, updated_at) VALUES (`+r.dialect.Placeholders(10)+`)`,
-		row.JobID, row.RowNumber, row.Email, row.Name, row.QuotaMB, row.Status, row.ErrorCode, row.ErrorDetail, row.CreatedAt, row.UpdatedAt)
+	id, err := r.insertReturningID(ctx, tx,
+		`INSERT INTO platform_bulk_import_rows (job_id, row_number, external_ref, email, name, quota_mb, access_mode, status, error_code, error_detail, created_at, updated_at) VALUES (`+r.dialect.Placeholders(12)+`)`,
+		row.JobID, row.RowNumber, row.ExternalRef, row.Email, row.Name, row.QuotaMB, row.AccessMode, row.Status, row.ErrorCode, row.ErrorDetail, row.CreatedAt, row.UpdatedAt)
 	if err != nil {
 		return err
 	}
-	id, _ := res.LastInsertId()
 	row.ID = uint(id)
 	return nil
 }
 
+const jobCols = `id, tenant_id, domain_id, status, strategy, conflict_policy, idempotency_key, source_hash, schema_version, total_rows, valid_rows, invalid_rows, created_count, failed_count, skipped_count, next_row_number, version, created_by, created_at, updated_at`
+
 func (r *Repository) GetJob(ctx context.Context, id, tenantID uint) (*Job, error) {
 	row := r.db.QueryRowContext(ctx,
-		`SELECT id, tenant_id, domain_id, status, strategy, idempotency_key, total_rows, valid_rows, invalid_rows, created_count, failed_count, version, created_by, created_at, updated_at
-		 FROM platform_bulk_import_jobs WHERE id=`+r.dialect.Placeholder(1)+` AND tenant_id=`+r.dialect.Placeholder(2), id, tenantID)
+		`SELECT `+jobCols+` FROM platform_bulk_import_jobs WHERE id=`+r.dialect.Placeholder(1)+` AND tenant_id=`+r.dialect.Placeholder(2), id, tenantID)
 	j, err := scanJob(row)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -124,8 +186,7 @@ func (r *Repository) GetJobByIdempotencyKey(ctx context.Context, tenantID uint, 
 		return nil, nil
 	}
 	row := r.db.QueryRowContext(ctx,
-		`SELECT id, tenant_id, domain_id, status, strategy, idempotency_key, total_rows, valid_rows, invalid_rows, created_count, failed_count, version, created_by, created_at, updated_at
-		 FROM platform_bulk_import_jobs WHERE tenant_id=`+r.dialect.Placeholder(1)+` AND idempotency_key=`+r.dialect.Placeholder(2), tenantID, key)
+		`SELECT `+jobCols+` FROM platform_bulk_import_jobs WHERE tenant_id=`+r.dialect.Placeholder(1)+` AND idempotency_key=`+r.dialect.Placeholder(2), tenantID, key)
 	j, err := scanJob(row)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -133,8 +194,65 @@ func (r *Repository) GetJobByIdempotencyKey(ctx context.Context, tenantID uint, 
 	return j, err
 }
 
+// ListJobs returns a tenant's import jobs, newest first, bounded by
+// limit/offset (the handler layer enforces sane pagination bounds).
+func (r *Repository) ListJobs(ctx context.Context, tenantID uint, limit, offset int) ([]Job, int, error) {
+	var total int
+	if err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM platform_bulk_import_jobs WHERE tenant_id=`+r.dialect.Placeholder(1), tenantID).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT `+jobCols+` FROM platform_bulk_import_jobs WHERE tenant_id=`+r.dialect.Placeholder(1)+` ORDER BY id DESC LIMIT `+r.dialect.Placeholder(2)+` OFFSET `+r.dialect.Placeholder(3),
+		tenantID, limit, offset)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	var out []Job
+	for rows.Next() {
+		j, err := scanJob(rows)
+		if err != nil {
+			return nil, 0, err
+		}
+		out = append(out, *j)
+	}
+	return out, total, rows.Err()
+}
+
 func (r *Repository) ListRows(ctx context.Context, jobID uint, statuses []RowStatus) ([]Row, error) {
-	q := `SELECT id, job_id, row_number, email, name, quota_mb, status, error_code, error_detail, mailbox_id, created_at, updated_at FROM platform_bulk_import_rows WHERE job_id=` + r.dialect.Placeholder(1)
+	return r.listRowsPage(ctx, jobID, statuses, 0, 0)
+}
+
+// ListRowsPage is the bounded, paginated row-result read used by the
+// report endpoint. limit<=0 means "no limit" (used internally by
+// Execute, which must see every eligible row).
+func (r *Repository) ListRowsPage(ctx context.Context, jobID uint, statuses []RowStatus, limit, offset int) ([]Row, int, error) {
+	rows, err := r.listRowsPage(ctx, jobID, statuses, limit, offset)
+	if err != nil {
+		return nil, 0, err
+	}
+	var total int
+	q := `SELECT COUNT(*) FROM platform_bulk_import_rows WHERE job_id=` + r.dialect.Placeholder(1)
+	args := []any{jobID}
+	if len(statuses) > 0 {
+		ph := ""
+		for i, s := range statuses {
+			if i > 0 {
+				ph += ","
+			}
+			ph += r.dialect.Placeholder(len(args) + 1)
+			args = append(args, s)
+		}
+		q += " AND status IN (" + ph + ")"
+	}
+	if err := r.db.QueryRowContext(ctx, q, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	return rows, total, nil
+}
+
+func (r *Repository) listRowsPage(ctx context.Context, jobID uint, statuses []RowStatus, limit, offset int) ([]Row, error) {
+	q := `SELECT id, job_id, row_number, external_ref, email, name, quota_mb, access_mode, status, error_code, error_detail, mailbox_id, created_at, updated_at FROM platform_bulk_import_rows WHERE job_id=` + r.dialect.Placeholder(1)
 	args := []any{jobID}
 	if len(statuses) > 0 {
 		placeholders := ""
@@ -148,6 +266,12 @@ func (r *Repository) ListRows(ctx context.Context, jobID uint, statuses []RowSta
 		q += " AND status IN (" + placeholders + ")"
 	}
 	q += " ORDER BY row_number ASC"
+	if limit > 0 {
+		q += " LIMIT " + r.dialect.Placeholder(len(args)+1)
+		args = append(args, limit)
+		q += " OFFSET " + r.dialect.Placeholder(len(args)+1)
+		args = append(args, offset)
+	}
 	rows, err := r.db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, err
@@ -156,7 +280,7 @@ func (r *Repository) ListRows(ctx context.Context, jobID uint, statuses []RowSta
 	var out []Row
 	for rows.Next() {
 		var row Row
-		if err := rows.Scan(&row.ID, &row.JobID, &row.RowNumber, &row.Email, &row.Name, &row.QuotaMB, &row.Status, &row.ErrorCode, &row.ErrorDetail, &row.MailboxID, &row.CreatedAt, &row.UpdatedAt); err != nil {
+		if err := rows.Scan(&row.ID, &row.JobID, &row.RowNumber, &row.ExternalRef, &row.Email, &row.Name, &row.QuotaMB, &row.AccessMode, &row.Status, &row.ErrorCode, &row.ErrorDetail, &row.MailboxID, &row.CreatedAt, &row.UpdatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, row)
@@ -190,16 +314,34 @@ func (r *Repository) TransitionJobIfVersion(ctx context.Context, id uint, expect
 	return n == 1, err
 }
 
-func (r *Repository) UpdateJobCounters(ctx context.Context, id uint, status JobStatus, createdCount, failedCount int, now time.Time) error {
+// CheckpointBatch advances the durable execution checkpoint after one
+// bounded batch: it records the running created/failed/skipped totals
+// and the next unattempted row number in a single guarded UPDATE keyed
+// on the job's CURRENT version, so a stale worker whose lease was lost
+// and reclaimed by another worker cannot silently overwrite a newer
+// checkpoint (its UPDATE affects zero rows and the caller must stop).
+func (r *Repository) CheckpointBatch(ctx context.Context, id uint, expectedVersion int, createdCount, failedCount, skippedCount, nextRowNumber int, now time.Time) (bool, error) {
+	res, err := r.db.ExecContext(ctx,
+		`UPDATE platform_bulk_import_jobs SET created_count=`+r.dialect.Placeholder(1)+`, failed_count=`+r.dialect.Placeholder(2)+`, skipped_count=`+r.dialect.Placeholder(3)+`, next_row_number=`+r.dialect.Placeholder(4)+`, version=version+1, updated_at=`+r.dialect.Placeholder(5)+`
+		 WHERE id=`+r.dialect.Placeholder(6)+` AND version=`+r.dialect.Placeholder(7),
+		createdCount, failedCount, skippedCount, nextRowNumber, now, id, expectedVersion)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n == 1, err
+}
+
+func (r *Repository) UpdateJobCounters(ctx context.Context, id uint, status JobStatus, createdCount, failedCount, skippedCount int, now time.Time) error {
 	_, err := r.db.ExecContext(ctx,
-		`UPDATE platform_bulk_import_jobs SET status=`+r.dialect.Placeholder(1)+`, created_count=`+r.dialect.Placeholder(2)+`, failed_count=`+r.dialect.Placeholder(3)+`, version=version+1, updated_at=`+r.dialect.Placeholder(4)+` WHERE id=`+r.dialect.Placeholder(5),
-		status, createdCount, failedCount, now, id)
+		`UPDATE platform_bulk_import_jobs SET status=`+r.dialect.Placeholder(1)+`, created_count=`+r.dialect.Placeholder(2)+`, failed_count=`+r.dialect.Placeholder(3)+`, skipped_count=`+r.dialect.Placeholder(4)+`, version=version+1, updated_at=`+r.dialect.Placeholder(5)+` WHERE id=`+r.dialect.Placeholder(6),
+		status, createdCount, failedCount, skippedCount, now, id)
 	return err
 }
 
 func scanJob(row interface{ Scan(...any) error }) (*Job, error) {
 	var j Job
-	err := row.Scan(&j.ID, &j.TenantID, &j.DomainID, &j.Status, &j.Strategy, &j.IdempotencyKey, &j.TotalRows, &j.ValidRows, &j.InvalidRows, &j.CreatedCount, &j.FailedCount, &j.Version, &j.CreatedBy, &j.CreatedAt, &j.UpdatedAt)
+	err := row.Scan(&j.ID, &j.TenantID, &j.DomainID, &j.Status, &j.Strategy, &j.ConflictPolicy, &j.IdempotencyKey, &j.SourceHash, &j.SchemaVersion, &j.TotalRows, &j.ValidRows, &j.InvalidRows, &j.CreatedCount, &j.FailedCount, &j.SkippedCount, &j.NextRowNumber, &j.Version, &j.CreatedBy, &j.CreatedAt, &j.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}

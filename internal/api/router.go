@@ -85,6 +85,8 @@ type Router struct {
 	startOnce    sync.Once
 	publicIdem   *kernel.IdempotencyStore
 	platformIdem *kernel.IdempotencyStore
+
+	bulkProvisionSvc *bulkprovision.Service
 }
 
 func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *zap.Logger,
@@ -346,7 +348,13 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 			if err := bulkProvisionRepo.EnsureSchema(context.Background()); err != nil {
 				logger.Warn("bulk provisioning schema init failed; service disabled", zap.Error(err))
 			} else {
-				router.h.SetBulkProvisionService(bulkprovision.NewService(bulkProvisionRepo, mailboxAdminSvc, domainAdminSvc, nil, nil, nil))
+				// Idempotency, outbox and audit were previously wired nil
+				// here, silently disabling the service's own idempotent-
+				// replay guard, its outbox evidence, and its audit trail
+				// despite the service already supporting all three.
+				bulkProvisionSvc := bulkprovision.NewService(bulkProvisionRepo, mailboxAdminSvc, domainAdminSvc, router.platformIdem, outboxRepo, auditExtendedStore, nil)
+				router.bulkProvisionSvc = bulkProvisionSvc
+				router.h.SetBulkProvisionService(bulkProvisionSvc)
 			}
 
 			relayRepo, relayRepoErr := relay.NewRepositoryChecked(sqlDB)
@@ -772,6 +780,12 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 							logger.Info("durable import service wired")
 						}
 					}
+				}
+			}
+
+			if router.bulkProvisionSvc != nil {
+				if err := bulkprovision.RegisterImportJob(jobRegistry, router.bulkProvisionSvc); err != nil {
+					logger.Error("bulk mailbox import job registration failed", zap.Error(err))
 				}
 			}
 

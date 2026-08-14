@@ -1,12 +1,23 @@
 package handlers
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"strconv"
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/orvix/orvix/internal/auth"
 	"github.com/orvix/orvix/internal/platform/bulkprovision"
 )
+
+func sourceHashOf(raw []bulkprovision.RawRow) string {
+	h := sha256.New()
+	for _, r := range raw {
+		h.Write([]byte(r.Email))
+		h.Write([]byte{0})
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
 
 // PostBulkProvisionValidate handles POST /admin/domains/:id/mailboxes/bulk/validate.
 // Dry-run only — never mutates.
@@ -26,7 +37,7 @@ func (h *Handler) PostBulkProvisionValidate(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
-	res, err := h.bulkProvisionSvc.Validate(c.Context(), tenantID, domainID, domainName, raw)
+	res, err := h.bulkProvisionSvc.Validate(c.Context(), tenantID, domainID, domainName, sourceHashOf(raw), raw)
 	if err != nil {
 		return bulkProvisionError(c, err)
 	}
@@ -56,11 +67,11 @@ func (h *Handler) PostBulkProvisionCreateJob(c fiber.Ctx) error {
 	strategy := bulkprovision.Strategy(c.Query("strategy", string(bulkprovision.StrategyPartial)))
 	idemKey := c.Get("Idempotency-Key")
 
-	res, err := h.bulkProvisionSvc.Validate(c.Context(), tenantID, domainID, domainName, raw)
+	res, err := h.bulkProvisionSvc.Validate(c.Context(), tenantID, domainID, domainName, sourceHashOf(raw), raw)
 	if err != nil {
 		return bulkProvisionError(c, err)
 	}
-	job, err := h.bulkProvisionSvc.CreateJob(c.Context(), tenantID, domainID, actorID, strategy, idemKey, res)
+	job, err := h.bulkProvisionSvc.CreateJob(c.Context(), tenantID, domainID, actorID, strategy, bulkprovision.ConflictFail, idemKey, res)
 	if err != nil {
 		return bulkProvisionError(c, err)
 	}
@@ -88,7 +99,7 @@ func (h *Handler) PostBulkProvisionExecute(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "internal error"})
 	}
-	finalJob, rows, err := h.bulkProvisionSvc.Execute(c.Context(), jobID, tenantID, job.DomainID, domainName)
+	finalJob, rows, err := h.bulkProvisionSvc.Execute(c.Context(), jobID, tenantID, job.DomainID, domainName, job.SourceHash, nil)
 	if err != nil {
 		return bulkProvisionError(c, err)
 	}
