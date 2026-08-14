@@ -3,6 +3,7 @@ package handlers
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"strconv"
 
 	"github.com/gofiber/fiber/v3"
@@ -220,15 +221,38 @@ func parseBulkInput(c fiber.Ctx) ([]bulkprovision.RawRow, error) {
 	return nil, bulkprovision.ErrEmptyFile
 }
 
+// badRequestBulkErrors are upload-parsing / upload-security rejections:
+// the CALLER's file is the problem, never a server fault, and each
+// error's text is already safe to return verbatim (no path, no row
+// content, no internal stack).
+var badRequestBulkErrors = []error{
+	bulkprovision.ErrEmptyFile, bulkprovision.ErrTooManyRows, bulkprovision.ErrUnsupportedFormat,
+	bulkprovision.ErrTooManyColumns, bulkprovision.ErrCellTooLong, bulkprovision.ErrTooManySheets,
+	bulkprovision.ErrDuplicateHeader, bulkprovision.ErrUnknownColumn, bulkprovision.ErrFormulaRejected,
+	bulkprovision.ErrFormulaInjection, bulkprovision.ErrInvalidUTF8, bulkprovision.ErrInvalidAccessMode,
+	bulkprovision.ErrInvalidConflictPolicy, bulkprovision.ErrUploadTooLarge, bulkprovision.ErrSourceHashMismatch,
+}
+
+var conflictBulkErrors = []error{
+	bulkprovision.ErrJobNotReady, bulkprovision.ErrJobNotCancellable, bulkprovision.ErrJobNotRetryable, bulkprovision.ErrVersionConflict,
+}
+
 func bulkProvisionError(c fiber.Ctx, err error) error {
-	switch err {
-	case bulkprovision.ErrJobNotFound:
+	// Parsing/validation errors are wrapped with %w (e.g. "%w: row %d")
+	// to carry a row number or column name, so they must be matched with
+	// errors.Is, never a raw switch/== comparison against the sentinel.
+	if errors.Is(err, bulkprovision.ErrJobNotFound) {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": err.Error()})
-	case bulkprovision.ErrEmptyFile, bulkprovision.ErrTooManyRows, bulkprovision.ErrUnsupportedFormat:
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
-	case bulkprovision.ErrJobNotReady, bulkprovision.ErrJobNotCancellable, bulkprovision.ErrJobNotRetryable, bulkprovision.ErrVersionConflict:
-		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": err.Error()})
-	default:
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "internal error"})
 	}
+	for _, sentinel := range badRequestBulkErrors {
+		if errors.Is(err, sentinel) {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+		}
+	}
+	for _, sentinel := range conflictBulkErrors {
+		if errors.Is(err, sentinel) {
+			return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": err.Error()})
+		}
+	}
+	return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "internal error"})
 }

@@ -1981,6 +1981,14 @@ func (r *Router) setupRoutes() {
 	protected.Post("/platform/domains/:tenant_id/:id/status", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermDomainsWrite), r.h.SetPlatformDomainStatus)
 	protected.Post("/platform/domains/:tenant_id/:id/mail-access-mode", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermDomainsWrite), r.h.SetPlatformDomainMailAccessMode)
 
+	// NOTE: GET /platform/mailboxes/bulk/template MUST be registered
+	// before GET /platform/mailboxes/:tenant_id/:id below. Fiber v3
+	// matches same-depth routes (both are 4 path segments) in
+	// REGISTRATION ORDER, not static-over-param — registering the
+	// param route first would silently shadow the bulk template route
+	// (":tenant_id"="bulk", ":id"="template"), producing a bogus
+	// "a valid tenant_id is required" 400 instead of the template.
+	protected.Get("/platform/mailboxes/bulk/template", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermMailboxesRead), r.h.GetPlatformBulkMailboxTemplate)
 	protected.Get("/platform/mailboxes/:tenant_id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermMailboxesRead), r.h.ListPlatformMailboxes)
 	protected.Get("/platform/mailboxes/:tenant_id/:id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermMailboxesRead), r.h.GetPlatformMailbox)
 	protected.Post("/platform/mailboxes/:tenant_id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermMailboxesWrite), r.h.CreatePlatformMailbox)
@@ -1992,7 +2000,8 @@ func (r *Router) setupRoutes() {
 	protected.Post("/platform/mailboxes/:tenant_id/bulk/status", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermMailboxesWrite), r.h.BulkPlatformMailboxStatus)
 
 	// ── Platform bulk mailbox provisioning (Stage 8) ─────────────
-	protected.Get("/platform/mailboxes/bulk/template", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermMailboxesRead), r.h.GetPlatformBulkMailboxTemplate)
+	// (GET .../bulk/template is registered earlier, above, to avoid
+	// being shadowed by GET /platform/mailboxes/:tenant_id/:id.)
 	protected.Post("/platform/mailboxes/bulk/:tenant_id/stage", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermMailboxesWrite), r.h.PostPlatformBulkMailboxStage)
 	protected.Post("/platform/mailboxes/bulk/:tenant_id/validate", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermMailboxesWrite), r.h.PostPlatformBulkMailboxValidate)
 	protected.Post("/platform/mailboxes/bulk/:tenant_id/jobs", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermMailboxesWrite), r.h.PostPlatformBulkMailboxCreateJob)
