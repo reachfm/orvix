@@ -15,6 +15,7 @@ import (
 type MailboxCreator interface {
 	CreateMailbox(ctx context.Context, req mailbox.CreateMailboxRequest, tenantID uint) (*mailbox.CreateMailboxResponse, error)
 	ExistsByEmail(ctx context.Context, email string) (bool, error)
+	GetIDByEmail(ctx context.Context, email string) (uint, error)
 	ResolveDomainAllocation(ctx context.Context, domainName string, tenantID uint) (*mailbox.DomainAllocation, error)
 	SoftDeleteMailbox(ctx context.Context, id, tenantID uint, reason string) error
 	CountActiveByDomain(ctx context.Context, domainID, tenantID uint) (int, error)

@@ -376,6 +376,17 @@ func (s *Service) Execute(ctx context.Context, jobID, tenantID, domainID uint, d
 	}
 	now := s.clock.Now()
 	version := job.Version
+	// isResume distinguishes a fresh execution (JobReady) from a
+	// worker resuming after a crash/lease-loss/cooperative stop
+	// (JobRunning). It is captured BEFORE the switch below transitions
+	// job.Status, and is used to reconcile the one gap the checkpoint
+	// model cannot close by itself: a mailbox whose creation committed
+	// but whose own RowCreated write then failed (see the comment above
+	// UpdateRowResult(...RowCreated...) below). On a genuinely fresh
+	// run, hitting mailbox.ErrMailboxExists is a real conflict; on a
+	// resume, for a row still RowValid (never marked terminal), it can
+	// only mean this job's own earlier attempt already succeeded.
+	isResume := job.Status == JobRunning
 	switch job.Status {
 	case JobReady:
 		ok, terr := s.repo.TransitionJobIfVersion(ctx, jobID, JobReady, JobRunning, job.Version, now)
@@ -433,6 +444,30 @@ func (s *Service) Execute(ctx context.Context, jobID, tenantID, domainID uint, d
 			row := &rows[i]
 			now = s.clock.Now()
 			mailboxID, setupTokenHash, createErr := s.createOneMailbox(ctx, tenantID, domainName, row)
+			if createErr != nil && isResume && errors.Is(createErr, mailbox.ErrMailboxExists) {
+				// Reconciliation: this row is still RowValid (Validate's
+				// own duplicate check already rules out a pre-existing
+				// conflict reaching this point as RowValid), and we are
+				// resuming — so the only honest explanation for the
+				// address already existing is that OUR OWN earlier
+				// attempt created it and then failed to record the row
+				// result (see the doc comment on the RowCreated write
+				// below). Look it up and record the real success instead
+				// of re-failing or re-skipping a row that actually
+				// succeeded.
+				if reconciledID, lerr := s.mailboxes.GetIDByEmail(ctx, row.Email); lerr == nil && reconciledID != 0 {
+					createdCount++
+					created = append(created, reconciledID)
+					if uerr := s.repo.UpdateRowResult(ctx, row.ID, RowCreated, "", "", reconciledID, "", now); uerr != nil {
+						return nil, nil, kernel.Wrap(kernel.ErrCodeInternal, "record reconciled created row", uerr)
+					}
+					nextRowNumber = row.RowNumber + 1
+					continue
+				}
+				// Lookup itself failed or found nothing — fall through to
+				// the normal conflict/failure handling below rather than
+				// silently swallowing the reconciliation attempt.
+			}
 			if createErr != nil {
 				if job.ConflictPolicy == ConflictSkipExisting && errors.Is(createErr, mailbox.ErrMailboxExists) {
 					skippedCount++

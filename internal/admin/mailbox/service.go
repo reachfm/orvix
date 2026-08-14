@@ -65,6 +65,14 @@ func (s *Service) ExistsByEmail(ctx context.Context, email string) (bool, error)
 	return s.repo.ExistsByEmail(ctx, email, 0)
 }
 
+// GetIDByEmail is a read-only lookup exposed for reconciliation
+// callers (internal/platform/bulkprovision's resumed-execution path)
+// that must recognize a mailbox their own earlier, interrupted attempt
+// already created, without performing or preparing any mutation.
+func (s *Service) GetIDByEmail(ctx context.Context, email string) (uint, error) {
+	return s.repo.GetIDByEmail(ctx, email)
+}
+
 // ResolveDomainAllocation is a read-only passthrough exposed for
 // dry-run capacity estimation. lock=false: callers using this for an
 // estimate must not take a row lock outside of CreateMailbox's own

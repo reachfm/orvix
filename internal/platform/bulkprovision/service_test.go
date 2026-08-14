@@ -61,6 +61,16 @@ func (f *fakeMailboxes) ExistsByEmail(ctx context.Context, email string) (bool, 
 	return !f.deleted[id], nil
 }
 
+func (f *fakeMailboxes) GetIDByEmail(ctx context.Context, email string) (uint, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	id, ok := f.byEmail[email]
+	if !ok || f.deleted[id] {
+		return 0, nil
+	}
+	return id, nil
+}
+
 func (f *fakeMailboxes) ResolveDomainAllocation(ctx context.Context, domainName string, tenantID uint) (*mailbox.DomainAllocation, error) {
 	return &mailbox.DomainAllocation{DomainID: 1, Status: "active", MaxMailboxes: f.cap_}, nil
 }

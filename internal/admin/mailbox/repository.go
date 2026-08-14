@@ -316,6 +316,18 @@ func (r *AdminMailboxRepo) ExistsByEmail(ctx context.Context, email string, excl
 	return count > 0, err
 }
 
+// GetIDByEmail returns the live (non-deleted) mailbox ID for email, or
+// 0 with a nil error if none exists.
+func (r *AdminMailboxRepo) GetIDByEmail(ctx context.Context, email string) (uint, error) {
+	var id uint
+	err := r.db.QueryRowContext(ctx,
+		"SELECT id FROM coremail_mailboxes WHERE email="+r.dialect.Placeholder(1)+" AND deleted_at IS NULL", email).Scan(&id)
+	if err == sql.ErrNoRows {
+		return 0, nil
+	}
+	return id, err
+}
+
 // ResolveDomain looks up a domain by name inside the authenticated tenant
 // scope and returns its persisted ID and status. The query is tenant-scoped
 // so a domain owned by another tenant yields sql.ErrNoRows (indistinguishable

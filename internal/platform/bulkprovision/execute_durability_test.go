@@ -98,6 +98,109 @@ func TestExecute_CrashMidBatchResumesWithoutDuplication(t *testing.T) {
 	}
 }
 
+// TestExecute_ResumeReconcilesRowWriteFailureAfterMailboxCommit proves
+// the narrower gap: a mailbox mutation committed, but the ROW's own
+// RowCreated write then failed (a real, independently-possible
+// failure — a transient DB error on that single UPDATE — distinct from
+// the batch-checkpoint crash covered above). The row is left RowValid
+// and the checkpoint never advanced past it, because Execute returns
+// the error immediately without checkpointing. A resuming worker must
+// recognize its own earlier success via reconciliation instead of
+// either re-failing the row (ConflictFail) or silently re-skipping it
+// (ConflictSkipExisting) — both of which would misreport a row that
+// actually succeeded.
+func TestExecute_ResumeReconcilesRowWriteFailureAfterMailboxCommit(t *testing.T) {
+	_, repo, ob, as := newDurableTestRepo(t)
+	fm := newFakeMailboxes(0)
+	svc := NewService(repo, fm, fakeAccessMode{domain.MailAccessInternalExternal}, nil, ob, as, nil)
+	ctx := context.Background()
+
+	res, err := svc.Validate(ctx, 1, 1, "x.test", "hash-reconcile", []RawRow{{RowNumber: 2, Email: "reconcile@x.test"}})
+	if err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	job, err := svc.CreateJob(ctx, 1, 1, 99, StrategyPartial, ConflictFail, "", res)
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+
+	// Simulate the exact failure this test targets: the mailbox mutation
+	// already committed (a real earlier createOneMailbox call would have
+	// done this), but the row's UpdateRowResult write that should have
+	// followed it never happened — so the row is still RowValid and the
+	// job's checkpoint never advanced past row 2. Model that state
+	// directly: create the mailbox out-of-band, and transition the job
+	// to JobRunning (as a prior Execute call that got this far, then hit
+	// the row-write failure, would have left it — JobReady->JobRunning
+	// happens BEFORE any row is attempted).
+	preExisting, cerr := fm.CreateMailbox(ctx, mailboxReq("reconcile@x.test"), 1)
+	if cerr != nil {
+		t.Fatalf("seed pre-existing mailbox: %v", cerr)
+	}
+	if ok, terr := repo.TransitionJobIfVersion(ctx, job.ID, JobReady, JobRunning, job.Version, svc.clock.Now()); terr != nil || !ok {
+		t.Fatalf("force job running: ok=%v err=%v", ok, terr)
+	}
+
+	final, rows, err := svc.Execute(ctx, job.ID, 1, 1, "x.test", "hash-reconcile", nil)
+	if err != nil {
+		t.Fatalf("execute (reconcile): %v", err)
+	}
+	if final.Status != JobCompleted {
+		t.Fatalf("expected the reconciled job to complete, got %s", final.Status)
+	}
+	if final.CreatedCount != 1 || final.FailedCount != 0 || final.SkippedCount != 0 {
+		t.Fatalf("expected the row to reconcile as created (not failed, not skipped), got created=%d failed=%d skipped=%d",
+			final.CreatedCount, final.FailedCount, final.SkippedCount)
+	}
+	if len(rows) != 1 || rows[0].Status != RowCreated {
+		t.Fatalf("expected the row recorded RowCreated, got %+v", rows)
+	}
+	if rows[0].MailboxID != preExisting.Mailbox.ID {
+		t.Fatalf("expected the row to reference the ALREADY-committed mailbox ID %d, got %d", preExisting.Mailbox.ID, rows[0].MailboxID)
+	}
+	fm.mu.Lock()
+	distinct := len(fm.byEmail)
+	fm.mu.Unlock()
+	if distinct != 1 {
+		t.Fatalf("reconciliation must not create a second mailbox, found %d distinct mailboxes", distinct)
+	}
+}
+
+// TestExecute_FreshRunStillTreatsExistingMailboxAsConflict proves the
+// reconciliation path is resume-only: on a genuinely FRESH run
+// (JobReady, never before attempted), an address that already exists
+// for a reason OTHER than this job's own prior attempt is still a real
+// conflict under ConflictFail — reconciliation must never be used to
+// paper over an actual pre-existing-address conflict.
+func TestExecute_FreshRunStillTreatsExistingMailboxAsConflict(t *testing.T) {
+	_, repo, ob, as := newDurableTestRepo(t)
+	fm := newFakeMailboxes(0)
+	svc := NewService(repo, fm, fakeAccessMode{domain.MailAccessInternalExternal}, nil, ob, as, nil)
+	ctx := context.Background()
+
+	res := &ValidationResult{TotalRows: 1, ValidRows: 1, SourceHash: "hash-fresh-conflict", SchemaVersion: SchemaVersion,
+		Rows: []Row{{RowNumber: 2, Email: "already-exists@x.test", Status: RowValid, AccessMode: AccessInherit}}}
+	job, err := svc.CreateJob(ctx, 1, 1, 99, StrategyPartial, ConflictFail, "", res)
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	if _, cerr := fm.CreateMailbox(ctx, mailboxReq("already-exists@x.test"), 1); cerr != nil {
+		t.Fatalf("seed pre-existing mailbox: %v", cerr)
+	}
+
+	// Job is still fresh (JobReady) — never transitioned to JobRunning.
+	final, rows, err := svc.Execute(ctx, job.ID, 1, 1, "x.test", "hash-fresh-conflict", nil)
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if final.FailedCount != 1 || final.CreatedCount != 0 {
+		t.Fatalf("expected a genuine fresh-run conflict to fail (not reconcile), got created=%d failed=%d", final.CreatedCount, final.FailedCount)
+	}
+	if len(rows) != 1 || rows[0].Status != RowFailed {
+		t.Fatalf("expected the row recorded RowFailed, got %+v", rows)
+	}
+}
+
 // TestExecute_CancelDuringRunStopsFutureBatches proves cooperative
 // cancellation: Cancel() bumps the job's version; the version-guarded
 // CheckpointBatch that a concurrently-running Execute attempts next
