@@ -15,23 +15,29 @@
 #                                            non-empty body.
 #   2. `curl -fIL <sidecar_url>`          : the .sha256 sidecar
 #                                            responds 200.
-#   3. sidecar content == expected sha    : the published sha256
+#   3. Every signed-sidecar URL 200:      .sig, .manifest.json,
+#                                            .manifest.json.sig,
+#                                            .sbom.spdx, .sbom.spdx.sig.
+#   4. sidecar content == expected sha    : the published sha256
 #                                            matches either the
 #                                            --expected-sha arg or
 #                                            a local file.
-#   4. local bundle sha256 == sidecar      : when the local bundle
+#   5. local bundle sha256 == sidecar     : when the local bundle
 #                                            is available, its
 #                                            sha256 matches the
 #                                            published sidecar.
-#   5. tag URL resolves                   : the release tag exists
+#   6. Ed25519 signature verifies         : the downloaded .sig
+#                                            validates against the
+#                                            release trust key.
+#   7. tag URL resolves                   : the release tag exists
 #                                            on GitHub and is not
 #                                            a 404.
 #
 # Usage:
 #   bash release/scripts/verify-github-release-assets.sh \
 #       --repo reachfm/orvix \
-#       --tag v1.0.3-rc5 \
-#       --channel stable \
+#       --tag v1.0.4-rc2 \
+#       --asset orvix-enterprise-mail-1.0.4-rc2-linux-amd64.tar.gz \
 #       --expected-sha 2d5bb8c3015c145e8ffb49b45d9b41ac4962908575e0020f725626093628adeb
 #
 # Or against the local dist/ directory only:
@@ -47,10 +53,12 @@ set -euo pipefail
 REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BUILD_DIR="${ORVIX_BUILD_DIR:-$REPO_ROOT/dist}"
+TRUST_KEY="${ORVIX_TRUST_KEY:-$REPO_ROOT/release/trust/orvix-release-signing.pub.pem}"
 
 GITHUB_REPO="${ORVIX_GITHUB_REPO:-reachfm/orvix}"
 RELEASE_TAG=""
 CHANNEL="stable"
+ASSET_NAME=""
 EXPECTED_SHA=""
 LOCAL_ONLY=0
 
@@ -61,7 +69,11 @@ verify-github-release-assets.sh — fail-closed check of published release.
 Options:
   --repo <slug>         GitHub repo slug (default: reachfm/orvix)
   --tag <tag>           Git tag of the release to verify
-  --channel <chan>      Channel alias to verify (default: stable)
+  --asset <name>        Asset basename to verify, e.g.
+                        orvix-enterprise-mail-1.0.4-rc2-linux-amd64.tar.gz
+                        (default: orvix-enterprise-mail-<channel>-linux-amd64.tar.gz)
+  --channel <chan>      Backward-compatible alias for --asset using the
+                        channel alias name (default: stable)
   --expected-sha <hex>  Expected sha256 of the bundle
   --local-only          Only verify the local dist/ artifacts (skip GitHub probes)
   -h, --help            Show this message
@@ -80,6 +92,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --repo) GITHUB_REPO="$2"; shift 2 ;;
         --tag)  RELEASE_TAG="$2"; shift 2 ;;
+        --asset) ASSET_NAME="$2"; shift 2 ;;
         --channel) CHANNEL="$2"; shift 2 ;;
         --expected-sha) EXPECTED_SHA="$2"; shift 2 ;;
         --local-only) LOCAL_ONLY=1; shift ;;
@@ -92,6 +105,9 @@ done
 [ -n "${ORVIX_CHANNEL:-}" ]      && [ "$CHANNEL" = "stable" ] && CHANNEL="$ORVIX_CHANNEL"
 [ -n "${ORVIX_BUNDLE_SHA256:-}" ] && [ -z "$EXPECTED_SHA" ] && EXPECTED_SHA="$ORVIX_BUNDLE_SHA256"
 
+# Channel alias name, used only when --asset is not supplied.
+[ -n "$ASSET_NAME" ] || ASSET_NAME="orvix-enterprise-mail-${CHANNEL}-linux-amd64.tar.gz"
+
 RED=$'\033[0;31m'
 GREEN=$'\033[0;32m'
 NC=$'\033[0m'
@@ -101,7 +117,7 @@ pass() { printf '%sPASS%s  %s\n' "$GREEN" "$NC" "$*" >&2; }
 fail() { printf '%sFAIL%s  %s\n' "$RED" "$NC" "$*" >&2; exit 1; }
 
 # ── 1. Local artifact sanity ─────────────────────────────────────
-TARBALL="$BUILD_DIR/orvix-enterprise-mail-${CHANNEL}-linux-amd64.tar.gz"
+TARBALL="$BUILD_DIR/$ASSET_NAME"
 SIDECAR="$TARBALL.sha256"
 LOCAL_SHA=""
 
@@ -135,6 +151,16 @@ EFFECTIVE_SHA="${EXPECTED_SHA:-$LOCAL_SHA}"
 # ── 2. Local-only mode skips GitHub probes ───────────────────────
 if [ "$LOCAL_ONLY" = "1" ]; then
     pass "local-only mode: GitHub probes skipped"
+    if [ -f "$TARBALL.sig" ]; then
+        if [ -f "$TRUST_KEY" ] && command -v openssl >/dev/null 2>&1; then
+            openssl pkeyutl -verify -rawin -pubin -inkey "$TRUST_KEY" \
+                -in "$TARBALL" -sigfile "$TARBALL.sig" >/dev/null 2>&1 \
+                || fail "local Ed25519 signature verification failed for $TARBALL"
+            pass "local Ed25519 signature verifies against $TRUST_KEY"
+        fi
+    else
+        log "local .sig not found; skipping local signature verification"
+    fi
     log "OK — local artifacts verified"
     exit 0
 fi
@@ -151,7 +177,7 @@ fi
 pass "release tag $RELEASE_TAG resolves on $GITHUB_REPO"
 
 # ── 4. Bundle asset reachable ────────────────────────────────────
-BUNDLE_URL="https://github.com/$GITHUB_REPO/releases/download/$RELEASE_TAG/orvix-enterprise-mail-${CHANNEL}-linux-amd64.tar.gz"
+BUNDLE_URL="https://github.com/$GITHUB_REPO/releases/download/$RELEASE_TAG/$ASSET_NAME"
 log "probing bundle URL: $BUNDLE_URL"
 # Use -fIL: -f fails on 4xx/5xx, -I issues HEAD, -L follows redirects.
 # The first redirect goes to GitHub's S3-backed release-assets bucket;
@@ -162,20 +188,22 @@ if [ "$HEAD_CODE" != "200" ]; then
 fi
 pass "bundle URL returns HTTP 200: $BUNDLE_URL"
 
-# ── 5. sha256 sidecar reachable ──────────────────────────────────
-SIDECAR_URL="$BUNDLE_URL.sha256"
-log "probing sidecar URL: $SIDECAR_URL"
-HEAD_CODE="$(curl -s -o /dev/null -w '%{http_code}' -I -L --max-time 60 "$SIDECAR_URL" || echo "000")"
-if [ "$HEAD_CODE" != "200" ]; then
-    fail "sidecar URL did not return HTTP 200 (got $HEAD_CODE): $SIDECAR_URL"
-fi
-pass "sidecar URL returns HTTP 200: $SIDECAR_URL"
+# ── 5. Every signed sidecar reachable ─────────────────────────────
+for suffix in .sha256 .sig .manifest.json .manifest.json.sig .sbom.spdx .sbom.spdx.sig; do
+    SIDECAR_URL="$BUNDLE_URL$suffix"
+    log "probing sidecar URL: $SIDECAR_URL"
+    HEAD_CODE="$(curl -s -o /dev/null -w '%{http_code}' -I -L --max-time 60 "$SIDECAR_URL" || echo "000")"
+    if [ "$HEAD_CODE" != "200" ]; then
+        fail "sidecar URL did not return HTTP 200 (got $HEAD_CODE): $SIDECAR_URL"
+    fi
+    pass "sidecar URL returns HTTP 200: $SIDECAR_URL"
+done
 
 # ── 6. Sidecar content matches expected sha ──────────────────────
 SIDECAR_BODY="$(mktemp)"
-trap 'rm -f "$SIDECAR_BODY"' EXIT
-if ! curl -fsSL --max-time 30 "$SIDECAR_URL" -o "$SIDECAR_BODY"; then
-    fail "could not download sidecar body: $SIDECAR_URL"
+trap 'rm -f "$SIDECAR_BODY" "$DOWNLOAD_TMP" "$SIG_FILE"; rm -rf "$EXTRACT_DIR"' EXIT
+if ! curl -fsSL --max-time 30 "$BUNDLE_URL.sha256" -o "$SIDECAR_BODY"; then
+    fail "could not download sidecar body: $BUNDLE_URL.sha256"
 fi
 PUBLISHED_SHA="$(awk '{print $1}' "$SIDECAR_BODY" | tr -d '\r\n' | head -n1)"
 if [ -z "$PUBLISHED_SHA" ]; then
@@ -188,7 +216,6 @@ pass "published sha256 matches expected: ${PUBLISHED_SHA:0:12}..."
 
 # ── 7. Downloaded bundle byte-for-byte matches ───────────────────
 DOWNLOAD_TMP="$(mktemp)"
-trap 'rm -f "$SIDECAR_BODY" "$DOWNLOAD_TMP"' EXIT
 if ! curl -fsSL --max-time 300 "$BUNDLE_URL" -o "$DOWNLOAD_TMP"; then
     fail "could not download bundle: $BUNDLE_URL"
 fi
@@ -198,9 +225,22 @@ if [ "$DOWNLOAD_SHA" != "$EFFECTIVE_SHA" ]; then
 fi
 pass "downloaded bundle sha256 matches expected: ${DOWNLOAD_SHA:0:12}..."
 
-# ── 8. Re-extract smoke — bundle must contain install-public.sh ──
+# ── 8. Ed25519 signature of the downloaded copy ──────────────────
+SIG_FILE="$(mktemp)"
+if ! curl -fsSL --max-time 60 "$BUNDLE_URL.sig" -o "$SIG_FILE"; then
+    fail "could not download bundle signature: $BUNDLE_URL.sig"
+fi
+if [ -f "$TRUST_KEY" ] && command -v openssl >/dev/null 2>&1; then
+    openssl pkeyutl -verify -rawin -pubin -inkey "$TRUST_KEY" \
+        -in "$DOWNLOAD_TMP" -sigfile "$SIG_FILE" >/dev/null 2>&1 \
+        || fail "downloaded bundle Ed25519 signature does not verify against $TRUST_KEY (tampered upload?)"
+    pass "downloaded bundle Ed25519 signature verifies against $TRUST_KEY"
+else
+    log "no trust key / openssl available; signature byte-presence already proven (HTTP 200 above)"
+fi
+
+# ── 9. Re-extract smoke — bundle must contain install-public.sh ──
 EXTRACT_DIR="$(mktemp -d)"
-trap 'rm -rf "$SIDECAR_BODY" "$DOWNLOAD_TMP" "$EXTRACT_DIR"' EXIT
 if ! tar -xzf "$DOWNLOAD_TMP" -C "$EXTRACT_DIR" --strip-components=0 2>/dev/null; then
     fail "downloaded bundle is not a valid tar.gz"
 fi

@@ -1,30 +1,40 @@
 #!/usr/bin/env bash
-# publish-github-release.sh — Build + publish a verified release bundle.
+# publish-github-release.sh — Build + publish a verified, SIGNED release bundle.
 #
 # This is the BLOCKER 8 release pipeline. It:
 #   1. Builds a Linux amd64 release bundle via build-release-bundle.sh
-#      (the bundle is the sealed, sha256-signed release artifact
-#      install-public.sh downloads on a fresh VPS).
-#   2. Generates the .sha256 sidecar that install-public.sh's
-#      auto-resolver requires.
+#      (the bundle is the sealed, sha256- AND Ed25519-signed release
+#      artifact install-public.sh downloads on a fresh VPS). The
+#      ORVIX_RELEASE_SIGNING_KEY_FILE private key is REQUIRED — this
+#      script refuses to publish an unsigned bundle.
+#   2. Uploads the COMPLETE sidecar set for the version-named bundle
+#      AND its channel alias: .sha256, .sig, .manifest.json,
+#      .manifest.json.sig, .sbom.spdx, .sbom.spdx.sig. A release with
+#      only a checksum but no .sig is exactly the failure that made
+#      install-public.sh's signature gate 404 on the previous stable
+#      release — never publish that shape again.
 #   3. Creates a GitHub Release for the supplied tag (or updates
-#      an existing one), uploads the bundle + sha256 as release
-#      assets, and (optionally) repoints the "stable" alias assets
-#      so the no-version curl-pipe command keeps working.
+#      an existing one).
 #   4. Runs verify-github-release-assets.sh against the published
 #      release so the operator / CI knows the assets are reachable
-#      BEFORE they hand the install command to a customer.
+#      AND signature-verifiable BEFORE they hand the install command
+#      to a customer.
 #
 # Usage:
 #   ORVIX_GITHUB_REPO=reachfm/orvix \
-#   ORVIX_RELEASE_TAG=v1.0.3-rc5 \
-#   ORVIX_CHANNEL=stable \
+#   ORVIX_RELEASE_TAG=v1.0.4-rc2 \
+#   ORVIX_CHANNEL=rc \
+#   ORVIX_RELEASE_SIGNING_KEY_FILE=/secure/path/signing-key.pem \
 #   bash release/scripts/publish-github-release.sh
 #
 # Required environment:
 #   ORVIX_GITHUB_REPO    GitHub repo slug (default: reachfm/orvix)
 #   ORVIX_RELEASE_TAG    Git tag for the release (required)
 #   ORVIX_CHANNEL        Channel alias to repoint (default: stable)
+#   ORVIX_RELEASE_SIGNING_KEY_FILE
+#                        Path to the Ed25519 private key used to sign
+#                        the bundle + manifest + SBOM. REQUIRED — an
+#                        unsigned bundle is never publishable.
 #   ORVIX_GH_TOKEN       GitHub token with repo:release scope.
 #                        The script refuses to run without one.
 #   ORVIX_DRY_RUN        If set, do everything except the actual
@@ -32,7 +42,7 @@
 #
 # Optional:
 #   ORVIX_BUILD_DIR      Output directory for the bundle (default:
-#                        dist). The published .tar.gz and .sha256
+#                        dist). The published .tar.gz and sidecars
 #                        live here.
 #
 # Why this script is required:
@@ -63,9 +73,19 @@ fail() { printf '%bERROR:%b %s\n' "$RED" "$NC" "$*" >&2; exit 1; }
 warn() { printf '%bWARN:%b %s\n' "$YELLOW" "$NC" "$*" >&2; }
 
 # ── 1. Pre-flight checks ──────────────────────────────────────────
-[ -n "$RELEASE_TAG" ] || fail "ORVIX_RELEASE_TAG is required (e.g. v1.0.3-rc5)"
+[ -n "$RELEASE_TAG" ] || fail "ORVIX_RELEASE_TAG is required (e.g. v1.0.4-rc2)"
 [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9._-]+)?$ ]] \
     || fail "ORVIX_RELEASE_TAG must look like a semver tag (got '$RELEASE_TAG')"
+
+# Never publish an unsigned bundle: the previous stable release was
+# published with only a .sha256 sidecar, so install-public.sh's
+# signature gate could not verify it (.sig returned 404). The signing
+# private key is REQUIRED here; we never generate or substitute a key.
+if [ -z "${ORVIX_RELEASE_SIGNING_KEY_FILE:-}" ]; then
+    fail "ORVIX_RELEASE_SIGNING_KEY_FILE is required (refusing to publish an unsigned bundle)"
+fi
+[ -f "$ORVIX_RELEASE_SIGNING_KEY_FILE" ] \
+    || fail "ORVIX_RELEASE_SIGNING_KEY_FILE not found: $ORVIX_RELEASE_SIGNING_KEY_FILE"
 
 if [ -z "${ORVIX_GH_TOKEN:-}" ]; then
     if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
@@ -82,22 +102,40 @@ if ! command -v sha256sum >/dev/null 2>&1; then
     fail "sha256sum is required to generate the bundle sidecar"
 fi
 
-# ── 2. Build the release bundle ───────────────────────────────────
-log "building release bundle (Linux amd64)..."
-if ! bash "$SCRIPT_DIR/build-release-bundle.sh" 2>&1; then
+# ── 2. Build the signed release bundle ────────────────────────────
+log "building signed release bundle (Linux amd64)..."
+if ! ORVIX_REQUIRE_RELEASE_SIGNATURE=1 \
+    ORVIX_RELEASE_SIGNING_KEY_FILE="$ORVIX_RELEASE_SIGNING_KEY_FILE" \
+    bash "$SCRIPT_DIR/build-release-bundle.sh" 2>&1; then
     fail "build-release-bundle.sh failed; refusing to publish a half-built bundle"
 fi
 
-TARBALL="$BUILD_DIR/orvix-enterprise-mail-${CHANNEL}-linux-amd64.tar.gz"
+# Resolve the version-named archive (never hardcode "stable").
+RESOLVED_VERSION="$(ls "$BUILD_DIR" | sed -n "s/^orvix-enterprise-mail-\(.*\)-linux-amd64\.tar\.gz\$/\1/p" | grep -v "^${CHANNEL}\$" | head -n1)"
+[ -n "$RESOLVED_VERSION" ] || fail "could not resolve the version-named bundle from $BUILD_DIR"
+
+TARBALL="$BUILD_DIR/orvix-enterprise-mail-${RESOLVED_VERSION}-linux-amd64.tar.gz"
 SIDECAR="$TARBALL.sha256"
-[ -f "$TARBALL" ] || fail "expected $TARBALL after build but it is missing"
-[ -f "$SIDECAR" ] || fail "expected $SIDECAR after build but it is missing (the build script should write it)"
+for sidecar in \
+    "$TARBALL" "$TARBALL.sha256" "$TARBALL.sig" \
+    "$TARBALL.manifest.json" "$TARBALL.manifest.json.sig" \
+    "$TARBALL.sbom.spdx" "$TARBALL.sbom.spdx.sig"; do
+    [ -f "$sidecar" ] || fail "expected $sidecar after build but it is missing (signed sidecar set incomplete)"
+done
 
 SHA="$(awk '{print $1}' "$SIDECAR" | tr -d '\r\n')"
 SIZE="$(wc -c < "$TARBALL" | tr -d ' \r\n')"
-log "bundle: $TARBALL"
+log "bundle: $TARBALL (version=$RESOLVED_VERSION)"
 log "size:   $SIZE bytes"
 log "sha256: $SHA"
+
+# Re-verify the local signature before anything is uploaded.
+if ! openssl pkeyutl -verify -rawin -pubin \
+    -inkey "$REPO_ROOT/release/trust/orvix-release-signing.pub.pem" \
+    -in "$TARBALL" -sigfile "$TARBALL.sig"; then
+    fail "local Ed25519 signature verification failed for $TARBALL (refusing to publish)"
+fi
+log "local bundle signature verified against release/trust/orvix-release-signing.pub.pem"
 
 # ── 3. Create or fetch the GitHub Release ─────────────────────────
 RELEASE_JSON="$(mktemp)"
@@ -127,11 +165,27 @@ else
     fi
 fi
 
-# ── 4. Upload the bundle + sha256 sidecar to the release ─────────
+# ── 4. Upload the FULL signed sidecar set to the release ─────────
+# The previous stable release shipped only the bundle + .sha256;
+# install-public.sh then 404'd on the .sig it requires. Uploading
+# the complete 7-file set (bundle, .sha256, .sig, .manifest.json,
+# .manifest.json.sig, .sbom.spdx, .sbom.spdx.sig) for BOTH the
+# version-named and the channel-alias artifact is mandatory.
+SIDECARS=(
+    "$TARBALL"
+    "$TARBALL.sha256"
+    "$TARBALL.sig"
+    "$TARBALL.manifest.json"
+    "$TARBALL.manifest.json.sig"
+    "$TARBALL.sbom.spdx"
+    "$TARBALL.sbom.spdx.sig"
+)
 if [ -n "$DRY_RUN" ]; then
-    log "DRY RUN: would upload $TARBALL and $SIDECAR to $RELEASE_TAG"
+    for f in "${SIDECARS[@]}"; do
+        log "DRY RUN: would upload $(basename "$f") to $RELEASE_TAG"
+    done
 else
-    log "uploading bundle + sha256 to $RELEASE_TAG..."
+    log "uploading full signed sidecar set to $RELEASE_TAG..."
     if [ -n "${ORVIX_GH_TOKEN:-}" ]; then
         # gh-style "upload" via the GitHub API upload endpoint
         UPLOAD_URL="$(curl -fsSL \
@@ -140,7 +194,7 @@ else
             "https://api.github.com/repos/$GITHUB_REPO/releases/tags/$RELEASE_TAG" \
             | grep -oE '"upload_url"\s*:\s*"[^"]+"' | head -n1 | sed -E 's/.*"([^"]+)".*/\1/' | sed 's/{?name,label}//')"
         [ -n "$UPLOAD_URL" ] || fail "could not resolve upload URL for $RELEASE_TAG (release missing?)"
-        for f in "$TARBALL" "$SIDECAR"; do
+        for f in "${SIDECARS[@]}"; do
             name="$(basename "$f")"
             log "uploading $name"
             curl -fsSL \
@@ -150,7 +204,7 @@ else
                 "$UPLOAD_URL?name=$name" >/dev/null
         done
     elif command -v gh >/dev/null 2>&1; then
-        gh release upload "$RELEASE_TAG" "$TARBALL" "$SIDECAR" \
+        gh release upload "$RELEASE_TAG" "${SIDECARS[@]}" \
             --repo "$GITHUB_REPO" \
             --clobber
     fi
@@ -158,25 +212,22 @@ fi
 
 # ── 5. Repoint the channel alias assets (stable/rc/dev) ──────────
 # install-public.sh's no-version path uses
-#   ${ORVIX_RELEASES_BASE}/orvix-enterprise-mail-stable-linux-amd64.tar.gz
-# which GitHub resolves via the "stable" channel tag. The previous
-# flow required an operator to manually keep the alias tarball in
-# sync. This script now does it: when CHANNEL=stable, it also
-# uploads the bundle under the "stable" name to the same release
-# so the alias path resolves.
+#   ${ORVIX_RELEASES_BASE}/orvix-enterprise-mail-<channel>-linux-amd64.tar.gz
+# which GitHub resolves via the "latest" release. Publish the channel
+# alias under the FULL sidecar set too, so the alias path is just as
+# verifiable as the version-named path.
 if [ -n "$DRY_RUN" ]; then
     log "DRY RUN: would repoint $CHANNEL alias assets"
 else
-    ALIAS_TARBALL="orvix-enterprise-mail-${CHANNEL}-linux-amd64.tar.gz"
-    ALIAS_SIDECAR="${ALIAS_TARBALL}.sha256"
+    ALIAS_BASE="orvix-enterprise-mail-${CHANNEL}-linux-amd64.tar.gz"
     if [ -n "${ORVIX_GH_TOKEN:-}" ]; then
         UPLOAD_URL="$(curl -fsSL \
             -H "Authorization: token $ORVIX_GH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/$GITHUB_REPO/releases/tags/$RELEASE_TAG" \
             | grep -oE '"upload_url"\s*:\s*"[^"]+"' | head -n1 | sed -E 's/.*"([^"]+)".*/\1/' | sed 's/{?name,label}//')"
-        for f in "$TARBALL" "$SIDECAR"; do
-            alias_name="$(basename "$f" | sed "s/-$CHANNEL/-stable/")"
+        for f in "${SIDECARS[@]}"; do
+            alias_name="$(basename "$f" | sed "s/-$RESOLVED_VERSION-/-${CHANNEL}-/")"
             log "uploading alias $alias_name"
             curl -fsSL \
                 -H "Authorization: token $ORVIX_GH_TOKEN" \
@@ -185,12 +236,13 @@ else
                 "$UPLOAD_URL?name=$alias_name" >/dev/null
         done
     elif command -v gh >/dev/null 2>&1; then
-        # Re-upload under the alias name. gh's --clobber
-        # overwrites the previous asset under the same name.
-        cp "$TARBALL" "$BUILD_DIR/$ALIAS_TARBALL"
-        cp "$SIDECAR" "$BUILD_DIR/$ALIAS_SIDECAR"
-        gh release upload "$RELEASE_TAG" \
-            "$BUILD_DIR/$ALIAS_TARBALL" "$BUILD_DIR/$ALIAS_SIDECAR" \
+        ALIAS_FILES=()
+        for f in "${SIDECARS[@]}"; do
+            alias_name="$(basename "$f" | sed "s/-$RESOLVED_VERSION-/-${CHANNEL}-/")"
+            cp "$f" "$BUILD_DIR/$alias_name"
+            ALIAS_FILES+=("$BUILD_DIR/$alias_name")
+        done
+        gh release upload "$RELEASE_TAG" "${ALIAS_FILES[@]}" \
             --repo "$GITHUB_REPO" \
             --clobber
     fi
@@ -201,12 +253,19 @@ log "verifying published assets via verify-github-release-assets.sh..."
 if ! bash "$SCRIPT_DIR/verify-github-release-assets.sh" \
     --repo "$GITHUB_REPO" \
     --tag "$RELEASE_TAG" \
-    --channel "$CHANNEL" \
+    --asset "orvix-enterprise-mail-${RESOLVED_VERSION}-linux-amd64.tar.gz" \
     --expected-sha "$SHA" 2>&1; then
     fail "verify-github-release-assets.sh reported the published release is not reachable (BLOCKER 8 fail-closed gate)"
 fi
+if ! bash "$SCRIPT_DIR/verify-github-release-assets.sh" \
+    --repo "$GITHUB_REPO" \
+    --tag "$RELEASE_TAG" \
+    --asset "orvix-enterprise-mail-${CHANNEL}-linux-amd64.tar.gz" \
+    --expected-sha "$SHA" 2>&1; then
+    fail "verify-github-release-assets.sh reported the $CHANNEL alias assets are not reachable (BLOCKER 8 fail-closed gate)"
+fi
 
-log "release published + verified: $RELEASE_TAG (channel=$CHANNEL)"
+log "release published + verified: $RELEASE_TAG (channel=$CHANNEL, version=$RESOLVED_VERSION)"
 printf '\n%sPublished %s to %s (channel=%s, sha256=%s, size=%s)%s\n' \
     "$GREEN" "$TARBALL" "$GITHUB_REPO" "$CHANNEL" "${SHA:0:12}" "$SIZE" "$NC"
 exit 0
