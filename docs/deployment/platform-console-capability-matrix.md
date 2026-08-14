@@ -296,6 +296,40 @@ safe.
 | `POST /platform/relays/:id/test` | platformMW | `TestPlatformRelay` | SSRF/DNS-rebinding-safe connection test, bounded timeouts, idempotent, redacted | Platform | `internal/platform/relay/admin_test.go` | MISSING_UI |
 | `DELETE /platform/relays/:id` | platformMW | `DeletePlatformRelay` | delete relay, typed confirmation, audited | Platform | `internal/platform/relay/admin_test.go` | MISSING_UI |
 
+## Bulk Mailbox Provisioning (Milestone 17)
+
+Platform Super Admin bulk CSV/XLSX mailbox import, backend-only in
+this pass (no console UI consumer yet — driven through the API only).
+Every route requires an explicit target `tenant_id` in the path
+(never inferred as tenant 0) and is platformMW-gated (tenant roles are
+denied); mutations are RBAC-permissioned (`PermMailboxesWrite`), the
+staging/validate/create-job/execute mutations require an
+`Idempotency-Key`, execution is durable/checkpointed/resumable via the
+generic `internal/platform/jobs` framework, and lifecycle state
+transitions carry transactional audit/outbox evidence
+(`internal/platform/bulkprovision.Service.finalizeLifecycleTx`). The
+template route (`GET`, `PermMailboxesRead`) is the only read-only,
+non-tenant-scoped route in this group — it returns a generated
+CSV/XLSX template, not tenant data. Covered by
+`internal/platform/bulkprovision/*_test.go` (parsing/security,
+durability, audit/outbox failure-injection) and
+`internal/api/handlers/platform_bulk_mailboxes_acceptance_test.go`
+(real router, real middleware: RBAC, CSRF, tenant isolation,
+idempotency replay, redaction, dry-run-then-execute).
+
+| Route | Middleware | Handler | Contract | Owner | Test file | Disposition |
+|---|---|---|---|---|---|---|
+| `GET /platform/mailboxes/bulk/template` | platformMW | `GetPlatformBulkMailboxTemplate` | generated CSV/XLSX import template, `?format=csv\|xlsx`, `Cache-Control: no-store`, not tenant-scoped (static content) | Platform | `platform_bulk_mailboxes_acceptance_test.go` | MISSING_UI |
+| `POST /platform/mailboxes/bulk/:tenant_id/stage` | platformMW | `PostPlatformBulkMailboxStage` | bounded (8 MiB) multipart upload, content-sniffed (magic bytes vs. extension), parsed and security-checked (formula injection, macro/path-traversal, unknown/duplicate headers) before staging; confined server-generated staging ID + SHA-256 hash, never a filesystem path; Idempotency-Key required | Platform | `platform_bulk_mailboxes_acceptance_test.go`, `internal/platform/bulkprovision/parse_security_test.go` | MISSING_UI |
+| `POST /platform/mailboxes/bulk/:tenant_id/validate` | platformMW | `PostPlatformBulkMailboxValidate` | pure dry-run against the hash-verified staged bytes (never a client-supplied row list); zero mailbox/folder/quota mutation | Platform | `platform_bulk_mailboxes_acceptance_test.go`, `internal/platform/bulkprovision/service_test.go` | MISSING_UI |
+| `POST /platform/mailboxes/bulk/:tenant_id/jobs` | platformMW | `PostPlatformBulkMailboxCreateJob` | re-validates server-side against the hash-verified staged bytes and persists the durable job in "ready" state; conflict policy `fail`\|`skip_existing` only (never silently converts create into update); Idempotency-Key required; still zero mailbox mutation | Platform | `platform_bulk_mailboxes_acceptance_test.go`, `internal/platform/bulkprovision/service_test.go` | MISSING_UI |
+| `GET /platform/mailboxes/bulk/:tenant_id/jobs` | platformMW | `GetPlatformBulkMailboxJobs` | paginated (bounded limit/offset) job list, tenant-scoped | Platform | `internal/platform/bulkprovision/service_test.go` | MISSING_UI |
+| `GET /platform/mailboxes/bulk/:tenant_id/jobs/:jobId` | platformMW | `GetPlatformBulkMailboxJob` | job detail (counts/status/checkpoint), tenant-scoped, no staging path/lease/secret in response | Platform | `platform_bulk_mailboxes_acceptance_test.go` | MISSING_UI |
+| `GET /platform/mailboxes/bulk/:tenant_id/jobs/:jobId/rows` | platformMW | `GetPlatformBulkMailboxJobRows` | paginated per-row result report, tenant-scoped, no secret material | Platform | `platform_bulk_mailboxes_acceptance_test.go` | MISSING_UI |
+| `POST /platform/mailboxes/bulk/:tenant_id/jobs/:jobId/execute` | platformMW | `PostPlatformBulkMailboxExecute` | submits for DURABLE ASYNC execution on `internal/platform/jobs` (never runs inline); returns `202 Accepted` + durable job reference; Idempotency-Key required, exactly-once submission | Platform | `platform_bulk_mailboxes_acceptance_test.go`, `internal/platform/bulkprovision/execute_durability_test.go` | MISSING_UI |
+| `POST /platform/mailboxes/bulk/:tenant_id/jobs/:jobId/cancel` | platformMW | `PostPlatformBulkMailboxCancel` | cooperative cancellation, version-guarded transition, transactional lifecycle audit/outbox evidence | Platform | `internal/platform/bulkprovision/execute_audit_outbox_test.go` | MISSING_UI |
+| `POST /platform/mailboxes/bulk/:tenant_id/jobs/:jobId/retry` | platformMW | `PostPlatformBulkMailboxRetry` | idempotent re-attempt of only the rows left `RowFailed`; never re-touches already-succeeded rows | Platform | `internal/platform/bulkprovision/service_test.go` | MISSING_UI |
+
 ## Theme system (cross-cutting, not a route)
 
 Verified by `web/admin/src/shared/theme/{theme,useTheme}.test.ts`,
@@ -323,7 +357,7 @@ above (not carried over from an earlier draft) and is enforced equal
 to the router's actual route set by
 `internal/api/capability_matrix_test.go`, which parses
 `platformMW[0], platformMW[1]` registrations straight out of
-`router.go` — currently 200 — and parses every `` `METHOD /path` ``
+`router.go` — currently 210 — and parses every `` `METHOD /path` ``
 occurrence and its row's disposition straight out of this document.
 
 | Disposition | Routes |
@@ -333,9 +367,9 @@ occurrence and its row's disposition straight out of this document.
 | MACHINE_ONLY | 3 |
 | DEPRECATED | 12 |
 | DUPLICATE_SUPERSEDED_ROUTE | 18 |
-| MISSING_UI | 103 |
+| MISSING_UI | 113 |
 | MISSING_BACKEND | 0 (the one MISSING_BACKEND case — platform-initiated organization creation — is a non-route documented under Organizations, not counted here) |
-| **Total** | **200** |
+| **Total** | **210** |
 
 Three pre-existing MISSING_UI gaps were documented rather than
 silently omitted: `GET /admin/backups/:id` (single-backup fetch; the
