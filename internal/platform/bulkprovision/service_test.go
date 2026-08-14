@@ -10,6 +10,8 @@ import (
 	"github.com/orvix/orvix/internal/admin/domain"
 	"github.com/orvix/orvix/internal/admin/mailbox"
 	"github.com/orvix/orvix/internal/audit"
+	"github.com/orvix/orvix/internal/dbdialect"
+	"github.com/orvix/orvix/internal/platform/kernel"
 	_ "modernc.org/sqlite"
 )
 
@@ -103,6 +105,27 @@ func newTestRepo(t *testing.T) (*sql.DB, *Repository) {
 	return db, repo
 }
 
+// newDurableTestRepo is newTestRepo plus REAL (schema-initialized)
+// outbox and audit stores backed by the same database, for any test
+// whose call path reaches a terminal lifecycle transition
+// (Execute-to-completion, Cancel, RetryFailedRows-to-completion).
+// finalizeLifecycleTx fails closed when either dependency is nil, so
+// any such test needs real ones, not nil, to exercise its actual
+// business logic rather than the fail-closed guard itself.
+func newDurableTestRepo(t *testing.T) (*sql.DB, *Repository, *kernel.OutboxRepository, *audit.ExtendedStore) {
+	t.Helper()
+	db, repo := newTestRepo(t)
+	ob := kernel.NewOutboxRepository(dbdialect.FromDriver("sqlite"))
+	if err := ob.EnsureSchema(context.Background(), db); err != nil {
+		t.Fatalf("ensure outbox schema: %v", err)
+	}
+	as := audit.NewExtendedStore(db)
+	if err := as.EnsureTable(context.Background()); err != nil {
+		t.Fatalf("ensure audit schema: %v", err)
+	}
+	return db, repo, ob, as
+}
+
 // ── parsing ───────────────────────────────────────────────────────
 
 func TestParseCSV_ParsesEmailNameQuota(t *testing.T) {
@@ -193,9 +216,9 @@ func TestValidate_EmptyFileIsRejected(t *testing.T) {
 // ── execution strategies ─────────────────────────────────────────
 
 func TestExecute_PartialStrategyIsolatesRowFailures(t *testing.T) {
-	_, repo := newTestRepo(t)
+	_, repo, ob, as := newDurableTestRepo(t)
 	fm := newFakeMailboxes(0)
-	svc := NewService(repo, fm, fakeAccessMode{domain.MailAccessInternalExternal}, nil, nil, nil, nil)
+	svc := NewService(repo, fm, fakeAccessMode{domain.MailAccessInternalExternal}, nil, ob, as, nil)
 	ctx := context.Background()
 
 	res, err := svc.Validate(ctx, 1, 1, "x.test", "test-hash", []RawRow{{RowNumber: 2, Email: "a@x.test"}, {RowNumber: 3, Email: "b@x.test"}})
@@ -240,9 +263,9 @@ func TestExecute_PartialStrategyIsolatesRowFailures(t *testing.T) {
 }
 
 func TestExecute_AtomicStrategyRollsBackAllOnAnyFailure(t *testing.T) {
-	_, repo := newTestRepo(t)
+	_, repo, ob, as := newDurableTestRepo(t)
 	fm := newFakeMailboxes(0)
-	svc := NewService(repo, fm, fakeAccessMode{domain.MailAccessInternalExternal}, nil, nil, nil, nil)
+	svc := NewService(repo, fm, fakeAccessMode{domain.MailAccessInternalExternal}, nil, ob, as, nil)
 	ctx := context.Background()
 
 	res, err := svc.Validate(ctx, 1, 1, "x.test", "test-hash", []RawRow{{RowNumber: 2, Email: "a@x.test"}, {RowNumber: 3, Email: "b@x.test"}})
@@ -298,8 +321,8 @@ func TestCreateJob_SameIdempotencyKeyReturnsSameJob(t *testing.T) {
 // ── cancel / retry ────────────────────────────────────────────────
 
 func TestCancel_ReadyJobCanBeCancelled(t *testing.T) {
-	_, repo := newTestRepo(t)
-	svc := NewService(repo, newFakeMailboxes(0), fakeAccessMode{domain.MailAccessInternalExternal}, nil, nil, nil, nil)
+	_, repo, ob, as := newDurableTestRepo(t)
+	svc := NewService(repo, newFakeMailboxes(0), fakeAccessMode{domain.MailAccessInternalExternal}, nil, ob, as, nil)
 	ctx := context.Background()
 	res, _ := svc.Validate(ctx, 1, 1, "x.test", "test-hash", []RawRow{{RowNumber: 2, Email: "a@x.test"}})
 	job, _ := svc.CreateJob(ctx, 1, 1, 99, StrategyPartial, ConflictFail, "", res)
@@ -314,8 +337,8 @@ func TestCancel_ReadyJobCanBeCancelled(t *testing.T) {
 }
 
 func TestCancel_CompletedJobCannotBeCancelled(t *testing.T) {
-	_, repo := newTestRepo(t)
-	svc := NewService(repo, newFakeMailboxes(0), fakeAccessMode{domain.MailAccessInternalExternal}, nil, nil, nil, nil)
+	_, repo, ob, as := newDurableTestRepo(t)
+	svc := NewService(repo, newFakeMailboxes(0), fakeAccessMode{domain.MailAccessInternalExternal}, nil, ob, as, nil)
 	ctx := context.Background()
 	res, _ := svc.Validate(ctx, 1, 1, "x.test", "test-hash", []RawRow{{RowNumber: 2, Email: "a@x.test"}})
 	job, _ := svc.CreateJob(ctx, 1, 1, 99, StrategyPartial, ConflictFail, "", res)
@@ -328,9 +351,9 @@ func TestCancel_CompletedJobCannotBeCancelled(t *testing.T) {
 }
 
 func TestRetryFailedRows_OnlyRetriesFailedNotCreated(t *testing.T) {
-	_, repo := newTestRepo(t)
+	_, repo, ob, as := newDurableTestRepo(t)
 	fm := newFakeMailboxes(0)
-	svc := NewService(repo, fm, fakeAccessMode{domain.MailAccessInternalExternal}, nil, nil, nil, nil)
+	svc := NewService(repo, fm, fakeAccessMode{domain.MailAccessInternalExternal}, nil, ob, as, nil)
 	ctx := context.Background()
 
 	res, _ := svc.Validate(ctx, 1, 1, "x.test", "test-hash", []RawRow{{RowNumber: 2, Email: "a@x.test"}, {RowNumber: 3, Email: "b@x.test"}})

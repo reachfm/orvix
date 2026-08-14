@@ -181,6 +181,19 @@ func (r *Repository) GetJob(ctx context.Context, id, tenantID uint) (*Job, error
 	return j, err
 }
 
+// getJobTx reads the job by ID (no tenant filter — the caller already
+// holds an authoritative tenant-scoped job) within the given
+// transaction, so a lifecycle-finalize read-after-write sees its own
+// uncommitted write.
+func (r *Repository) getJobTx(ctx context.Context, tx *sql.Tx, id uint) (*Job, error) {
+	row := tx.QueryRowContext(ctx, `SELECT `+jobCols+` FROM platform_bulk_import_jobs WHERE id=`+r.dialect.Placeholder(1), id)
+	j, err := scanJob(row)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	return j, err
+}
+
 func (r *Repository) GetJobByIdempotencyKey(ctx context.Context, tenantID uint, key string) (*Job, error) {
 	if key == "" {
 		return nil, nil
@@ -337,6 +350,32 @@ func (r *Repository) UpdateJobCounters(ctx context.Context, id uint, status JobS
 		`UPDATE platform_bulk_import_jobs SET status=`+r.dialect.Placeholder(1)+`, created_count=`+r.dialect.Placeholder(2)+`, failed_count=`+r.dialect.Placeholder(3)+`, skipped_count=`+r.dialect.Placeholder(4)+`, version=version+1, updated_at=`+r.dialect.Placeholder(5)+` WHERE id=`+r.dialect.Placeholder(6),
 		status, createdCount, failedCount, skippedCount, now, id)
 	return err
+}
+
+// UpdateJobCountersTx is UpdateJobCounters run inside the caller's
+// transaction, so the terminal job-status write and its lifecycle
+// outbox/audit evidence commit or roll back together — never one
+// without the other.
+func (r *Repository) UpdateJobCountersTx(ctx context.Context, tx *sql.Tx, id uint, status JobStatus, createdCount, failedCount, skippedCount int, now time.Time) error {
+	_, err := tx.ExecContext(ctx,
+		`UPDATE platform_bulk_import_jobs SET status=`+r.dialect.Placeholder(1)+`, created_count=`+r.dialect.Placeholder(2)+`, failed_count=`+r.dialect.Placeholder(3)+`, skipped_count=`+r.dialect.Placeholder(4)+`, version=version+1, updated_at=`+r.dialect.Placeholder(5)+` WHERE id=`+r.dialect.Placeholder(6),
+		status, createdCount, failedCount, skippedCount, now, id)
+	return err
+}
+
+// TransitionJobIfVersionTx is TransitionJobIfVersion run inside the
+// caller's transaction (used by Cancel so the state transition and its
+// lifecycle outbox/audit evidence are coherent).
+func (r *Repository) TransitionJobIfVersionTx(ctx context.Context, tx *sql.Tx, id uint, expected, next JobStatus, expectedVersion int, now time.Time) (bool, error) {
+	res, err := tx.ExecContext(ctx,
+		`UPDATE platform_bulk_import_jobs SET status=`+r.dialect.Placeholder(1)+`, version=version+1, updated_at=`+r.dialect.Placeholder(2)+`
+		 WHERE id=`+r.dialect.Placeholder(3)+` AND status=`+r.dialect.Placeholder(4)+` AND version=`+r.dialect.Placeholder(5),
+		next, now, id, expected, expectedVersion)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n == 1, err
 }
 
 func scanJob(row interface{ Scan(...any) error }) (*Job, error) {

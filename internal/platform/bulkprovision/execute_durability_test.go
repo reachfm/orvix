@@ -27,9 +27,9 @@ func setBatchSizeForTest(t *testing.T, n int) {
 // would — resumes strictly from the checkpoint and never re-creates a
 // mailbox that already succeeded.
 func TestExecute_CrashMidBatchResumesWithoutDuplication(t *testing.T) {
-	_, repo := newTestRepo(t)
+	_, repo, ob, as := newDurableTestRepo(t)
 	fm := newFakeMailboxes(0)
-	svc := NewService(repo, fm, fakeAccessMode{domain.MailAccessInternalExternal}, nil, nil, nil, nil)
+	svc := NewService(repo, fm, fakeAccessMode{domain.MailAccessInternalExternal}, nil, ob, as, nil)
 	ctx := context.Background()
 
 	var raw []RawRow
@@ -154,9 +154,9 @@ func TestExecute_CancelDuringRunStopsFutureBatches(t *testing.T) {
 // the skip_existing policy: an already-existing mailbox is neither a
 // failure nor touched, and the row is recorded skipped.
 func TestExecute_SkipExistingConflictPolicyLeavesMailboxUnmodified(t *testing.T) {
-	_, repo := newTestRepo(t)
+	_, repo, ob, as := newDurableTestRepo(t)
 	fm := newFakeMailboxes(0)
-	svc := NewService(repo, fm, fakeAccessMode{domain.MailAccessInternalExternal}, nil, nil, nil, nil)
+	svc := NewService(repo, fm, fakeAccessMode{domain.MailAccessInternalExternal}, nil, ob, as, nil)
 	ctx := context.Background()
 
 	// Pre-existing mailbox not created through this package (simulates

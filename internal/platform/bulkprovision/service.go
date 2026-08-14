@@ -2,6 +2,7 @@ package bulkprovision
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
@@ -37,9 +38,11 @@ func NewService(repo *Repository, mailboxes MailboxCreator, accessMode DomainAcc
 	return &Service{repo: repo, mailboxes: mailboxes, accessMode: accessMode, idempotency: idempotency, outbox: outbox, audit: auditStore, clock: clock}
 }
 
-// recordAudit writes a best-effort, secret-free audit entry for one
-// bulk-import lifecycle event. Never includes row content, passwords,
-// setup tokens, or raw file bytes — only counts and identifiers.
+// recordAudit writes a best-effort, secret-free audit entry for a
+// NON-terminal bulk-import event (currently only "job created", which
+// precedes any mutation and so has nothing to roll back if it fails).
+// Terminal lifecycle events (completed/failed/cancelled) MUST go
+// through finalizeLifecycleTx instead — see its doc comment.
 func (s *Service) recordAudit(ctx context.Context, actorID uint, action string, job *Job, result, detail string) {
 	if s.audit == nil || job == nil {
 		return
@@ -51,6 +54,75 @@ func (s *Service) recordAudit(ctx context.Context, actorID uint, action string, 
 		After: fmt.Sprintf("status=%s total=%d valid=%d invalid=%d created=%d failed=%d skipped=%d source_hash=%s %s",
 			job.Status, job.TotalRows, job.ValidRows, job.InvalidRows, job.CreatedCount, job.FailedCount, job.SkippedCount, job.SourceHash, detail),
 	})
+}
+
+// errLifecycleDurabilityUnavailable is returned instead of silently
+// completing a terminal job-status transition when the outbox and/or
+// audit dependency was not wired at construction. A nil dependency
+// must never silently disable durability evidence for a committed
+// business-state change — see PHASE R1-C requirement 4.
+var errLifecycleDurabilityUnavailable = errors.New("bulk import lifecycle durability (outbox/audit) not available")
+
+// finalizeLifecycleTx durably commits a terminal bulk-import job-status
+// transition together with its lifecycle outbox event and audit entry
+// IN ONE DATABASE TRANSACTION. If the outbox insert or the audit insert
+// fails, the whole transaction — including the job-status mutation
+// itself — rolls back, so the job is left in its prior, still-resumable
+// state rather than silently reporting success with no evidence.
+//
+// mutate performs the actual job-row UPDATE(s) using the given *sql.Tx
+// and must be the ONLY write inside the transaction besides the
+// outbox/audit inserts this function performs itself.
+func (s *Service) finalizeLifecycleTx(ctx context.Context, jobID, actorID uint, action, result, detail string, mutate func(tx *sql.Tx) error) (*Job, error) {
+	if s.outbox == nil || s.audit == nil {
+		return nil, kernel.Wrap(kernel.ErrCodeInternal, "bulk import lifecycle finalize", errLifecycleDurabilityUnavailable)
+	}
+	tx, err := s.repo.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, kernel.Wrap(kernel.ErrCodeInternal, "begin lifecycle transaction", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	if err := mutate(tx); err != nil {
+		return nil, err
+	}
+
+	job, err := s.repo.getJobTx(ctx, tx, jobID)
+	if err != nil {
+		return nil, kernel.Wrap(kernel.ErrCodeInternal, "reload job for lifecycle event", err)
+	}
+	if job == nil {
+		return nil, ErrJobNotFound
+	}
+
+	if err := s.outbox.Enqueue(ctx, tx, "bulkprovision."+action, fmt.Sprintf("%d", jobID), map[string]any{
+		"job_id": jobID, "tenant_id": job.TenantID, "status": job.Status,
+		"created": job.CreatedCount, "failed": job.FailedCount, "skipped": job.SkippedCount,
+		"source_hash": job.SourceHash,
+	}, s.clock.Now()); err != nil {
+		return nil, kernel.Wrap(kernel.ErrCodeInternal, "enqueue lifecycle outbox event", err)
+	}
+
+	if err := s.audit.RecordTx(ctx, tx, &audit.ExtendedEntry{
+		Actor: fmt.Sprintf("user:%d", actorID), ActorID: actorID,
+		Action: action, Target: fmt.Sprintf("bulk_import_job:%d", jobID), TargetID: jobID,
+		TenantID: job.TenantID, Result: result,
+		After: fmt.Sprintf("status=%s total=%d valid=%d invalid=%d created=%d failed=%d skipped=%d source_hash=%s %s",
+			job.Status, job.TotalRows, job.ValidRows, job.InvalidRows, job.CreatedCount, job.FailedCount, job.SkippedCount, job.SourceHash, detail),
+	}); err != nil {
+		return nil, kernel.Wrap(kernel.ErrCodeInternal, "record lifecycle audit entry", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, kernel.Wrap(kernel.ErrCodeInternal, "commit lifecycle transaction", err)
+	}
+	committed = true
+	return job, nil
 }
 
 // ValidationResult is the dry-run output: every row's outcome without
@@ -364,21 +436,28 @@ func (s *Service) Execute(ctx context.Context, jobID, tenantID, domainID uint, d
 			if createErr != nil {
 				if job.ConflictPolicy == ConflictSkipExisting && errors.Is(createErr, mailbox.ErrMailboxExists) {
 					skippedCount++
-					_ = s.repo.UpdateRowResult(ctx, row.ID, RowSkipped, "", "existing mailbox left unmodified", 0, "", now)
+					if uerr := s.repo.UpdateRowResult(ctx, row.ID, RowSkipped, "", "existing mailbox left unmodified", 0, "", now); uerr != nil {
+						return nil, nil, kernel.Wrap(kernel.ErrCodeInternal, "record skipped row", uerr)
+					}
 					nextRowNumber = row.RowNumber + 1
 					continue
 				}
 				failedCount++
-				_ = s.repo.UpdateRowResult(ctx, row.ID, RowFailed, ErrCodeCreateFailed, sanitizeErr(createErr), 0, "", now)
+				if uerr := s.repo.UpdateRowResult(ctx, row.ID, RowFailed, ErrCodeCreateFailed, sanitizeErr(createErr), 0, "", now); uerr != nil {
+					return nil, nil, kernel.Wrap(kernel.ErrCodeInternal, "record failed row", uerr)
+				}
 				if job.Strategy == StrategyAtomic {
 					s.rollbackCreated(ctx, tenantID, created)
-					_ = s.repo.UpdateJobCounters(ctx, jobID, JobFailed, 0, failedCount, skippedCount, now)
-					finalJob, jerr := s.repo.GetJob(ctx, jobID, tenantID)
-					if jerr != nil {
-						return nil, nil, jerr
+					finalJob, ferr := s.finalizeLifecycleTx(ctx, jobID, job.CreatedBy, "job.failed", "failed", "atomic rollback", func(tx *sql.Tx) error {
+						return s.repo.UpdateJobCountersTx(ctx, tx, jobID, JobFailed, 0, failedCount, skippedCount, now)
+					})
+					if ferr != nil {
+						return nil, nil, ferr
 					}
-					finalRows, _ := s.repo.ListRows(ctx, jobID, nil)
-					s.recordAudit(ctx, job.CreatedBy, "bulkprovision.job.failed", finalJob, "failed", "atomic rollback")
+					finalRows, rerr := s.repo.ListRows(ctx, jobID, nil)
+					if rerr != nil {
+						return nil, nil, rerr
+					}
 					return finalJob, finalRows, nil
 				}
 				nextRowNumber = row.RowNumber + 1
@@ -386,7 +465,21 @@ func (s *Service) Execute(ctx context.Context, jobID, tenantID, domainID uint, d
 			}
 			createdCount++
 			created = append(created, mailboxID)
-			_ = s.repo.UpdateRowResult(ctx, row.ID, RowCreated, "", "", mailboxID, setupTokenHash, now)
+			// The mailbox mutation ITSELF already committed via the
+			// canonical mailbox service's own transaction by this point
+			// (createOneMailbox returned success). If recording the row
+			// result fails here, we must not silently pretend nothing
+			// happened: return the error so this call stops WITHOUT
+			// checkpointing this batch. On resume, createOneMailbox's
+			// mailbox.ErrMailboxExists path (defense-in-depth) prevents
+			// re-creating the same address a second time; ConflictFail
+			// jobs would then need administrator remediation for this one
+			// row, which is the honest partial-success reporting model
+			// this feature specifies rather than a fabricated atomic
+			// cross-service transaction.
+			if uerr := s.repo.UpdateRowResult(ctx, row.ID, RowCreated, "", "", mailboxID, setupTokenHash, now); uerr != nil {
+				return nil, nil, kernel.Wrap(kernel.ErrCodeInternal, "record created row (mailbox already committed)", uerr)
+			}
 			nextRowNumber = row.RowNumber + 1
 		}
 
@@ -413,21 +506,28 @@ func (s *Service) Execute(ctx context.Context, jobID, tenantID, domainID uint, d
 	if failedCount > 0 {
 		finalStatus = JobPartiallyFailed
 	}
-	if err := s.repo.UpdateJobCounters(ctx, jobID, finalStatus, createdCount, failedCount, skippedCount, s.clock.Now()); err != nil {
-		return nil, nil, err
+	action := "job.completed"
+	if finalStatus == JobPartiallyFailed {
+		action = "job.partially_failed"
 	}
-	if s.outbox != nil {
-		_ = s.outbox.Enqueue(ctx, s.repo.db, "bulkprovision.job.completed", fmt.Sprintf("%d", jobID), map[string]any{
-			"created": createdCount, "failed": failedCount, "skipped": skippedCount, "strategy": job.Strategy,
-		}, s.clock.Now())
+	finalJob, ferr := s.finalizeLifecycleTx(ctx, jobID, job.CreatedBy, action, string(finalStatus), "", func(tx *sql.Tx) error {
+		return s.repo.UpdateJobCountersTx(ctx, tx, jobID, finalStatus, createdCount, failedCount, skippedCount, s.clock.Now())
+	})
+	if ferr != nil {
+		// The job-status transition (and its outbox/audit evidence) did
+		// NOT commit: it is left exactly as it was before this call (see
+		// finalizeLifecycleTx), which for a job entering this block is
+		// JobRunning with its checkpoint already durable from the last
+		// successful CheckpointBatch. A subsequent Execute call resumes
+		// cleanly: ListRows(RowValid) filtered by the persisted
+		// NextRowNumber returns nothing left to process, and this same
+		// finalize step simply runs again — never re-creating a mailbox.
+		return nil, nil, ferr
 	}
-
-	finalJob, err := s.repo.GetJob(ctx, jobID, tenantID)
-	if err != nil {
-		return nil, nil, err
+	finalRows, rerr := s.repo.ListRows(ctx, jobID, nil)
+	if rerr != nil {
+		return nil, nil, rerr
 	}
-	s.recordAudit(ctx, finalJob.CreatedBy, "bulkprovision.job.completed", finalJob, string(finalJob.Status), "")
-	finalRows, _ := s.repo.ListRows(ctx, jobID, nil)
 	return finalJob, finalRows, nil
 }
 
@@ -495,14 +595,32 @@ func (s *Service) Cancel(ctx context.Context, jobID, tenantID uint) (*Job, error
 		return nil, ErrJobNotCancellable
 	}
 	now := s.clock.Now()
-	ok, err := s.repo.TransitionJobIfVersion(ctx, jobID, job.Status, JobCancelled, job.Version, now)
-	if err != nil {
-		return nil, kernel.Wrap(kernel.ErrCodeInternal, "cancel job", err)
+	var transitioned bool
+	finalJob, ferr := s.finalizeLifecycleTx(ctx, jobID, 0, "job.cancelled", "cancelled", "", func(tx *sql.Tx) error {
+		ok, terr := s.repo.TransitionJobIfVersionTx(ctx, tx, jobID, job.Status, JobCancelled, job.Version, now)
+		if terr != nil {
+			return terr
+		}
+		transitioned = ok
+		if !ok {
+			return ErrVersionConflict
+		}
+		return nil
+	})
+	if ferr != nil {
+		if errors.Is(ferr, ErrVersionConflict) {
+			return nil, ErrVersionConflict
+		}
+		if !transitioned {
+			// The transition itself never happened (lost the race, or the
+			// lifecycle-evidence write failed before ever attempting it) —
+			// the job is left exactly as GetJob already showed it: still
+			// cancellable/retryable, never a false "cancelled".
+			return nil, kernel.Wrap(kernel.ErrCodeInternal, "cancel job", ferr)
+		}
+		return nil, kernel.Wrap(kernel.ErrCodeInternal, "cancel job", ferr)
 	}
-	if !ok {
-		return nil, ErrVersionConflict
-	}
-	return s.repo.GetJob(ctx, jobID, tenantID)
+	return finalJob, nil
 }
 
 // RetryFailedRows re-attempts only the rows left in RowFailed from a
@@ -535,25 +653,32 @@ func (s *Service) RetryFailedRows(ctx context.Context, jobID, tenantID uint, dom
 		mailboxID, setupTokenHash, createErr := s.createOneMailbox(ctx, tenantID, domainName, row)
 		if createErr != nil {
 			stillFailed++
-			_ = s.repo.UpdateRowResult(ctx, row.ID, RowFailed, ErrCodeCreateFailed, sanitizeErr(createErr), 0, "", now)
+			if uerr := s.repo.UpdateRowResult(ctx, row.ID, RowFailed, ErrCodeCreateFailed, sanitizeErr(createErr), 0, "", now); uerr != nil {
+				return nil, nil, kernel.Wrap(kernel.ErrCodeInternal, "record still-failed retry row", uerr)
+			}
 			continue
 		}
 		newlyCreated++
-		_ = s.repo.UpdateRowResult(ctx, row.ID, RowCreated, "", "", mailboxID, setupTokenHash, now)
+		if uerr := s.repo.UpdateRowResult(ctx, row.ID, RowCreated, "", "", mailboxID, setupTokenHash, now); uerr != nil {
+			return nil, nil, kernel.Wrap(kernel.ErrCodeInternal, "record retried created row (mailbox already committed)", uerr)
+		}
 	}
 
 	finalStatus := JobCompleted
 	if stillFailed > 0 {
 		finalStatus = JobPartiallyFailed
 	}
-	if err := s.repo.UpdateJobCounters(ctx, jobID, finalStatus, job.CreatedCount+newlyCreated, stillFailed, job.SkippedCount, now); err != nil {
-		return nil, nil, err
+	finalCreated := job.CreatedCount + newlyCreated
+	finalJob, ferr := s.finalizeLifecycleTx(ctx, jobID, job.CreatedBy, "job.retried", string(finalStatus), fmt.Sprintf("retry: %d newly created, %d still failed", newlyCreated, stillFailed), func(tx *sql.Tx) error {
+		return s.repo.UpdateJobCountersTx(ctx, tx, jobID, finalStatus, finalCreated, stillFailed, job.SkippedCount, now)
+	})
+	if ferr != nil {
+		return nil, nil, ferr
 	}
-	finalJob, err := s.repo.GetJob(ctx, jobID, tenantID)
-	if err != nil {
-		return nil, nil, err
+	allRows, rerr := s.repo.ListRows(ctx, jobID, nil)
+	if rerr != nil {
+		return nil, nil, rerr
 	}
-	allRows, _ := s.repo.ListRows(ctx, jobID, nil)
 	return finalJob, allRows, nil
 }
 
