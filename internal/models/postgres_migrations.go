@@ -1,6 +1,7 @@
 package models
 
 import (
+	"database/sql"
 	"fmt"
 	"strings"
 
@@ -51,7 +52,16 @@ func MigrateAllPostgres(db *gorm.DB) error {
 	if err != nil {
 		return fmt.Errorf("postgres migrate: get sql.DB: %w", err)
 	}
+	return MigrateAllPostgresRaw(sqlDB)
+}
 
+// MigrateAllPostgresRaw applies the PostgreSQL schema migrations over a
+// *sql.DB: table DDL, indexes, and additive column migrations (all
+// idempotent). It is the sql.DB-level equivalent of MigrateAllPostgres
+// and is used by the PostgreSQL verification suites (the disposable
+// container tests in models, admin/domain, and admin/mailbox) that do
+// not wrap the connection in gorm.
+func MigrateAllPostgresRaw(sqlDB *sql.DB) error {
 	tables := postgresTables()
 	for _, ddl := range tables {
 		if _, err := sqlDB.Exec(ddl); err != nil {
@@ -356,6 +366,7 @@ func postgresTables() []string {
 			password_hash TEXT NOT NULL DEFAULT '',
 			display_name TEXT NOT NULL DEFAULT '',
 			quota_mb INTEGER NOT NULL DEFAULT 0,
+			used_bytes BIGINT NOT NULL DEFAULT 0,
 			msg_count INTEGER NOT NULL DEFAULT 0,
 			tenant_id INTEGER NOT NULL DEFAULT 0,
 			name TEXT NOT NULL DEFAULT '',
@@ -378,7 +389,9 @@ func postgresTables() []string {
 			allow_imap BOOLEAN NOT NULL DEFAULT true,
 			allow_pop3 BOOLEAN NOT NULL DEFAULT true,
 			allow_jmap BOOLEAN NOT NULL DEFAULT true,
-			allow_webmail BOOLEAN NOT NULL DEFAULT true
+			allow_webmail BOOLEAN NOT NULL DEFAULT true,
+			mail_access_mode TEXT NOT NULL DEFAULT 'inherit',
+			version INTEGER NOT NULL DEFAULT 1
 		)`,
 
 		// --- Mail storage (messages, folders, attachments) ---
@@ -1156,6 +1169,23 @@ func postgresColumnAdditions() []string {
 		// domain to local-only delivery (Milestone 5, Feature 6/7);
 		// internal_external is the default, unrestricted mode.
 		`ALTER TABLE coremail_domains ADD COLUMN IF NOT EXISTS mail_access_mode TEXT NOT NULL DEFAULT 'internal_external'`,
+
+		// coremail_mailboxes.mail_access_mode (MAILBOX-ACCESS-MODE-PHASE1):
+		// per-mailbox mail-access policy. 'inherit' is the additive default
+		// so every pre-existing mailbox keeps resolving through the domain
+		// policy exactly as before.
+		`ALTER TABLE coremail_mailboxes ADD COLUMN IF NOT EXISTS mail_access_mode TEXT NOT NULL DEFAULT 'inherit'`,
+
+		// coremail_mailboxes.version (MAILBOX-ACCESS-MODE-PHASE1):
+		// optimistic-concurrency guard for guarded mailbox mutations.
+		`ALTER TABLE coremail_mailboxes ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1`,
+
+		// coremail_mailboxes.used_bytes: the per-mailbox storage usage
+		// counter the admin quota/plan reads SUM. It existed in the
+		// SQLite schema from the start but was missing from the
+		// PostgreSQL CREATE TABLE, which made plan-capacity reads fail
+		// on PostgreSQL.
+		`ALTER TABLE coremail_mailboxes ADD COLUMN IF NOT EXISTS used_bytes BIGINT NOT NULL DEFAULT 0`,
 
 		`ALTER TABLE licenses ADD COLUMN IF NOT EXISTS tier TEXT NOT NULL DEFAULT 'smb'`,
 		`ALTER TABLE licenses ADD COLUMN IF NOT EXISTS max_domains INTEGER NOT NULL DEFAULT 10`,

@@ -729,6 +729,8 @@ func MigrateAllRaw(db *gorm.DB) error {
 			recv_limit_per_hour INTEGER NOT NULL DEFAULT 0,
 			last_login DATETIME,
 			last_ip TEXT NOT NULL DEFAULT '',
+			mail_access_mode TEXT NOT NULL DEFAULT 'inherit',
+			version INTEGER NOT NULL DEFAULT 1,
 			created_at DATETIME NOT NULL,
 			updated_at DATETIME NOT NULL,
 			deleted_at DATETIME
@@ -1334,6 +1336,16 @@ func migrateCoremailMailboxSchema(ctx context.Context, db *sql.DB) error {
 		{"allow_pop3", "ALTER TABLE coremail_mailboxes ADD COLUMN allow_pop3 INTEGER NOT NULL DEFAULT 1"},
 		{"allow_jmap", "ALTER TABLE coremail_mailboxes ADD COLUMN allow_jmap INTEGER NOT NULL DEFAULT 1"},
 		{"allow_webmail", "ALTER TABLE coremail_mailboxes ADD COLUMN allow_webmail INTEGER NOT NULL DEFAULT 1"},
+		// mail_access_mode: per-mailbox mail-access policy (MAILBOX-ACCESS-
+		// MODE-PHASE1). Canonical persisted values are 'inherit',
+		// 'internal_only', 'internal_external'. 'inherit' is the additive
+		// default so every pre-existing mailbox keeps resolving through the
+		// domain's existing policy exactly as before this column existed.
+		{"mail_access_mode", "ALTER TABLE coremail_mailboxes ADD COLUMN mail_access_mode TEXT NOT NULL DEFAULT 'inherit'"},
+		// version: optimistic-concurrency guard for guarded mailbox
+		// mutations (the platform access-mode route). Existing rows start
+		// at 1, which is the version every first guarded mutation expects.
+		{"version", "ALTER TABLE coremail_mailboxes ADD COLUMN version INTEGER NOT NULL DEFAULT 1"},
 	}
 
 	for _, addition := range additions {

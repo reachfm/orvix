@@ -59,6 +59,17 @@ type Mailbox struct {
 	SendLimitPerHour int `json:"send_limit_per_hour"`
 	RecvLimitPerHour int `json:"recv_limit_per_hour"`
 
+	// MailAccessMode is the per-mailbox mail-access policy
+	// (MAILBOX-ACCESS-MODE-PHASE1). Canonical persisted values:
+	// "inherit" (resolve through the domain), "internal_only",
+	// "internal_external". The empty string is read as "inherit" for
+	// rows created before the column existed.
+	MailAccessMode string `json:"mail_access_mode"`
+
+	// Version is the optimistic-concurrency guard used by guarded
+	// mailbox mutations (the platform access-mode route).
+	Version int `json:"version"`
+
 	// Metadata.
 	LastLogin *time.Time `json:"last_login,omitempty"`
 	LastIP    string     `json:"last_ip,omitempty"`
@@ -140,14 +151,14 @@ func (r *MailboxSQLRepo) Create(ctx context.Context, m *Mailbox, tx interface{})
 			 status, quota_mb, used_bytes, msg_count,
 			 is_admin, is_forwarder, forward_to, labels,
 			 send_limit_per_hour, recv_limit_per_hour,
-			 last_login, last_ip, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			 last_login, last_ip, mail_access_mode, version, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
 		m.DomainID, m.TenantID, m.LocalPart, m.Email, m.Name,
 		m.PasswordHash, string(m.AuthScheme), boolToInt(m.MFAEnabled), m.MFASecret, m.AppPasswords,
 		string(m.Status), m.QuotaMB,
 		boolToInt(m.IsAdmin), boolToInt(m.IsForwarder), m.ForwardTo, m.Labels,
 		m.SendLimitPerHour, m.RecvLimitPerHour,
-		m.LastLogin, m.LastIP, m.CreatedAt, m.UpdatedAt,
+		m.LastLogin, m.LastIP, accessModeOrDefault(m.MailAccessMode), m.CreatedAt, m.UpdatedAt,
 	)
 	if err != nil {
 		return fmt.Errorf("create mailbox: %w", err)
@@ -168,7 +179,7 @@ func (r *MailboxSQLRepo) GetByID(ctx context.Context, id uint, tx interface{}) (
 		       status, quota_mb, used_bytes, msg_count,
 		       is_admin, is_forwarder, COALESCE(forward_to,''), COALESCE(labels,''),
 		       send_limit_per_hour, recv_limit_per_hour,
-		       last_login, COALESCE(last_ip,''), created_at, updated_at, deleted_at
+		       last_login, COALESCE(last_ip,''), COALESCE(mail_access_mode,'inherit'), version, created_at, updated_at, deleted_at
 		FROM coremail_mailboxes WHERE id = ? AND deleted_at IS NULL`, id)
 	return scanMailbox(row)
 }
@@ -181,7 +192,7 @@ func (r *MailboxSQLRepo) GetByEmail(ctx context.Context, email string, tx interf
 		       status, quota_mb, used_bytes, msg_count,
 		       is_admin, is_forwarder, COALESCE(forward_to,''), COALESCE(labels,''),
 		       send_limit_per_hour, recv_limit_per_hour,
-		       last_login, COALESCE(last_ip,''), created_at, updated_at, deleted_at
+		       last_login, COALESCE(last_ip,''), COALESCE(mail_access_mode,'inherit'), version, created_at, updated_at, deleted_at
 		FROM coremail_mailboxes WHERE email = ? AND deleted_at IS NULL`, email)
 	return scanMailbox(row)
 }
@@ -230,7 +241,7 @@ func (r *MailboxSQLRepo) List(ctx context.Context, filter MailboxFilter, tx inte
 		       status, quota_mb, used_bytes, msg_count,
 		       is_admin, is_forwarder, COALESCE(forward_to,''), COALESCE(labels,''),
 		       send_limit_per_hour, recv_limit_per_hour,
-		       last_login, COALESCE(last_ip,''), created_at, updated_at, deleted_at
+		       last_login, COALESCE(last_ip,''), COALESCE(mail_access_mode,'inherit'), version, created_at, updated_at, deleted_at
 		FROM coremail_mailboxes WHERE `+clause+`
 		ORDER BY created_at DESC LIMIT ? OFFSET ?`,
 		append(args, filter.Pagination.Limit, filter.Pagination.Offset)...,
@@ -258,11 +269,11 @@ func (r *MailboxSQLRepo) Update(ctx context.Context, m *Mailbox, tx interface{})
 		UPDATE coremail_mailboxes SET
 			name=?, password_hash=?, auth_scheme=?, mfa_enabled=?, mfa_secret=?, app_passwords=?,
 			status=?, quota_mb=?, is_admin=?, is_forwarder=?, forward_to=?, labels=?,
-			send_limit_per_hour=?, recv_limit_per_hour=?, updated_at=?
+			send_limit_per_hour=?, recv_limit_per_hour=?, mail_access_mode=?, updated_at=?
 		WHERE id = ? AND deleted_at IS NULL`,
 		m.Name, m.PasswordHash, string(m.AuthScheme), boolToInt(m.MFAEnabled), m.MFASecret, m.AppPasswords,
 		string(m.Status), m.QuotaMB, boolToInt(m.IsAdmin), boolToInt(m.IsForwarder), m.ForwardTo, m.Labels,
-		m.SendLimitPerHour, m.RecvLimitPerHour, m.UpdatedAt, m.ID,
+		m.SendLimitPerHour, m.RecvLimitPerHour, accessModeOrDefault(m.MailAccessMode), m.UpdatedAt, m.ID,
 	)
 	return err
 }
@@ -332,7 +343,7 @@ func scanMailbox(row interface {
 		&status, &m.QuotaMB, &m.UsedBytes, &m.MsgCount,
 		&isAdmin, &isForwarder, &m.ForwardTo, &m.Labels,
 		&m.SendLimitPerHour, &m.RecvLimitPerHour,
-		&m.LastLogin, &m.LastIP, &m.CreatedAt, &m.UpdatedAt, &m.DeletedAt,
+		&m.LastLogin, &m.LastIP, &m.MailAccessMode, &m.Version, &m.CreatedAt, &m.UpdatedAt, &m.DeletedAt,
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -374,7 +385,7 @@ func scanMailboxWithProtocols(row interface {
 		&status, &m.QuotaMB, &m.UsedBytes, &m.MsgCount,
 		&isAdmin, &isForwarder, &m.ForwardTo, &m.Labels,
 		&m.SendLimitPerHour, &m.RecvLimitPerHour,
-		&m.LastLogin, &m.LastIP, &m.CreatedAt, &m.UpdatedAt, &m.DeletedAt,
+		&m.LastLogin, &m.LastIP, &m.MailAccessMode, &m.Version, &m.CreatedAt, &m.UpdatedAt, &m.DeletedAt,
 		&allowSMTP, &allowIMAP, &allowPOP3, &allowJMAP, &allowWebmail,
 	)
 	if err != nil {
@@ -394,4 +405,15 @@ func scanMailboxWithProtocols(row interface {
 	m.AllowJMAP = intToBool(allowJMAP)
 	m.AllowWebmail = intToBool(allowWebmail)
 	return &m, nil
+}
+
+// accessModeOrDefault normalizes a mailbox access-mode value for
+// persistence: the empty string (rows written before the column
+// existed) is stored as the canonical "inherit" value so every write
+// boundary persists one of the three canonical values.
+func accessModeOrDefault(mode string) string {
+	if mode == "" {
+		return "inherit"
+	}
+	return mode
 }

@@ -1,12 +1,24 @@
 package handlers
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
 	"strconv"
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/orvix/orvix/internal/auth"
 	"github.com/orvix/orvix/internal/platform/bulkprovision"
 )
+
+func sourceHashOf(raw []bulkprovision.RawRow) string {
+	h := sha256.New()
+	for _, r := range raw {
+		h.Write([]byte(r.Email))
+		h.Write([]byte{0})
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
 
 // PostBulkProvisionValidate handles POST /admin/domains/:id/mailboxes/bulk/validate.
 // Dry-run only — never mutates.
@@ -26,7 +38,7 @@ func (h *Handler) PostBulkProvisionValidate(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
-	res, err := h.bulkProvisionSvc.Validate(c.Context(), tenantID, domainID, domainName, raw)
+	res, err := h.bulkProvisionSvc.Validate(c.Context(), tenantID, domainID, domainName, sourceHashOf(raw), raw)
 	if err != nil {
 		return bulkProvisionError(c, err)
 	}
@@ -56,11 +68,11 @@ func (h *Handler) PostBulkProvisionCreateJob(c fiber.Ctx) error {
 	strategy := bulkprovision.Strategy(c.Query("strategy", string(bulkprovision.StrategyPartial)))
 	idemKey := c.Get("Idempotency-Key")
 
-	res, err := h.bulkProvisionSvc.Validate(c.Context(), tenantID, domainID, domainName, raw)
+	res, err := h.bulkProvisionSvc.Validate(c.Context(), tenantID, domainID, domainName, sourceHashOf(raw), raw)
 	if err != nil {
 		return bulkProvisionError(c, err)
 	}
-	job, err := h.bulkProvisionSvc.CreateJob(c.Context(), tenantID, domainID, actorID, strategy, idemKey, res)
+	job, err := h.bulkProvisionSvc.CreateJob(c.Context(), tenantID, domainID, actorID, strategy, bulkprovision.ConflictFail, idemKey, res)
 	if err != nil {
 		return bulkProvisionError(c, err)
 	}
@@ -88,7 +100,7 @@ func (h *Handler) PostBulkProvisionExecute(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "internal error"})
 	}
-	finalJob, rows, err := h.bulkProvisionSvc.Execute(c.Context(), jobID, tenantID, job.DomainID, domainName)
+	finalJob, rows, err := h.bulkProvisionSvc.Execute(c.Context(), jobID, tenantID, job.DomainID, domainName, job.SourceHash, nil)
 	if err != nil {
 		return bulkProvisionError(c, err)
 	}
@@ -209,15 +221,38 @@ func parseBulkInput(c fiber.Ctx) ([]bulkprovision.RawRow, error) {
 	return nil, bulkprovision.ErrEmptyFile
 }
 
+// badRequestBulkErrors are upload-parsing / upload-security rejections:
+// the CALLER's file is the problem, never a server fault, and each
+// error's text is already safe to return verbatim (no path, no row
+// content, no internal stack).
+var badRequestBulkErrors = []error{
+	bulkprovision.ErrEmptyFile, bulkprovision.ErrTooManyRows, bulkprovision.ErrUnsupportedFormat,
+	bulkprovision.ErrTooManyColumns, bulkprovision.ErrCellTooLong, bulkprovision.ErrTooManySheets,
+	bulkprovision.ErrDuplicateHeader, bulkprovision.ErrUnknownColumn, bulkprovision.ErrFormulaRejected,
+	bulkprovision.ErrFormulaInjection, bulkprovision.ErrInvalidUTF8, bulkprovision.ErrInvalidAccessMode,
+	bulkprovision.ErrInvalidConflictPolicy, bulkprovision.ErrUploadTooLarge, bulkprovision.ErrSourceHashMismatch,
+}
+
+var conflictBulkErrors = []error{
+	bulkprovision.ErrJobNotReady, bulkprovision.ErrJobNotCancellable, bulkprovision.ErrJobNotRetryable, bulkprovision.ErrVersionConflict,
+}
+
 func bulkProvisionError(c fiber.Ctx, err error) error {
-	switch err {
-	case bulkprovision.ErrJobNotFound:
+	// Parsing/validation errors are wrapped with %w (e.g. "%w: row %d")
+	// to carry a row number or column name, so they must be matched with
+	// errors.Is, never a raw switch/== comparison against the sentinel.
+	if errors.Is(err, bulkprovision.ErrJobNotFound) {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": err.Error()})
-	case bulkprovision.ErrEmptyFile, bulkprovision.ErrTooManyRows, bulkprovision.ErrUnsupportedFormat:
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
-	case bulkprovision.ErrJobNotReady, bulkprovision.ErrJobNotCancellable, bulkprovision.ErrJobNotRetryable, bulkprovision.ErrVersionConflict:
-		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": err.Error()})
-	default:
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "internal error"})
 	}
+	for _, sentinel := range badRequestBulkErrors {
+		if errors.Is(err, sentinel) {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+		}
+	}
+	for _, sentinel := range conflictBulkErrors {
+		if errors.Is(err, sentinel) {
+			return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": err.Error()})
+		}
+	}
+	return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "internal error"})
 }

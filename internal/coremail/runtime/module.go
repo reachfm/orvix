@@ -18,6 +18,7 @@ import (
 	"github.com/orvix/orvix/internal/coremail/delivery"
 	"github.com/orvix/orvix/internal/coremail/imap"
 	"github.com/orvix/orvix/internal/coremail/jmap"
+	"github.com/orvix/orvix/internal/coremail/mailpolicy"
 	"github.com/orvix/orvix/internal/coremail/pop3"
 	"github.com/orvix/orvix/internal/coremail/push"
 	"github.com/orvix/orvix/internal/coremail/queue"
@@ -47,13 +48,17 @@ type Module struct {
 	cfg    *config.Config
 	db     *sql.DB
 
-	engine           *coremail.Engine
-	store            *storage.MailStore
-	queue            *queue.QueueEngine
-	obs              *observability.Observability
-	policyEngine     *policy.Engine
-	trustEngine      *trust.Engine
-	auditStore       *audit.Store
+	engine       *coremail.Engine
+	store        *storage.MailStore
+	queue        *queue.QueueEngine
+	obs          *observability.Observability
+	policyEngine *policy.Engine
+	trustEngine  *trust.Engine
+	auditStore   *audit.Store
+	// mailPolicy is the canonical mailbox-level mail-access policy
+	// (MAILBOX-ACCESS-MODE-PHASE1), wired into every real delivery
+	// path. nil when coremail is disabled.
+	mailPolicy       *mailpolicy.Policy
 	licenseSvc       *licensing.Service
 	authorityService *licensingauthority.AuthorityService
 	// avEngine is the wired antivirus scanner. Non-nil
@@ -161,6 +166,14 @@ func (m *Module) initCore(cfg *config.Config, sqlDB *sql.DB) error {
 	}
 	m.engine = coremail.NewEngine(coremail.EngineConfig{DB: sqlDB, AuthCfg: authCfg})
 
+	// Canonical mailbox-level mail-access policy
+	// (MAILBOX-ACCESS-MODE-PHASE1). One instance is wired into every
+	// real delivery path below: SMTP inbound/outbound, the delivery
+	// workers (relay + retry), the rules runner (forwarding/vacation),
+	// and JMAP Submission/set. The sink emits safe observable events
+	// via the runtime logger; it never receives message content.
+	m.mailPolicy = mailpolicy.New(&mailpolicy.EngineStore{Engine: m.engine}, runtimePolicySink{logger: m.logger})
+
 	var err error
 	m.store, err = storage.NewMailStore(sqlDB, cfg.CoreMail.MailStorePath)
 	if err != nil {
@@ -263,11 +276,12 @@ func (m *Module) initCore(cfg *config.Config, sqlDB *sql.DB) error {
 	// own audit logs flow into the same zap pipeline as
 	// the rest of the runtime.
 	receiver.RulesRunner = rules.NewRunner(rules.Dependencies{
-		MailStore:   m.store,
-		QueueEngine: m.queue,
-		Vacation:    m.store.Vacation,
-		Forwarding:  m.store.Forwarding,
-		Logger:      m.logger,
+		MailStore:        m.store,
+		QueueEngine:      m.queue,
+		Vacation:         m.store.Vacation,
+		Forwarding:       m.store.Forwarding,
+		Logger:           m.logger,
+		MailAccessPolicy: m.mailPolicy,
 	})
 
 	// ── Antivirus engine ───────────────────────────────────
@@ -346,6 +360,7 @@ func (m *Module) initCore(cfg *config.Config, sqlDB *sql.DB) error {
 	}
 	m.smtpServer.SetLocalDomainChecker(identity.IsLocalDomain)
 	m.smtpServer.SetMailAccessModeChecker(identity.MailAccessMode)
+	m.smtpServer.SetMailAccessPolicy(m.smtpMailAccessPolicy)
 	m.smtpServer.Observability = m.obs
 
 	// ── Submission SMTP (port 587, STARTTLS) ───────────────
@@ -382,6 +397,7 @@ func (m *Module) initCore(cfg *config.Config, sqlDB *sql.DB) error {
 			m.submissionServer.TLSConfig = tlsCfg
 			m.submissionServer.SetLocalDomainChecker(identity.IsLocalDomain)
 			m.submissionServer.SetMailAccessModeChecker(identity.MailAccessMode)
+			m.submissionServer.SetMailAccessPolicy(m.smtpMailAccessPolicy)
 			m.submissionServer.SenderValidator = identity.ResolveSender
 			m.submissionServer.Observability = m.obs
 		}
@@ -463,6 +479,12 @@ func (m *Module) initCore(cfg *config.Config, sqlDB *sql.DB) error {
 	m.jmapServer = jmap.NewServer(m.engine)
 	m.jmapServer.Hostname = cfg.CoreMail.Hostname
 	m.jmapServer.Observability = m.obs
+	// Wire the same delivery queue the SMTP receiver and the webmail
+	// send path use, so Submission/set is a real enqueue — and the
+	// canonical mail-access policy, so an internal-only mailbox can
+	// never submit to an external recipient through JMAP.
+	m.jmapServer.SetQueueEngine(m.queue)
+	m.jmapServer.SetMailAccessPolicy(m.mailPolicy)
 	m.obs.Health.Ready("jmap")
 
 	workerCount := cfg.CoreMail.QueueWorkers
@@ -540,7 +562,7 @@ func (m *Module) initCore(cfg *config.Config, sqlDB *sql.DB) error {
 	// worker goroutine indefinitely.
 	const senderIdentityQueryTimeout = 5 * time.Second
 	senderIdentityQuery := relayDialect.Rewrite(
-		`SELECT m.tenant_id, m.domain_id, COALESCE(d.mail_access_mode, 'internal_external')
+		`SELECT m.tenant_id, m.domain_id, COALESCE(m.mail_access_mode,'inherit'), COALESCE(d.mail_access_mode,'')
 		 FROM coremail_mailboxes m JOIN coremail_domains d ON d.id = m.domain_id
 		 WHERE m.email = ?`)
 	type senderIdentity struct {
@@ -574,8 +596,9 @@ func (m *Module) initCore(cfg *config.Config, sqlDB *sql.DB) error {
 		qctx, cancel := context.WithTimeout(ctx, senderIdentityQueryTimeout)
 		defer cancel()
 		id := senderIdentity{}
+		var mailboxMode, domainMode string
 		row := sqlDB.QueryRowContext(qctx, senderIdentityQuery, entry.FromAddress)
-		if err := row.Scan(&id.tenantID, &id.domainID, &id.mode); err != nil {
+		if err := row.Scan(&id.tenantID, &id.domainID, &mailboxMode, &domainMode); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				// Genuinely absent sender: not an infrastructure failure.
 				// The caller uses the enqueue origin; we never fabricate a
@@ -587,6 +610,13 @@ func (m *Module) initCore(cfg *config.Config, sqlDB *sql.DB) error {
 			}
 			return senderIdentity{}, errSenderIdentityUnavailable
 		}
+		// The EFFECTIVE mode is resolved through the canonical policy
+		// resolution function (mailbox mode wins; inherit falls back
+		// to the domain; corrupt values fail closed to internal_only)
+		// so relay routing sees exactly the mode the delivery paths
+		// enforce.
+		eff, _ := mailpolicy.ResolveEffectiveMode(mailboxMode, domainMode)
+		id.mode = string(eff.Effective)
 		return id, nil
 	}
 	tenantForRelay := func(ctx context.Context, entry *queue.QueueEntry) (uint, string, error) {
@@ -669,6 +699,10 @@ func (m *Module) initCore(cfg *config.Config, sqlDB *sql.DB) error {
 		)
 		worker.Observability = m.obs
 		worker.PreferIPv4 = cfg.Outbound.PreferIPv4
+		// Canonical mail-access policy on the worker: every outbound
+		// delivery (initial, relay, retry) is policy-checked before
+		// any network I/O.
+		worker.MailAccessPolicy = m.mailPolicy
 		if relayAdapter != nil {
 			worker.RelaySelector = relayAdapter
 			worker.TenantIDForRelay = tenantForRelay
@@ -1110,12 +1144,106 @@ func (m *Module) RulesRunner() *rules.Runner {
 	// never interfere with the SMTP-side runner's per-message
 	// evaluation.
 	return rules.NewRunner(rules.Dependencies{
-		MailStore:   m.store,
-		QueueEngine: m.queue,
-		Vacation:    m.store.Vacation,
-		Forwarding:  m.store.Forwarding,
-		Logger:      m.logger,
+		MailStore:        m.store,
+		QueueEngine:      m.queue,
+		Vacation:         m.store.Vacation,
+		Forwarding:       m.store.Forwarding,
+		Logger:           m.logger,
+		MailAccessPolicy: m.mailPolicy,
 	})
+}
+
+// smtpMailAccessPolicy adapts the canonical mail-access policy to the
+// SMTP session shape used at RCPT TO. It is wired into both the
+// inbound (port 25) and submission (port 587) servers.
+//
+//   - External recipient: the sender-side outbound policy applies. An
+//     authenticated mailbox that is internal_only cannot send to an
+//     external recipient; unauthenticated external relay is already
+//     blocked by the relay-protection check that runs first.
+//   - Local recipient: the recipient-side inbound policy applies. An
+//     internal_only recipient may receive only from a trusted local
+//     authenticated sender — never from a remote path with a forged
+//     local MAIL FROM.
+//
+// A policy-evaluation failure returns a non-nil error so handleRCPT
+// fails closed with a temporary failure instead of delivering.
+func (m *Module) smtpMailAccessPolicy(ctx context.Context, session *smtp.Session, rcptAddr string, rcptIsLocal bool) (bool, string, error) {
+	if m.mailPolicy == nil {
+		// No policy wired: preserve pre-policy behavior (the legacy
+		// domain checker remains installed on the servers).
+		return true, "", nil
+	}
+	if !rcptIsLocal {
+		if session.Authenticated && session.AuthIdentity != nil {
+			decision := m.mailPolicy.CheckOutbound(ctx, "smtp_outbound", session.AuthIdentity.Username, []string{rcptAddr})
+			switch {
+			case decision.Allowed:
+				return true, "", nil
+			case decision.Unavailable:
+				return false, "", errPolicyUnavailable
+			case decision.Denied:
+				return false, string(decision.Reason), nil
+			}
+		}
+		// Unauthenticated external recipient: the relay-protection
+		// check that runs before this hook already denies it.
+		return true, "", nil
+	}
+
+	sender := mailpolicy.Sender{Authenticated: session.Authenticated}
+	if session.AuthIdentity != nil {
+		sender.MailboxEmail = session.AuthIdentity.Username
+	}
+	decision := m.mailPolicy.CheckInboundRecipient(ctx, "smtp_inbound", sender, rcptAddr)
+	switch {
+	case decision.Allowed:
+		return true, "", nil
+	case decision.Unavailable:
+		return false, "", errPolicyUnavailable
+	case decision.Denied:
+		return false, string(decision.Reason), nil
+	}
+	return true, "", nil
+}
+
+// errPolicyUnavailable is returned by the SMTP policy adapter when the
+// canonical policy cannot be evaluated; handleRCPT maps it to a
+// temporary failure (fail closed before delivery).
+var errPolicyUnavailable = errors.New("mail access policy unavailable")
+
+// runtimePolicySink emits safe observable mail-policy events through
+// the runtime logger. It never receives message bodies, passwords,
+// tokens, or hashes.
+type runtimePolicySink struct {
+	logger *zap.Logger
+}
+
+func (s runtimePolicySink) PolicyDenied(_ context.Context, kind, sender, recipient string, reason mailpolicy.DeniedReason, detail string) {
+	if s.logger != nil {
+		s.logger.Warn("mail access policy denied",
+			zap.String("path", kind),
+			zap.String("sender", sender),
+			zap.String("recipient", recipient),
+			zap.String("reason", string(reason)),
+			zap.String("detail", detail))
+	}
+}
+
+func (s runtimePolicySink) PolicyCorrupt(_ context.Context, kind, detail string) {
+	if s.logger != nil {
+		s.logger.Error("mail access policy failed closed on corrupt data",
+			zap.String("path", kind),
+			zap.String("detail", detail))
+	}
+}
+
+func (s runtimePolicySink) PolicyUnavailable(_ context.Context, kind, detail string) {
+	if s.logger != nil {
+		s.logger.Error("mail access policy unavailable; failing closed",
+			zap.String("path", kind),
+			zap.String("detail", detail))
+	}
 }
 
 // moduleStopTimeout caps how long Module.Stop() is allowed to

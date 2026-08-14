@@ -20,7 +20,7 @@ var (
 // deliberately hides.
 func (r *AdminMailboxRepo) GetByIDIncludingDeleted(ctx context.Context, id, tenantID uint) (*AdminMailbox, error) {
 	row := r.db.QueryRowContext(ctx,
-		"SELECT id, domain_id, tenant_id, email, local_part, name, status, quota_mb, used_bytes, msg_count, is_admin, allow_smtp, allow_imap, allow_pop3, allow_jmap, mfa_enabled, send_limit_per_hour, last_login, COALESCE(last_ip,''), created_at, updated_at FROM coremail_mailboxes WHERE id = "+r.dialect.Placeholder(1)+" AND tenant_id = "+r.dialect.Placeholder(2),
+		"SELECT id, domain_id, tenant_id, email, local_part, name, status, quota_mb, used_bytes, msg_count, is_admin, allow_smtp, allow_imap, allow_pop3, allow_jmap, mfa_enabled, send_limit_per_hour, COALESCE(mail_access_mode,'inherit'), version, last_login, COALESCE(last_ip,''), created_at, updated_at FROM coremail_mailboxes WHERE id = "+r.dialect.Placeholder(1)+" AND tenant_id = "+r.dialect.Placeholder(2),
 		id, tenantID)
 	return scanAdminMailbox(row)
 }

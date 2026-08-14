@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/mail"
 	"strings"
 
+	"github.com/orvix/orvix/internal/coremail/mailpolicy"
 	"github.com/orvix/orvix/internal/coremail/queue"
 	"github.com/orvix/orvix/internal/coremail/storage"
 	"github.com/orvix/orvix/internal/policy"
@@ -25,6 +27,15 @@ func (s *Server) SetPolicyEngine(pe interface {
 	Evaluate(req *policy.EvaluationRequest) *policy.EvaluationResult
 }) {
 	s.policyEngine = pe
+}
+
+// SetMailAccessPolicy wires the canonical mailbox-level mail-access
+// policy. When set, Submission/set refuses to enqueue messages to
+// recipients the policy denies (internal-only mailbox -> external
+// recipient) BEFORE any queue write, and fails closed on policy
+// evaluation failures.
+func (s *Server) SetMailAccessPolicy(p *mailpolicy.Policy) {
+	s.mailAccessPolicy = p
 }
 
 func (s *Server) handleSubmissionSet(ctx context.Context, mc *MethodCall, mailboxID uint, accountID string, username string) *MethodResponse {
@@ -109,6 +120,30 @@ func (s *Server) handleSubmissionSet(ctx context.Context, mc *MethodCall, mailbo
 			}
 		}
 
+		// ── Canonical mail-access policy (MAILBOX-ACCESS-MODE-PHASE1)
+		// Enforced BEFORE any queue write: an internal-only mailbox
+		// must not submit to an external recipient through JMAP. A
+		// policy evaluation failure fails closed (no enqueue).
+		if s.mailAccessPolicy != nil {
+			recipients := splitRecipients(msg.ToAddresses, msg.CcAddresses, msg.BccAddresses)
+			decision := s.mailAccessPolicy.CheckOutbound(ctx, "jmap", sender, recipients)
+			switch {
+			case decision.Allowed:
+			case decision.Unavailable:
+				resp.NotCreated[clientID] = "serverFail"
+				if s.Observability != nil {
+					s.Observability.Metrics.IncJMAPSubmissionFailed()
+				}
+				continue
+			case decision.Denied:
+				resp.NotCreated[clientID] = "forbidden"
+				if s.Observability != nil {
+					s.Observability.Metrics.IncJMAPSubmissionFailed()
+				}
+				continue
+			}
+		}
+
 		recipientDomain := extractDomainFromEmail(msg.ToAddresses)
 		entry := &queue.QueueEntry{
 			TenantID:        msg.TenantID,
@@ -161,6 +196,28 @@ func extractDomainFromEmail(email string) string {
 		return email
 	}
 	return email[idx+1:]
+}
+
+// splitRecipients collects the bare recipient addresses from the To,
+// Cc, and Bcc header values (comma-separated, possibly with display
+// names). It is used by the canonical mail-access policy check on
+// Submission/set.
+func splitRecipients(parts ...string) []string {
+	var out []string
+	for _, p := range parts {
+		for _, piece := range strings.Split(p, ",") {
+			piece = strings.TrimSpace(piece)
+			if piece == "" {
+				continue
+			}
+			if addr, err := mail.ParseAddress(piece); err == nil {
+				out = append(out, strings.ToLower(strings.TrimSpace(addr.Address)))
+			} else {
+				out = append(out, strings.ToLower(piece))
+			}
+		}
+	}
+	return out
 }
 
 func findSentFolder(ctx context.Context, repo storage.FolderRepository, mailboxID uint) (*storage.Folder, error) {

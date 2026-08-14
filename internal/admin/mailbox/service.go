@@ -7,10 +7,13 @@ import (
 	"encoding/base64"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/orvix/orvix/internal/admin/domain"
 	"github.com/orvix/orvix/internal/audit"
+	"github.com/orvix/orvix/internal/coremail"
 	entrbac "github.com/orvix/orvix/internal/enterprise/rbac"
+	"github.com/orvix/orvix/internal/platform/kernel"
 )
 
 // PasswordHasher abstracts password hashing so the admin mailbox service can
@@ -25,11 +28,23 @@ type Service struct {
 	hasher     PasswordHasher
 	auditStore *audit.ExtendedStore
 	rbac       *entrbac.Evaluator
+	webhooks   webhookPublisher
+}
+
+// webhookPublisher is the same transactional outbox publisher shape
+// the domain service uses. It is optional for isolated consumers;
+// production wiring supplies it so guarded mutations publish from the
+// same transaction as their audit.
+type webhookPublisher interface {
+	Publish(ctx context.Context, q kernel.Querier, topic, aggregateID string, tenantID uint, payload any, at time.Time) (string, error)
 }
 
 func NewService(repo *AdminMailboxRepo, hasher PasswordHasher, auditStore *audit.ExtendedStore, rbac *entrbac.Evaluator) *Service {
 	return &Service{repo: repo, hasher: hasher, auditStore: auditStore, rbac: rbac}
 }
+
+// SetWebhookPublisher wires the transactional webhook event adapter.
+func (s *Service) SetWebhookPublisher(p webhookPublisher) { s.webhooks = p }
 
 func (s *Service) CountByTenant(ctx context.Context, tenantID uint) int64 {
 	count, err := s.repo.CountByTenant(ctx, tenantID)
@@ -48,6 +63,14 @@ func (s *Service) ListMailboxes(ctx context.Context, filter MailboxFilter) ([]Ad
 // detect a duplicate without performing or preparing any mutation.
 func (s *Service) ExistsByEmail(ctx context.Context, email string) (bool, error) {
 	return s.repo.ExistsByEmail(ctx, email, 0)
+}
+
+// GetIDByEmail is a read-only lookup exposed for reconciliation
+// callers (internal/platform/bulkprovision's resumed-execution path)
+// that must recognize a mailbox their own earlier, interrupted attempt
+// already created, without performing or preparing any mutation.
+func (s *Service) GetIDByEmail(ctx context.Context, email string) (uint, error) {
+	return s.repo.GetIDByEmail(ctx, email)
 }
 
 // ResolveDomainAllocation is a read-only passthrough exposed for
@@ -73,15 +96,63 @@ func (s *Service) GetMailbox(ctx context.Context, id, tenantID uint) (*AdminMail
 	if m == nil {
 		return nil, ErrMailboxNotFound
 	}
+	s.attachEffectiveMode(ctx, m, tenantID)
 	return m, nil
 }
 
+// attachEffectiveMode resolves the effective mail-access mode for a
+// mailbox read. It is best-effort: a resolution failure leaves the
+// effective field empty (the configured field is still authoritative
+// for "what is stored"), and never fails the read.
+func (s *Service) attachEffectiveMode(ctx context.Context, m *AdminMailbox, tenantID uint) {
+	if m == nil {
+		return
+	}
+	_, effective, _, err := s.repo.GetMailAccessModeState(ctx, m.ID, tenantID)
+	if err == nil && effective != "" {
+		m.EffectiveMailAccessMode = effective
+	} else if err == nil {
+		m.EffectiveMailAccessMode = string(MailAccessInternalExternal)
+	}
+}
+
+// CreateMailbox creates a mailbox with the canonical service
+// (transactional audit, atomic cap enforcement). The optional
+// MailAccessMode in the request is validated at this boundary; when
+// omitted the mailbox is persisted with "inherit", which resolves
+// through the domain exactly as every pre-existing mailbox does.
 func (s *Service) CreateMailbox(ctx context.Context, req CreateMailboxRequest, tenantID uint) (*CreateMailboxResponse, error) {
+	return s.createMailbox(ctx, req, tenantID, false)
+}
+
+// CreateMailboxWithFolders is the platform provisioning variant of
+// CreateMailbox: it creates the mailbox AND provisions the canonical
+// system folders (INBOX, Sent, Drafts, Trash, Junk, Archive) inside
+// the SAME transaction, so a folder-provisioning failure rolls back
+// the mailbox insert — a half-created mailbox is never reachable.
+func (s *Service) CreateMailboxWithFolders(ctx context.Context, req CreateMailboxRequest, tenantID uint) (*CreateMailboxResponse, error) {
+	return s.createMailbox(ctx, req, tenantID, true)
+}
+
+func (s *Service) createMailbox(ctx context.Context, req CreateMailboxRequest, tenantID uint, provisionFolders bool) (*CreateMailboxResponse, error) {
 	if req.Email == "" || !strings.Contains(req.Email, "@") {
 		return nil, ErrInvalidEmail
 	}
 	if req.Password == "" {
 		return nil, ErrPasswordRequired
+	}
+
+	// Mail-access-mode validation happens at this service boundary so
+	// no write path can persist an invalid value. nil (omitted) and
+	// "" both normalize to "inherit" (backward compatible); any other
+	// unknown value is rejected.
+	mailAccessMode := string(MailAccessInherit)
+	if req.MailAccessMode != nil {
+		parsed, ok := ParseMailAccessMode(*req.MailAccessMode)
+		if !ok {
+			return nil, fmt.Errorf("%w: %q", ErrInvalidMailAccessMode, *req.MailAccessMode)
+		}
+		mailAccessMode = string(parsed)
 	}
 
 	parts := strings.SplitN(req.Email, "@", 2)
@@ -108,7 +179,7 @@ func (s *Service) CreateMailbox(ctx context.Context, req CreateMailboxRequest, t
 
 	var created *AdminMailbox
 	entry := &audit.ExtendedEntry{Action: "mailbox.create", TenantID: tenantID, Result: "success"}
-	if err := s.mutateWithAudit(ctx, entry, func(repo *AdminMailboxRepo) error {
+	if err := s.mutateWithTx(ctx, entry, func(repo *AdminMailboxRepo, tx *sql.Tx) error {
 		// Resolve the domain inside the mutation transaction so the
 		// eligibility check and the mailbox insert are atomic. The domain
 		// lookup is tenant-scoped: a domain owned by another tenant or one
@@ -180,28 +251,40 @@ func (s *Service) CreateMailbox(ctx context.Context, req CreateMailboxRequest, t
 		}
 
 		m := &AdminMailbox{
-			DomainID:  domainID,
-			TenantID:  tenantID,
-			Email:     req.Email,
-			LocalPart: localPart,
-			Name:      req.Name,
-			Status:    AdminMailboxActive,
-			QuotaMB:   quota,
-			SendLimit: sendLimit,
-			AllowSMTP: true,
-			AllowIMAP: true,
-			AllowPOP3: true,
-			AllowJMAP: true,
+			DomainID:       domainID,
+			TenantID:       tenantID,
+			Email:          req.Email,
+			LocalPart:      localPart,
+			Name:           req.Name,
+			Status:         AdminMailboxActive,
+			QuotaMB:        quota,
+			SendLimit:      sendLimit,
+			AllowSMTP:      true,
+			AllowIMAP:      true,
+			AllowPOP3:      true,
+			AllowJMAP:      true,
+			MailAccessMode: mailAccessMode,
 		}
 		var createErr error
 		created, createErr = repo.Create(ctx, m, passwordHash)
 		if createErr == nil {
+			if provisionFolders {
+				// Provision the canonical system folders in the SAME
+				// transaction as the mailbox insert. A failure here rolls
+				// the mailbox row back with it — the operator never sees a
+				// half-created mailbox.
+				if ferr := coremail.EnsureMailboxSystemFoldersTx(ctx, tx, created.ID); ferr != nil {
+					return fmt.Errorf("provision mailbox system folders: %w", ferr)
+				}
+			}
 			entry.Target, entry.TargetID = fmt.Sprintf("mailbox:%d", created.ID), created.ID
 		}
 		return createErr
 	}); err != nil {
 		return nil, err
 	}
+
+	s.attachEffectiveMode(ctx, created, tenantID)
 
 	resp := &CreateMailboxResponse{Mailbox: *created, Password: req.Password}
 	if req.ForcePasswordChange {
@@ -246,6 +329,13 @@ func (s *Service) UpdateMailbox(ctx context.Context, id, tenantID uint, req Upda
 	if req.AllowJMAP != nil {
 		m.AllowJMAP = *req.AllowJMAP
 	}
+	if req.MailAccessMode != nil {
+		parsed, ok := ParseMailAccessMode(*req.MailAccessMode)
+		if !ok {
+			return nil, ErrInvalidMailAccessMode
+		}
+		m.MailAccessMode = string(parsed)
+	}
 
 	entry := &audit.ExtendedEntry{Action: "mailbox.update", Target: fmt.Sprintf("mailbox:%d", m.ID), TargetID: m.ID, TenantID: tenantID, Result: "success"}
 	if err := s.mutateWithAudit(ctx, entry, func(repo *AdminMailboxRepo) error {
@@ -269,6 +359,7 @@ func (s *Service) UpdateMailbox(ctx context.Context, id, tenantID uint, req Upda
 	}); err != nil {
 		return nil, err
 	}
+	s.attachEffectiveMode(ctx, m, tenantID)
 	return m, nil
 }
 
@@ -343,6 +434,102 @@ func (s *Service) hashPassword(password string) (string, error) {
 	return hash, nil
 }
 
+// MailAccessModeState is a read-only passthrough exposing the
+// configured + effective access mode and the current version for a
+// mailbox. It is tenant-scoped exactly like every other read.
+func (s *Service) MailAccessModeState(ctx context.Context, id, tenantID uint) (configured, effective string, version int, err error) {
+	configured, effective, version, err = s.repo.GetMailAccessModeState(ctx, id, tenantID)
+	if err != nil {
+		return "", "", 0, err
+	}
+	if configured == "" {
+		configured = string(MailAccessInherit)
+	}
+	if effective == "" {
+		effective = string(MailAccessInternalExternal)
+	}
+	return configured, effective, version, nil
+}
+
+// SetMailAccessMode is the guarded per-mailbox access-mode mutation.
+// It validates the mode, re-verifies tenant ownership INSIDE the SQL
+// predicate, applies optimistic concurrency via expectedVersion, and
+// writes the canonical audit record in the same transaction. The
+// outbox event is enqueued through the injected publisher (when
+// wired) so downstream consumers see the change transactionally.
+//
+// Error contracts (safe cross-tenant behavior):
+//   - unknown OR cross-tenant mailbox -> ErrMailboxNotFound (the SQL
+//     tenant predicate makes both affect zero rows; no disclosure);
+//   - stale expectedVersion -> ErrMailboxVersionConflict;
+//   - invalid mode -> ErrInvalidMailAccessMode.
+func (s *Service) SetMailAccessMode(ctx context.Context, id, tenantID uint, mode string, expectedVersion int) (configured, effective string, newVersion int, err error) {
+	parsed, ok := ParseMailAccessMode(mode)
+	if !ok {
+		return "", "", 0, ErrInvalidMailAccessMode
+	}
+	if expectedVersion < 1 {
+		return "", "", 0, fmt.Errorf("%w: expected_version must be >= 1", ErrMailboxVersionConflict)
+	}
+
+	entry := &audit.ExtendedEntry{
+		Action: "mailbox.mail_access_mode.set",
+		Target: fmt.Sprintf("mailbox:%d", id), TargetID: id, TenantID: tenantID,
+		Result: "success", After: string(parsed),
+	}
+	var affected int64
+	var newVer int
+	if err := s.mutateWithAudit(ctx, entry, func(repo *AdminMailboxRepo) error {
+		var applyErr error
+		affected, newVer, applyErr = repo.UpdateMailAccessMode(ctx, id, tenantID, string(parsed), expectedVersion)
+		return applyErr
+	}); err != nil {
+		return "", "", 0, err
+	}
+	if affected == 0 {
+		// Distinguish "not found / cross-tenant" from "version moved":
+		// only the version predicate can fail while the row exists.
+		exists, checkErr := s.repo.ExistsByID(ctx, id, tenantID)
+		if checkErr != nil {
+			return "", "", 0, fmt.Errorf("resolve mailbox after guarded update: %w", checkErr)
+		}
+		if !exists {
+			return "", "", 0, ErrMailboxNotFound
+		}
+		return "", "", 0, fmt.Errorf("%w: mailbox version is no longer %d", ErrMailboxVersionConflict, expectedVersion)
+	}
+
+	if s.webhooks != nil {
+		_, _ = s.webhooks.Publish(ctx, s.repo.db, "mailbox.access_mode.changed", fmt.Sprintf("mailbox:%d", id), tenantID, map[string]any{
+			"mailbox_id":       id,
+			"mail_access_mode": string(parsed),
+		}, time.Now().UTC())
+	}
+
+	cfg, eff, _, gErr := s.repo.GetMailAccessModeState(ctx, id, tenantID)
+	if gErr != nil {
+		return string(parsed), resolveEffectiveMailAccessMode(string(parsed), ""), newVer, nil
+	}
+	return cfg, eff, newVer, nil
+}
+
+// ExistsByID reports whether a non-deleted mailbox with the given id
+// exists inside the tenant. Used to distinguish not-found from
+// version-conflict after a guarded update.
+func (r *AdminMailboxRepo) ExistsByID(ctx context.Context, id, tenantID uint) (bool, error) {
+	var one int
+	err := r.db.QueryRowContext(ctx,
+		"SELECT 1 FROM coremail_mailboxes WHERE id="+r.dialect.Placeholder(1)+" AND tenant_id="+r.dialect.Placeholder(2)+" AND deleted_at IS NULL",
+		id, tenantID).Scan(&one)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 func (s *Service) mutateWithAudit(ctx context.Context, entry *audit.ExtendedEntry, mutate func(*AdminMailboxRepo) error) error {
 	if s.auditStore == nil {
 		return mutate(s.repo)
@@ -357,6 +544,30 @@ func (s *Service) mutateWithAudit(ctx context.Context, entry *audit.ExtendedEntr
 	}
 	if err := s.auditStore.RecordTx(ctx, tx, entry); err != nil {
 		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit mailbox mutation: %w", err)
+	}
+	return nil
+}
+
+// mutateWithTx is the transaction-bound mutation helper used by the
+// provisioning create path: it always runs inside a transaction so
+// folder provisioning and the mailbox insert commit or roll back as
+// one unit, even when no audit store is wired.
+func (s *Service) mutateWithTx(ctx context.Context, entry *audit.ExtendedEntry, mutate func(repo *AdminMailboxRepo, tx *sql.Tx) error) error {
+	tx, err := s.repo.BeginTx(ctx)
+	if err != nil {
+		return fmt.Errorf("begin mailbox mutation: %w", err)
+	}
+	defer tx.Rollback()
+	if err := mutate(s.repo.WithTx(tx), tx); err != nil {
+		return err
+	}
+	if s.auditStore != nil {
+		if err := s.auditStore.RecordTx(ctx, tx, entry); err != nil {
+			return err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit mailbox mutation: %w", err)
@@ -398,10 +609,12 @@ func generatePassword(length int) string {
 }
 
 var (
-	ErrMailboxNotFound   = fmt.Errorf("mailbox not found")
-	ErrMailboxExists     = fmt.Errorf("mailbox already exists")
-	ErrInvalidEmail      = fmt.Errorf("invalid email address")
-	ErrPasswordRequired  = fmt.Errorf("password is required")
-	ErrInvalidTransition = fmt.Errorf("invalid status transition")
-	ErrInvalidQuota      = fmt.Errorf("invalid quota value")
+	ErrMailboxNotFound        = fmt.Errorf("mailbox not found")
+	ErrMailboxExists          = fmt.Errorf("mailbox already exists")
+	ErrInvalidEmail           = fmt.Errorf("invalid email address")
+	ErrPasswordRequired       = fmt.Errorf("password is required")
+	ErrInvalidTransition      = fmt.Errorf("invalid status transition")
+	ErrInvalidQuota           = fmt.Errorf("invalid quota value")
+	ErrInvalidMailAccessMode  = fmt.Errorf("unsupported mail access mode")
+	ErrMailboxVersionConflict = fmt.Errorf("mailbox version conflict")
 )

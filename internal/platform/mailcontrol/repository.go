@@ -42,6 +42,39 @@ func sanitizeLimit(limit int) int {
 	return limit
 }
 
+// ── Tenant eligibility ─────────────────────────────────────────────
+
+// TenantState is the lifecycle state the platform provisioning paths
+// check before mutating a tenant's resources.
+type TenantState struct {
+	Exists  bool
+	Active  bool
+	Deleted bool
+}
+
+// TenantEligible resolves the lifecycle state of the explicit target
+// tenant. Deleted tenants and absent tenants are indistinguishable to
+// the caller except through Exists/Deleted (the platform operator is
+// allowed to know the difference; the tenant admin surface never sees
+// this read). A nil DB error leaves every field false — fail closed.
+func (r *Repository) TenantEligible(ctx context.Context, tenantID uint) (TenantState, error) {
+	if tenantID == 0 {
+		return TenantState{}, nil
+	}
+	var active int
+	var deletedAt *time.Time
+	err := r.db.QueryRowContext(ctx, r.q(
+		`SELECT COALESCE(active,0), deleted_at FROM tenants WHERE id = ?`),
+		tenantID).Scan(&active, &deletedAt)
+	if err == sql.ErrNoRows {
+		return TenantState{}, nil
+	}
+	if err != nil {
+		return TenantState{}, fmt.Errorf("resolve tenant lifecycle: %w", err)
+	}
+	return TenantState{Exists: true, Active: active != 0, Deleted: deletedAt != nil}, nil
+}
+
 // ── Aliases ────────────────────────────────────────────────────────
 
 func (r *Repository) ListAliases(ctx context.Context, f PlatformAliasFilter) ([]PlatformAlias, int64, error) {

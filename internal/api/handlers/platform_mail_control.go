@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v3"
+	"github.com/orvix/orvix/internal/coremail/mailpolicy"
 	"github.com/orvix/orvix/internal/platform/deliverability"
 	"github.com/orvix/orvix/internal/platform/kernel"
 	"github.com/orvix/orvix/internal/platform/mailcontrol"
@@ -17,6 +18,14 @@ import (
 // SetMailControlService wires the platform mail-control service.
 func (h *Handler) SetMailControlService(svc *mailcontrol.Service) {
 	h.mailControlSvc = svc
+}
+
+// SetMailAccessPolicy wires the canonical mailbox-level mail-access
+// policy into the webmail send path. Wired by the router; nil
+// disables enforcement (pre-policy test harnesses keep their
+// behavior).
+func (h *Handler) SetMailAccessPolicy(p *mailpolicy.Policy) {
+	h.mailPolicy = p
 }
 
 // SetDeliverabilityService wires the platform deliverability/suppression

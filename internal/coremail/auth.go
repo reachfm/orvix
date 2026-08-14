@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -178,6 +179,11 @@ func (s *AuthService) AuthenticateMailbox(ctx context.Context, email, password s
 	return mbox, nil
 }
 
+// ErrAddressNotFound is the typed not-found contract of
+// ResolveAddress. Callers (the canonical mail-access policy store,
+// recipient classification) branch on it instead of string-matching.
+var ErrAddressNotFound = errors.New("address not found")
+
 // ResolveAddress checks if an email address is a valid local mailbox,
 // an alias, or a forwarder, returning the final delivery target(s).
 func (s *AuthService) ResolveAddress(ctx context.Context, email string) ([]string, error) {
@@ -205,7 +211,7 @@ func (s *AuthService) ResolveAddress(ctx context.Context, email string) ([]strin
 		}
 	}
 
-	return nil, fmt.Errorf("address not found: %s", email)
+	return nil, fmt.Errorf("%w: %s", ErrAddressNotFound, email)
 }
 
 // VerifyMailboxPassword verifies a password against a mailbox's stored hash
