@@ -208,6 +208,7 @@ jobs:
           run_smoke smoke-admin-js bash release/scripts/smoke-admin-js.sh
           run_smoke smoke-admin-ui bash release/scripts/smoke-admin-ui.sh
           run_smoke smoke-install-public bash release/scripts/smoke-install-public.sh --live
+          run_smoke installer-regression-tests bash release/scripts/tests/test-install-public.sh
 
       - name: Go test internal/config
         run: |
@@ -537,7 +538,18 @@ jobs:
             echo "${REMOTE_URLS_VERIFIED:-NO}"
             echo
             echo "Customer install command:"
-            echo "curl -fsSL https://raw.githubusercontent.com/reachfm/orvix/$TAG/release/install-public.sh | sudo bash -s -- --version ${RESOLVED_VERSION:-unknown} --channel $CHANNEL"
+            echo "curl -fsSLo /root/install-orvix.sh \\"
+            echo "  https://raw.githubusercontent.com/reachfm/orvix/$TAG/release/install-public.sh"
+            echo "chmod 700 /root/install-orvix.sh"
+            echo "ORVIX_VERSION=${RESOLVED_VERSION:-unknown} \\"
+            echo "ORVIX_CHANNEL=$CHANNEL \\"
+            echo "bash /root/install-orvix.sh"
+            echo
+            echo "The script is saved to a file first so the installer's interactive"
+            echo "administrator-password prompts read from the terminal (/dev/tty),"
+            echo "never from a curl pipe. ORVIX_VERSION pins the exact signed release"
+            echo "tag v${RESOLVED_VERSION:-unknown}; the installer refuses to fall back"
+            echo "to latest, stable, source compilation, or a different commit."
           } >> "$GITHUB_STEP_SUMMARY"
 
           echo "LOCAL_SHA=${LOCAL_SHA:-}"
