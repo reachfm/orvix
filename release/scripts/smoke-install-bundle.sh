@@ -213,7 +213,6 @@ EXPECTED_VERSION=""
 if [ -f release/VERSION ]; then
     EXPECTED_VERSION="$(awk 'NF && $1 !~ /^#/ {print; exit}' release/VERSION | tr -d '[:space:]')"
 fi
-
 if [ "$MODE" = "build" ]; then
     command -v go >/dev/null 2>&1 || fail "go is required for --build mode"
     info "building release bundle..."
@@ -252,6 +251,16 @@ if [ "$MODE" = "build" ]; then
     compgen -G "$BDIR/orvix/release/admin/assets/*.js" >/dev/null \
         || fail "sealed bundle is missing release/admin/assets/*.js (built Admin UI entrypoint)"
     pass "sealed bundle contains every required file"
+
+    # The bundle's own VERSION file is authoritative (build-release-bundle.sh
+    # writes the RESOLVED_VERSION into it — the committed release/VERSION may
+    # track an older release) and must agree with BUILDINFO.
+    EXPECTED_VERSION="$(tr -d '[:space:]' < "$BDIR/orvix/VERSION")"
+    [ -n "$EXPECTED_VERSION" ] || fail "sealed bundle VERSION file is empty"
+    BI_VERSION="$(awk -F= '/^version=/ {print $2; exit}' "$BDIR/orvix/BUILDINFO")"
+    [ "$EXPECTED_VERSION" = "$BI_VERSION" ] \
+        || fail "sealed bundle VERSION ($EXPECTED_VERSION) disagrees with BUILDINFO ($BI_VERSION)"
+    pass "sealed bundle VERSION matches BUILDINFO: $EXPECTED_VERSION"
 
     # The sealed binary's metadata must match the bundle metadata.
     if [ -x "$BDIR/orvix/bin/orvix" ]; then

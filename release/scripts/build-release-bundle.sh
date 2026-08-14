@@ -519,7 +519,14 @@ else
     MARKETING_SOURCE="committed-fallback"
 fi
 
-cp release/VERSION "$BUNDLE_ROOT/VERSION"
+# VERSION — the resolved release version, never a stale copy of the
+# committed release/VERSION file (which tracks the previous release
+# and would make the bundle's VERSION disagree with BUILDINFO /
+# the manifest / the embedded binary version).
+printf '%s\n' "$RESOLVED_VERSION" > "$BUNDLE_ROOT/VERSION"
+BUNDLE_VERSION_FILE="$(tr -d '[:space:]' < "$BUNDLE_ROOT/VERSION")"
+[ "$BUNDLE_VERSION_FILE" = "$RESOLVED_VERSION" ] \
+    || fail "bundle VERSION file ($BUNDLE_VERSION_FILE) does not match resolved version ($RESOLVED_VERSION)" 4
 
 # BUILDINFO — single source of truth for the bundle installer to read
 cat > "$BUNDLE_ROOT/BUILDINFO" <<BUILDINFO
@@ -698,6 +705,9 @@ case "$VERIFY_BUILDINFO" in
     *"version=$RESOLVED_VERSION"*"commit=$GIT_COMMIT"*"channel=$RESOLVED_CHANNEL"*) ;;
     *) printf 'unexpected BUILDINFO:\n%s\n' "$VERIFY_BUILDINFO" >&2; fail "sealed BUILDINFO is wrong" 4 ;;
 esac
+VERIFY_VERSION_FILE="$(tr -d '[:space:]' < "$VERIFY_DIR/orvix/VERSION" || true)"
+[ "$VERIFY_VERSION_FILE" = "$RESOLVED_VERSION" ] \
+    || fail "sealed VERSION file is $VERIFY_VERSION_FILE, expected $RESOLVED_VERSION" 4
 
 # ── 9. Done ───────────────────────────────────────────────────────
 BUNDLE_BASE_COUNT="$(find "$BUNDLE_ROOT" -type f | wc -l)"

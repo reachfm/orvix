@@ -690,6 +690,33 @@ RC="$(run_installer "$OUT" "ORVIX_BUNDLE_URL=$BASE/neg-commit/$BUNDLE_NAME" "ORV
 if [ "$RC" -ne 0 ]; then pass "bundle with a mismatched embedded commit fails closed (rc=$RC)"; else fail "bundle with a mismatched embedded commit must fail closed"; fi
 expect_output_has "$OUT" "embeds commit" "embedded-commit mismatch is named in the failure"
 
+# Stale bundle VERSION file: VERSION says 1.0.3-rc4 while BUILDINFO /
+# manifest say 1.0.4-rc2 (the exact defect found when the first
+# v1.0.4-rc2 bundle shipped the stale committed release/VERSION).
+mkdir -p "$WORK/srv/neg-version-mismatch"
+publish_bundle "$WORK/srv/neg-version-mismatch" "$BUNDLE_NAME"
+NEG_STAGE="$WORK/srv/neg-version-mismatch/.stage"
+make_bundle "$NEG_STAGE" ""
+printf '1.0.3-rc4\n' > "$NEG_STAGE/orvix/VERSION"
+tar -C "$NEG_STAGE" -czf "$WORK/srv/neg-version-mismatch/$BUNDLE_NAME" orvix
+NEG_SHA="$(sha256sum "$WORK/srv/neg-version-mismatch/$BUNDLE_NAME" | awk '{print $1}')"
+printf '%s  %s\n' "$NEG_SHA" "$BUNDLE_NAME" > "$WORK/srv/neg-version-mismatch/$BUNDLE_NAME.sha256"
+openssl pkeyutl -sign -rawin -inkey "$WORK/signing-key.pem" \
+    -in "$WORK/srv/neg-version-mismatch/$BUNDLE_NAME" -out "$WORK/srv/neg-version-mismatch/$BUNDLE_NAME.sig" 2>/dev/null
+cat > "$WORK/srv/neg-version-mismatch/$BUNDLE_NAME.manifest.json" <<MANIFEST
+{"schema":1,"product":"Orvix Enterprise Mail","version":"1.0.4-rc2","channel":"rc","commit":"53ecf2400000000000000000000000000000000","build_time":"2026-08-14T00:00:00Z","target":"linux/amd64","artifact":"$BUNDLE_NAME","artifact_sha256":"$NEG_SHA","sbom":"SBOM.spdx"}
+MANIFEST
+openssl pkeyutl -sign -rawin -inkey "$WORK/signing-key.pem" \
+    -in "$WORK/srv/neg-version-mismatch/$BUNDLE_NAME.manifest.json" -out "$WORK/srv/neg-version-mismatch/$BUNDLE_NAME.manifest.json.sig" 2>/dev/null
+cp "$NEG_STAGE/orvix/SBOM.spdx" "$WORK/srv/neg-version-mismatch/$BUNDLE_NAME.sbom.spdx"
+openssl pkeyutl -sign -rawin -inkey "$WORK/signing-key.pem" \
+    -in "$WORK/srv/neg-version-mismatch/$BUNDLE_NAME.sbom.spdx" -out "$WORK/srv/neg-version-mismatch/$BUNDLE_NAME.sbom.spdx.sig" 2>/dev/null
+rm -rf "$NEG_STAGE"
+OUT="$WORK/neg-version-mismatch.out"
+RC="$(run_installer "$OUT" "ORVIX_BUNDLE_URL=$BASE/neg-version-mismatch/$BUNDLE_NAME" "ORVIX_BUNDLE_SHA256=$NEG_SHA" --)"
+if [ "$RC" -ne 0 ]; then pass "bundle with a stale VERSION file fails closed (rc=$RC)"; else fail "bundle with a stale VERSION file must fail closed"; fi
+expect_output_has "$OUT" "disagrees with BUILDINFO" "stale VERSION vs BUILDINFO mismatch is named in the failure"
+
 # ── 2d. Operator command + interactive password prompt (pty) ──────
 echo ""
 echo "--- 2d. Operator installation command (tty password prompt) ---"

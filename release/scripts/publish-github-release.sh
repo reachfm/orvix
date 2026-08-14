@@ -254,14 +254,16 @@ if ! bash "$SCRIPT_DIR/verify-github-release-assets.sh" \
     --repo "$GITHUB_REPO" \
     --tag "$RELEASE_TAG" \
     --asset "orvix-enterprise-mail-${RESOLVED_VERSION}-linux-amd64.tar.gz" \
-    --expected-sha "$SHA" 2>&1; then
+    --expected-sha "$SHA" \
+    --expected-version "$RESOLVED_VERSION" 2>&1; then
     fail "verify-github-release-assets.sh reported the published release is not reachable (BLOCKER 8 fail-closed gate)"
 fi
 if ! bash "$SCRIPT_DIR/verify-github-release-assets.sh" \
     --repo "$GITHUB_REPO" \
     --tag "$RELEASE_TAG" \
     --asset "orvix-enterprise-mail-${CHANNEL}-linux-amd64.tar.gz" \
-    --expected-sha "$SHA" 2>&1; then
+    --expected-sha "$SHA" \
+    --expected-version "$RESOLVED_VERSION" 2>&1; then
     fail "verify-github-release-assets.sh reported the $CHANNEL alias assets are not reachable (BLOCKER 8 fail-closed gate)"
 fi
 

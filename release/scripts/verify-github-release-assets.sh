@@ -60,6 +60,7 @@ RELEASE_TAG=""
 CHANNEL="stable"
 ASSET_NAME=""
 EXPECTED_SHA=""
+EXPECTED_VERSION=""
 LOCAL_ONLY=0
 
 usage() {
@@ -75,6 +76,8 @@ Options:
   --channel <chan>      Backward-compatible alias for --asset using the
                         channel alias name (default: stable)
   --expected-sha <hex>  Expected sha256 of the bundle
+  --expected-version <v> Expected VERSION/BUILDINFO version inside the
+                        downloaded bundle
   --local-only          Only verify the local dist/ artifacts (skip GitHub probes)
   -h, --help            Show this message
 
@@ -95,6 +98,7 @@ while [ $# -gt 0 ]; do
         --asset) ASSET_NAME="$2"; shift 2 ;;
         --channel) CHANNEL="$2"; shift 2 ;;
         --expected-sha) EXPECTED_SHA="$2"; shift 2 ;;
+        --expected-version) EXPECTED_VERSION="$2"; shift 2 ;;
         --local-only) LOCAL_ONLY=1; shift ;;
         -h|--help) usage; exit 0 ;;
         *)  printf 'ERROR: unrecognised argument: %s\n' "$1" >&2; usage; exit 2 ;;
@@ -255,6 +259,18 @@ fi
 [ -f "$ROOT/BUILDINFO" ] || fail "downloaded bundle is missing BUILDINFO (republish required)"
 [ -f "$ROOT/bin/orvix" ] || fail "downloaded bundle is missing bin/orvix (republish required)"
 pass "downloaded bundle re-extracts cleanly and contains install-public.sh + BUILDINFO + bin/orvix"
+
+# ── 10. Version identity: VERSION file + BUILDINFO + (optional) pin ──
+BUNDLE_VERSION_FILE="$(tr -d '[:space:]' < "$ROOT/VERSION" 2>/dev/null || true)"
+[ -n "$BUNDLE_VERSION_FILE" ] || fail "downloaded bundle VERSION file is empty (republish required)"
+BI_VERSION="$(awk -F= '/^version=/ {print $2; exit}' "$ROOT/BUILDINFO" || true)"
+[ "$BUNDLE_VERSION_FILE" = "$BI_VERSION" ] \
+    || fail "downloaded bundle VERSION ($BUNDLE_VERSION_FILE) disagrees with BUILDINFO ($BI_VERSION) (republish required)"
+if [ -n "$EXPECTED_VERSION" ]; then
+    [ "$BUNDLE_VERSION_FILE" = "$EXPECTED_VERSION" ] \
+        || fail "downloaded bundle VERSION ($BUNDLE_VERSION_FILE) does not match --expected-version ($EXPECTED_VERSION) (republish required)"
+fi
+pass "downloaded bundle VERSION matches BUILDINFO: $BUNDLE_VERSION_FILE"
 
 log "OK — release assets verified end-to-end"
 exit 0
