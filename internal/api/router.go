@@ -32,6 +32,7 @@ import (
 	"github.com/orvix/orvix/internal/coremail"
 	"github.com/orvix/orvix/internal/coremail/delivery"
 	"github.com/orvix/orvix/internal/coremail/dkim"
+	"github.com/orvix/orvix/internal/coremail/mailpolicy"
 	"github.com/orvix/orvix/internal/coremail/push"
 	"github.com/orvix/orvix/internal/coremail/queue"
 	"github.com/orvix/orvix/internal/coremail/storage"
@@ -489,6 +490,17 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 				router.h.SetQueueEngine(qe)
 				logger.Info("queue engine wired for webmail send")
 			}
+		}
+		// Wire the canonical mailbox-level mail-access policy into the
+		// webmail send path (MAILBOX-ACCESS-MODE-PHASE1). The policy
+		// store is built over the same *sql.DB the runtime engine
+		// uses; a schema failure degrades to "policy not wired" (the
+		// pre-policy behavior) with an explicit log line.
+		if sqlDB, err := db.DB(); err == nil {
+			router.h.SetMailAccessPolicy(mailpolicy.New(mailpolicy.NewEngineStoreFromDB(sqlDB), nil))
+			logger.Info("mail access policy wired for webmail send")
+		} else {
+			logger.Warn("mail access policy not wired: failed to get sql.DB", zap.Error(err))
 		}
 		// Wire the immutable delivery-attempt history repo
 		// (Milestone 8) against the same table the delivery

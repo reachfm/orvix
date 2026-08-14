@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/orvix/orvix/internal/coremail/dkim"
+	"github.com/orvix/orvix/internal/coremail/mailpolicy"
 	"github.com/orvix/orvix/internal/coremail/push"
 	"github.com/orvix/orvix/internal/coremail/queue"
 	"github.com/orvix/orvix/internal/coremail/storage"
@@ -55,8 +56,7 @@ type DeliveryWorker struct {
 	// RelaySelector is the optional outbound relay control plane
 	// (internal/platform/relay). nil (the default) means every message
 	// delivers direct-to-MX exactly as before this integration existed.
-	RelaySelector RelaySelector
-	// TenantIDForRelay resolves the sending tenant/domain context for a
+	RelaySelector RelaySelector // TenantIDForRelay resolves the sending tenant/domain context for a
 	// queue entry, since QueueEntry alone doesn't carry a tenant ID.
 	// nil disables relay selection even if RelaySelector is set (fails
 	// safe to direct delivery, never to a misrouted relay).
@@ -96,6 +96,17 @@ type DeliveryWorker struct {
 	// DeliverabilityRecorder records real delivery outcomes as
 	// reputation signals. nil disables recording only, never delivery.
 	DeliverabilityRecorder DeliverabilityRecorder
+
+	// MailAccessPolicy is the canonical mailbox-level mail-access
+	// policy (internal/coremail/mailpolicy). When wired it is enforced
+	// on EVERY outbound delivery — initial attempt, relay routing, and
+	// queue retry/redelivery — so an internal-only mailbox can never
+	// escape to an external recipient through a retry, a relay
+	// fallback, or an entry that predates a policy change. A policy
+	// denial is a permanent failure (never a quota-consuming success);
+	// a policy-lookup failure defers (fail closed before any network
+	// delivery). nil preserves pre-existing behavior.
+	MailAccessPolicy *mailpolicy.Policy
 }
 
 // NewDeliveryWorker creates a delivery worker with optional reliability integrations.
@@ -208,13 +219,37 @@ func (w *DeliveryWorker) deliver(ctx context.Context, entry *queue.QueueEntry) e
 		return w.failPolicy(ctx, entry, attemptNumber, pr.Reason, pr.Code)
 	}
 
+	// 5b. Canonical mail-access policy (MAILBOX-ACCESS-MODE-PHASE1).
+	// Enforced on every OUTBOUND entry before any delivery decision —
+	// this covers initial delivery, relay routing, and queue
+	// retry/redelivery. An internal-only sender with an external
+	// recipient is a permanent policy denial (never counted as
+	// delivered, never consuming quota as success). A policy
+	// evaluation failure defers: delivering on unknown policy state
+	// would bypass the internal-only restriction during an outage.
+	// Inbound entries (DirectionInbound) were already policy-checked
+	// at RCPT TO time; their recipient is local by construction.
+	var policyResult *DeliveryResult
+	if w.MailAccessPolicy != nil && entry.Direction == queue.DirectionOutbound {
+		decision := w.MailAccessPolicy.CheckOutbound(ctx, "delivery_worker", entry.FromAddress, []string{entry.ToAddress})
+		switch {
+		case decision.Allowed:
+		case decision.Unavailable:
+			policyResult = &DeliveryResult{StatusMsg: "mail access policy unavailable; delivery deferred", TempFail: true}
+		case decision.Denied:
+			return w.failPolicy(ctx, entry, attemptNumber, "mail access policy denied: "+string(decision.Reason), 550)
+		}
+	}
+
 	// 6. Attempt delivery.
 	startTime := time.Now()
 	isLocal := strings.EqualFold(entry.RecipientDomain, w.LocalDomain) ||
 		entry.DeliveryMode == queue.DeliveryLocal
 
 	var result *DeliveryResult
-	if isLocal {
+	if policyResult != nil {
+		result = policyResult
+	} else if isLocal {
 		result = w.deliverLocal(ctx, entry)
 	} else {
 		result = w.deliverRemote(ctx, entry)

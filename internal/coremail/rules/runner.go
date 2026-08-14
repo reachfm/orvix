@@ -11,6 +11,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/orvix/orvix/internal/coremail/mailpolicy"
 	"github.com/orvix/orvix/internal/coremail/queue"
 	"github.com/orvix/orvix/internal/coremail/storage"
 )
@@ -106,6 +107,14 @@ type Dependencies struct {
 	Vacation    storage.VacationRepository
 	Forwarding  storage.ForwardingRepository
 	Logger      *zap.Logger
+	// MailAccessPolicy is the canonical mailbox-level mail-access
+	// policy (internal/coremail/mailpolicy). When wired, forwarding
+	// and vacation side effects are policy-checked BEFORE enqueue: an
+	// internal-only mailbox can never escape to an external address
+	// through a forwarding rule or an auto-reply. A denial skips the
+	// enqueue and records a safe SkipReason; a policy failure also
+	// skips (fail closed — never deliver on unknown policy state).
+	MailAccessPolicy *mailpolicy.Policy
 }
 
 // Runner evaluates the rules engine for one inbound message.
@@ -487,7 +496,36 @@ func (r *Runner) enqueueVacation(ctx context.Context, in RunInput, out *RunOutpu
 // EnsureMailboxSystemFolders provisions it. If the folder
 // is somehow missing we refuse to enqueue rather than
 // write a dangling Message row.
+//
+// MAILBOX-ACCESS-MODE-PHASE1: before any enqueue, the
+// canonical mail-access policy is consulted for the sender
+// mailbox and the side-effect recipient. A policy denial
+// (internal-only sender, external recipient) skips the
+// enqueue entirely — forwarding and vacation replies can
+// never leak an internal-only mailbox to the outside — and
+// reports a safe SkipReason. A policy-evaluation failure
+// also skips (fail closed: never deliver on unknown policy
+// state).
 func (r *Runner) enqueueOutbound(ctx context.Context, in RunInput, rfc822 []byte, recipient string) error {
+	if r.deps.MailAccessPolicy != nil {
+		decision := r.deps.MailAccessPolicy.CheckOutbound(ctx, "forwarding", in.MailboxEmail, []string{recipient})
+		switch {
+		case decision.Allowed:
+		case decision.Unavailable:
+			if r.deps.Logger != nil {
+				r.deps.Logger.Warn("rules: outbound skipped (mail access policy unavailable)",
+					zap.String("mailbox", in.MailboxEmail), zap.String("recipient", recipient))
+			}
+			return fmt.Errorf("mail access policy unavailable; outbound skipped")
+		case decision.Denied:
+			if r.deps.Logger != nil {
+				r.deps.Logger.Warn("rules: outbound skipped (mail access policy denied)",
+					zap.String("mailbox", in.MailboxEmail), zap.String("recipient", recipient),
+					zap.String("reason", string(decision.Reason)))
+			}
+			return fmt.Errorf("mail access policy denied: %s", decision.Reason)
+		}
+	}
 	outMsgID := newMessageID()
 	fromHeader := in.MailboxEmail
 	if fromHeader == "" {

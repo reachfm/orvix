@@ -40,6 +40,9 @@ type Server struct {
 
 	localDomainChecker func(ctx context.Context, domain string) (bool, error)
 	mailAccessMode     func(ctx context.Context, domain string) (string, error)
+	// mailAccessPolicy is the canonical mailbox-level policy decision
+	// hook; when set it replaces the legacy domain checker.
+	mailAccessPolicy func(ctx context.Context, session *Session, rcptAddr string, rcptIsLocal bool) (allow bool, reason string, err error)
 
 	// listenerCb is called after the real listener is created
 	// or on bind failure. Used by the admin runtime telemetry.
@@ -132,11 +135,20 @@ func (s *Server) SetLocalDomainChecker(fn func(ctx context.Context, domain strin
 	s.localDomainChecker = fn
 }
 
-// SetMailAccessModeChecker wires the domain mail-access-mode lookup
-// (internal_only vs internal_external) used to enforce that policy at
-// RCPT TO for every connection this server accepts.
+// SetMailAccessModeChecker wires the legacy domain mail-access-mode
+// lookup (internal_only vs internal_external) used to enforce that
+// policy at RCPT TO for every connection this server accepts.
+//
+// DEPRECATED: production wiring uses SetMailAccessPolicy.
 func (s *Server) SetMailAccessModeChecker(fn func(ctx context.Context, domain string) (string, error)) {
 	s.mailAccessMode = fn
+}
+
+// SetMailAccessPolicy wires the canonical mailbox-level mail-access
+// policy decision hook. When set, every connection this server
+// accepts uses it INSTEAD of the legacy domain checker.
+func (s *Server) SetMailAccessPolicy(fn func(ctx context.Context, session *Session, rcptAddr string, rcptIsLocal bool) (allow bool, reason string, err error)) {
+	s.mailAccessPolicy = fn
 }
 
 // SetListener assigns a pre-bound net.Listener to the server.
@@ -231,6 +243,9 @@ func (s *Server) handleConn(conn net.Conn) {
 	}
 	if s.localDomainChecker != nil {
 		handler.SetLocalDomainChecker(s.localDomainChecker)
+	}
+	if s.mailAccessPolicy != nil {
+		handler.SetMailAccessPolicy(s.mailAccessPolicy)
 	}
 	if s.mailAccessMode != nil {
 		handler.SetMailAccessModeChecker(s.mailAccessMode)

@@ -247,10 +247,13 @@ are RBAC-permissioned, audited, and tenant-scoped in SQL.
 
 | `GET /platform/domains/:tenant_id` | platformMW | `ListPlatformDomains` | paginated platform domain list for an explicit tenant; search/status filters | Platform | `internal/platform/mailcontrol/service_test.go` | MISSING_UI |
 | `GET /platform/domains/:tenant_id/:id` | platformMW | `GetPlatformDomain` | domain detail with counts and mail-access mode, tenant-scoped | Platform | `internal/platform/mailcontrol/service_test.go` | MISSING_UI |
+| `POST /platform/domains/:tenant_id` | platformMW | `CreatePlatformDomain` | transactional domain provisioning for an explicit tenant (canonical admin service; plan/limit enforcement, optional DKIM, DNS requirements via dnsops, outbox evidence; Idempotency-Key required) | Platform | `internal/platform/mailcontrol/service_test.go`, `internal/api/handlers/platform_provisioning.go` | MISSING_UI |
 | `POST /platform/domains/:tenant_id/:id/status` | platformMW | `SetPlatformDomainStatus` | allowed lifecycle transition, tenant-scoped, audited | Platform | `internal/platform/mailcontrol/service_test.go` | MISSING_UI |
 | `POST /platform/domains/:tenant_id/:id/mail-access-mode` | platformMW | `SetPlatformDomainMailAccessMode` | set canonical SMTP mail-access mode (`internal_only`/`internal_external`), audited | Platform | `internal/platform/mailcontrol/service_test.go` | MISSING_UI |
 | `GET /platform/mailboxes/:tenant_id` | platformMW | `ListPlatformMailboxes` | paginated platform mailbox list for an explicit tenant/domain | Platform | `internal/platform/mailcontrol/service_test.go` | MISSING_UI |
-| `GET /platform/mailboxes/:tenant_id/:id` | platformMW | `GetPlatformMailbox` | mailbox detail, tenant-scoped | Platform | `internal/platform/mailcontrol/service_test.go` | MISSING_UI |
+| `GET /platform/mailboxes/:tenant_id/:id` | platformMW | `GetPlatformMailbox` | mailbox detail with configured + effective mail-access mode, tenant-scoped | Platform | `internal/platform/mailcontrol/service_test.go` | MISSING_UI |
+| `POST /platform/mailboxes/:tenant_id` | platformMW | `CreatePlatformMailbox` | secure mailbox provisioning (REQUIRED explicit `mail_access_mode`, Argon2id via canonical hasher, in-transaction folder provisioning, audit/outbox; password never returned; Cache-Control: no-store; Idempotency-Key required) | Platform | `internal/platform/mailcontrol/service_test.go`, `internal/api/handlers/platform_provisioning.go` | MISSING_UI |
+| `POST /platform/mailboxes/:tenant_id/:id/access-mode` | platformMW | `SetPlatformMailboxAccessMode` | guarded per-mailbox access-mode mutation (`expected_version` optimistic concurrency, tenant predicate in SQL, audit/outbox evidence; Idempotency-Key required) | Platform | `internal/platform/mailcontrol/service_test.go`, `internal/api/handlers/platform_provisioning.go` | MISSING_UI |
 | `POST /platform/mailboxes/:tenant_id/:id/status` | platformMW | `SetPlatformMailboxStatus` | mailbox lifecycle transition, tenant-scoped, audited | Platform | `internal/platform/mailcontrol/service_test.go` | MISSING_UI |
 | `POST /platform/mailboxes/:tenant_id/:id/quota` | platformMW | `SetPlatformMailboxQuota` | quota update with domain-bound ceiling, audited | Platform | `internal/platform/mailcontrol/service_test.go` | MISSING_UI |
 | `POST /platform/mailboxes/:tenant_id/:id/reset-password` | platformMW | `ResetPlatformMailboxPassword` | secure one-time password reset via the production service, audited | Platform | `internal/platform/mailcontrol/service_test.go` | MISSING_UI |
@@ -320,7 +323,7 @@ above (not carried over from an earlier draft) and is enforced equal
 to the router's actual route set by
 `internal/api/capability_matrix_test.go`, which parses
 `platformMW[0], platformMW[1]` registrations straight out of
-`router.go` — currently 197 — and parses every `` `METHOD /path` ``
+`router.go` — currently 200 — and parses every `` `METHOD /path` ``
 occurrence and its row's disposition straight out of this document.
 
 | Disposition | Routes |
@@ -330,9 +333,9 @@ occurrence and its row's disposition straight out of this document.
 | MACHINE_ONLY | 3 |
 | DEPRECATED | 12 |
 | DUPLICATE_SUPERSEDED_ROUTE | 18 |
-| MISSING_UI | 100 |
+| MISSING_UI | 103 |
 | MISSING_BACKEND | 0 (the one MISSING_BACKEND case — platform-initiated organization creation — is a non-route documented under Organizations, not counted here) |
-| **Total** | **197** |
+| **Total** | **200** |
 
 Three pre-existing MISSING_UI gaps were documented rather than
 silently omitted: `GET /admin/backups/:id` (single-backup fetch; the

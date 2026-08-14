@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"github.com/orvix/orvix/internal/coremail"
+	"github.com/orvix/orvix/internal/coremail/mailpolicy"
 	"github.com/orvix/orvix/internal/coremail/queue"
 	"github.com/orvix/orvix/internal/coremail/storage"
 	"github.com/orvix/orvix/internal/observability"
@@ -102,6 +103,14 @@ type Server struct {
 	trustEngine  interface{ IsLockedOut(key string) bool }
 	policyEngine interface {
 		Evaluate(req *policy.EvaluationRequest) *policy.EvaluationResult
+	}
+	// mailAccessPolicy is the canonical mailbox-level mail-access
+	// policy (internal/coremail/mailpolicy). When wired it is
+	// enforced on Submission/set BEFORE enqueue, so an internal-only
+	// mailbox can never submit a message to an external recipient
+	// through JMAP.
+	mailAccessPolicy interface {
+		CheckOutbound(ctx context.Context, kind, senderMailbox string, recipients []string) mailpolicy.Decision
 	}
 	RecordSession       func(ctx context.Context, mailboxID uint, ip, userAgent string) error
 	RecordLoginActivity func(ctx context.Context, mailboxID uint, success bool, ip, userAgent string) error

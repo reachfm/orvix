@@ -34,6 +34,7 @@ import (
 	"github.com/orvix/orvix/internal/configtruth"
 	"github.com/orvix/orvix/internal/coremail"
 	"github.com/orvix/orvix/internal/coremail/delivery"
+	"github.com/orvix/orvix/internal/coremail/mailpolicy"
 	"github.com/orvix/orvix/internal/coremail/push"
 	"github.com/orvix/orvix/internal/coremail/queue"
 	"github.com/orvix/orvix/internal/coremail/storage"
@@ -260,6 +261,12 @@ type Handler struct {
 	mailControlSvc *mailcontrol.Service
 
 	deliverabilitySvc *deliverability.Service
+
+	// mailPolicy is the canonical mailbox-level mail-access policy
+	// (internal/coremail/mailpolicy), enforced on the webmail send
+	// path. Wired by the router; nil disables enforcement (test
+	// harnesses that predate the policy keep their behavior).
+	mailPolicy *mailpolicy.Policy
 
 	// platformIdem is the idempotency store for platform control-plane
 	// mutations (relay create/update/rotate/test). Wired by the router;
