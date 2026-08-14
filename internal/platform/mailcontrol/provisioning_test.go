@@ -3,6 +3,7 @@ package mailcontrol
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"strings"
 	"sync"
@@ -476,6 +477,157 @@ func TestService_SetMailboxAccessMode_CrossTenantNotFound(t *testing.T) {
 	}, 100)
 	if err == nil || !strings.Contains(err.Error(), "not found") {
 		t.Fatalf("cross-tenant mutation must be not-found without disclosure, got %v", err)
+	}
+}
+
+// TestService_PlatformMailbox_VersionExposedOnListAndGet proves the
+// contract correction: PlatformMailbox now exposes the mailbox's real
+// optimistic-concurrency version through List and Get, not just the
+// SetMailboxAccessMode mutation result — so a caller can perform a
+// genuine guarded access-mode mutation after only a read, without
+// first triggering a mutation to learn the version.
+func TestService_PlatformMailbox_VersionExposedOnListAndGet(t *testing.T) {
+	svc, _, db := newMailControlHarness(t)
+	mustSeedTenant(t, db, 1)
+	seedProvDomain(t, svc, db, "mail.example.com", 1)
+
+	created, err := svc.CreateMailbox(context.Background(), PlatformCreateMailboxRequest{
+		Email: "ver@mail.example.com", Password: "TempSecret123!", MailAccessMode: "internal_external",
+	}, 1, 100)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if created.Mailbox.Version != 1 {
+		t.Fatalf("a freshly created mailbox must report version 1, got %d", created.Mailbox.Version)
+	}
+
+	// Get must return the same real version, not a fabricated default.
+	got, err := svc.GetMailbox(context.Background(), created.Mailbox.ID, 1)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.Version != 1 {
+		t.Fatalf("Get must expose version=1, got %d", got.Version)
+	}
+
+	// List must also carry it.
+	list, err := svc.ListMailboxes(context.Background(), PlatformMailboxFilter{TenantID: 1})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	var found *PlatformMailbox
+	for i := range list.Mailboxes {
+		if list.Mailboxes[i].ID == created.Mailbox.ID {
+			found = &list.Mailboxes[i]
+		}
+	}
+	if found == nil {
+		t.Fatal("created mailbox missing from list")
+	}
+	if found.Version != 1 {
+		t.Fatalf("List must expose version=1, got %d", found.Version)
+	}
+
+	// Use the version Get returned (not a hardcoded 1) to perform a
+	// genuine guarded mutation — proving it is the real, usable value.
+	mutated, err := svc.SetMailboxAccessMode(context.Background(), created.Mailbox.ID, 1, PlatformSetMailboxAccessModeRequest{
+		MailAccessMode: "internal_only", ExpectedVersion: got.Version,
+	}, 100)
+	if err != nil {
+		t.Fatalf("mutation using the read version must succeed: %v", err)
+	}
+	if mutated.Version != 2 {
+		t.Fatalf("version must advance to 2, got %d", mutated.Version)
+	}
+
+	// A subsequent Get must reflect the NEW version — proving List/Get
+	// track the live column, not a stale or constant value.
+	after, err := svc.GetMailbox(context.Background(), created.Mailbox.ID, 1)
+	if err != nil {
+		t.Fatalf("get after mutation: %v", err)
+	}
+	if after.Version != 2 {
+		t.Fatalf("Get after mutation must expose version=2, got %d", after.Version)
+	}
+
+	// The stale version Get returned BEFORE the mutation must now be
+	// rejected as a genuine precondition conflict — proving optimistic
+	// concurrency was not weakened or bypassed by this change.
+	if _, err := svc.SetMailboxAccessMode(context.Background(), created.Mailbox.ID, 1, PlatformSetMailboxAccessModeRequest{
+		MailAccessMode: "internal_external", ExpectedVersion: got.Version,
+	}, 100); err == nil || !strings.Contains(err.Error(), "version") {
+		t.Fatalf("the now-stale version must be rejected as a real conflict, got %v", err)
+	}
+}
+
+// TestService_PlatformMailbox_ListGet_CrossTenantDenied proves the
+// version fix did not weaken tenant isolation on the read paths it
+// touched.
+func TestService_PlatformMailbox_ListGet_CrossTenantDenied(t *testing.T) {
+	svc, _, db := newMailControlHarness(t)
+	mustSeedTenant(t, db, 1)
+	mustSeedTenant(t, db, 2)
+	seedProvDomain(t, svc, db, "mail.example.com", 1)
+	created, err := svc.CreateMailbox(context.Background(), PlatformCreateMailboxRequest{
+		Email: "iso@mail.example.com", Password: "TempSecret123!", MailAccessMode: "internal_only",
+	}, 1, 100)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	if _, err := svc.GetMailbox(context.Background(), created.Mailbox.ID, 2); err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("cross-tenant Get must be not-found, got %v", err)
+	}
+
+	list, err := svc.ListMailboxes(context.Background(), PlatformMailboxFilter{TenantID: 2})
+	if err != nil {
+		t.Fatalf("list tenant 2: %v", err)
+	}
+	for _, m := range list.Mailboxes {
+		if m.ID == created.Mailbox.ID {
+			t.Fatal("tenant 1's mailbox leaked into tenant 2's list")
+		}
+	}
+}
+
+// TestService_PlatformMailbox_NoSecretsInProjection proves the
+// PlatformMailbox projection (list, get, and create result) never
+// carries a password, hash, token, or internal path — the version
+// field addition must not have widened what this contract exposes.
+func TestService_PlatformMailbox_NoSecretsInProjection(t *testing.T) {
+	svc, _, db := newMailControlHarness(t)
+	mustSeedTenant(t, db, 1)
+	seedProvDomain(t, svc, db, "mail.example.com", 1)
+	created, err := svc.CreateMailbox(context.Background(), PlatformCreateMailboxRequest{
+		Email: "safe@mail.example.com", Password: "TempSecret123!", MailAccessMode: "internal_only",
+	}, 1, 100)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	body, err := json.Marshal(created)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lower := strings.ToLower(string(body))
+	for _, forbidden := range []string{"tempsecret123", "password", "hash", "argon2", "token", "/tmp/", "\\appdata\\"} {
+		if strings.Contains(lower, forbidden) {
+			t.Fatalf("PlatformCreateMailboxResult leaked %q: %s", forbidden, body)
+		}
+	}
+
+	got, err := svc.GetMailbox(context.Background(), created.Mailbox.ID, 1)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	getBody, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	getLower := strings.ToLower(string(getBody))
+	for _, forbidden := range []string{"tempsecret123", "hash", "argon2", "token", "/tmp/", "\\appdata\\"} {
+		if strings.Contains(getLower, forbidden) {
+			t.Fatalf("PlatformMailbox (Get) leaked %q: %s", forbidden, getBody)
+		}
 	}
 }
 

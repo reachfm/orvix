@@ -75,10 +75,16 @@ type PlatformMailbox struct {
 	// EffectiveMailAccessMode is the RESOLVED policy after inherit
 	// falls back to the domain. The two are distinct fields so they
 	// can never be confused.
-	MailAccessMode          string    `json:"mail_access_mode"`
-	EffectiveMailAccessMode string    `json:"effective_mail_access_mode"`
-	CreatedAt               time.Time `json:"created_at"`
-	UpdatedAt               time.Time `json:"updated_at"`
+	MailAccessMode          string `json:"mail_access_mode"`
+	EffectiveMailAccessMode string `json:"effective_mail_access_mode"`
+	// Version is the mailbox's real optimistic-concurrency counter (the
+	// same value the canonical admin/mailbox service already tracks and
+	// SetMailboxAccessMode already requires as expected_version). It
+	// must be read here — never fabricated or defaulted — so a caller
+	// can perform a genuine guarded mutation after only a list/get.
+	Version   int       `json:"version"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 type PlatformMailboxList struct {

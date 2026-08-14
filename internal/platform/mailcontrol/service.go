@@ -404,6 +404,7 @@ func (s *Service) CreateMailbox(ctx context.Context, req PlatformCreateMailboxRe
 			QuotaMB: created.Mailbox.QuotaMB, UsedBytes: created.Mailbox.UsedBytes,
 			MailAccessMode:          created.Mailbox.MailAccessMode,
 			EffectiveMailAccessMode: created.Mailbox.EffectiveMailAccessMode,
+			Version:                 created.Mailbox.Version,
 			CreatedAt:               created.Mailbox.CreatedAt, UpdatedAt: created.Mailbox.UpdatedAt,
 		},
 	}, nil
@@ -523,7 +524,7 @@ func (s *Service) projectMailbox(m adminmailbox.AdminMailbox, tenantID uint) Pla
 	return PlatformMailbox{
 		ID: m.ID, TenantID: tenantID, DomainID: m.DomainID, Email: m.Email, Name: m.Name,
 		Status: string(m.Status), IsAdmin: m.IsAdmin, QuotaMB: m.QuotaMB, UsedBytes: m.UsedBytes,
-		MailAccessMode: configured, EffectiveMailAccessMode: effective,
+		MailAccessMode: configured, EffectiveMailAccessMode: effective, Version: m.Version,
 		CreatedAt: m.CreatedAt, UpdatedAt: m.UpdatedAt,
 	}
 }
@@ -547,6 +548,7 @@ func (s *Service) GetMailbox(ctx context.Context, id, tenantID uint) (*PlatformM
 		Status: string(m.Status), IsAdmin: m.IsAdmin, QuotaMB: m.QuotaMB, UsedBytes: m.UsedBytes,
 		MailAccessMode:          m.MailAccessMode,
 		EffectiveMailAccessMode: m.EffectiveMailAccessMode,
+		Version:                 m.Version,
 		CreatedAt:               m.CreatedAt, UpdatedAt: m.UpdatedAt,
 	}, nil
 }
