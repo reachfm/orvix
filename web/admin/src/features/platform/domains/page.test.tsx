@@ -7,7 +7,22 @@ import { request } from "../../../api";
 import { TENANT_SCOPE_QUERY_KEY } from "../tenant-context/contract";
 import type { PlatformDomainList } from "./contract";
 
-vi.mock("../../../api", () => ({ request: vi.fn() }));
+const { MockApiError } = vi.hoisted(() => {
+  class MockApiError extends Error {
+    code: string;
+    status: number;
+    body: any;
+    constructor(code: string, message: string, status: number, body?: any) {
+      super(message);
+      this.code = code;
+      this.status = status;
+      this.body = body;
+    }
+  }
+  return { MockApiError };
+});
+
+vi.mock("../../../api", () => ({ request: vi.fn(), ApiError: MockApiError }));
 
 const mockedRequest = vi.mocked(request);
 
@@ -105,13 +120,68 @@ describe("features/platform/domains (platform routes)", () => {
     });
   });
 
-  it("does not invent DNS/DKIM-rotate/TLS controls that the platform routes do not expose", async () => {
+  it("does not invent DNS-verify/DKIM-rotate/TLS controls the platform routes do not expose", async () => {
     renderPage(7);
     await waitFor(() => expect(screen.getByText("acme.example")).toBeInTheDocument());
     fireEvent.click(screen.getByText("acme.example"));
     await waitFor(() => expect(screen.getByText("Mail access policy")).toBeInTheDocument());
     expect(screen.queryByRole("button", { name: /rotate dkim/i })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /verify dns/i })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /create domain/i })).not.toBeInTheDocument();
+  });
+
+  it("creates a domain via the exact platform route with CSRF+Idempotency-Key and no access-mode field", async () => {
+    renderPage(7);
+    await waitFor(() => expect(screen.getByText("acme.example")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /create domain/i }));
+    fireEvent.change(screen.getByLabelText("Domain name *"), { target: { value: "new.example.com" } });
+
+    mockedRequest.mockImplementation((path: string, opts?: Parameters<typeof request>[1]) => {
+      if (path === "/platform/domains/7" && opts?.body) {
+        return Promise.resolve({
+          domain: { id: 99, tenant_id: 7, name: "new.example.com", status: "active", plan: "business", mailbox_count: 0, alias_count: 0, dkim_enabled: false, dmarc_enabled: false, mail_access_mode: "inherit", created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z" },
+          effective_limits: { max_mailboxes: 50, max_mailboxes_unlimited: false, max_mailboxes_inherited: true, max_aliases: 50, max_aliases_unlimited: false, max_aliases_inherited: true, default_mailbox_quota_mb: 1024, max_mailbox_quota_mb: 10240, max_mailbox_quota_mb_unlimited: false, max_mailbox_quota_mb_inherited: true, default_mailbox_quota_mb_inherited: true },
+          dns_next_step: "publish_and_verify_dns",
+          public_dns_changed: false,
+          idempotent: false,
+        });
+      }
+      if (path.startsWith("/platform/organizations")) return Promise.resolve({ organizations: [{ id: 7, name: "Acme", slug: "acme", domain: "acme.example", plan: "business", active: true, mailbox_count: 12, domain_count: 1, created_at: "2026-01-01T00:00:00Z" }], total: 1 });
+      if (path.startsWith("/platform/domains/7")) return Promise.resolve(DOMAINS);
+      return Promise.resolve({});
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Create domain" }));
+
+    await waitFor(() => expect(screen.getByText("Domain created")).toBeInTheDocument());
+
+    const createCall = mockedRequest.mock.calls.find((c) => c[0] === "/platform/domains/7" && (c[1] as any)?.method === "POST");
+    expect(createCall).toBeDefined();
+    const opts = createCall![1] as { body: string; headers?: Record<string, string> };
+    const body = JSON.parse(opts.body);
+    expect(body).toEqual({ name: "new.example.com", status: "active" });
+    expect(body.mail_access_mode).toBeUndefined();
+    expect(opts.headers?.["Idempotency-Key"]).toBeTruthy();
+    // Never a hand-rolled fetch — this goes through the shared client mock.
+    expect(mockedRequest).toHaveBeenCalled();
+  });
+
+  it("shows validation errors from the server and never a false success state", async () => {
+    renderPage(7);
+    await waitFor(() => expect(screen.getByText("acme.example")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /create domain/i }));
+    fireEvent.change(screen.getByLabelText("Domain name *"), { target: { value: "bad name" } });
+
+    mockedRequest.mockImplementation((path: string, opts?: { method?: string }) => {
+      if (path === "/platform/domains/7" && opts?.method === "POST") {
+        return Promise.reject(new MockApiError("INVALID_DOMAIN_NAME", "That domain name is not valid.", 400));
+      }
+      if (path.startsWith("/platform/organizations")) return Promise.resolve({ organizations: [{ id: 7, name: "Acme", slug: "acme", domain: "acme.example", plan: "business", active: true, mailbox_count: 12, domain_count: 1, created_at: "2026-01-01T00:00:00Z" }], total: 1 });
+      if (path.startsWith("/platform/domains/7")) return Promise.resolve(DOMAINS);
+      return Promise.resolve({});
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Create domain" }));
+    await waitFor(() => expect(screen.getByRole("alert")).toBeInTheDocument());
+    expect(screen.queryByText("Domain created")).not.toBeInTheDocument();
   });
 });

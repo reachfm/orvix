@@ -1,10 +1,11 @@
 import { useState } from "react";
-import { Loader2, AlertCircle, Search } from "lucide-react";
+import { Loader2, AlertCircle, Search, Plus } from "lucide-react";
 import TenantScopeBanner from "../tenant-context/components/TenantScopeBanner";
 import { useTenantScope } from "../tenant-context/queries";
 import { usePlatformDomains } from "./queries";
 import DomainTable from "./components/DomainTable";
 import DomainDetailDrawer from "./components/DomainDetailDrawer";
+import CreateDomainDialog from "./components/CreateDomainDialog";
 import PaginationControls from "../components/PaginationControls";
 import { DOMAIN_STATUSES } from "./contract";
 import { domainStatusLabel } from "./formatters";
@@ -24,6 +25,7 @@ export default function DomainsPage() {
   const [statusFilter, setStatusFilter] = useState("");
   const [page, setPage] = useState(0);
   const [selectedId, setSelectedId] = useState<number | null>(null);
+  const [showCreate, setShowCreate] = useState(false);
 
   const tenantId = scope?.tenantId ?? null;
 
@@ -39,12 +41,23 @@ export default function DomainsPage() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h2 className="text-xl font-semibold text-[var(--text-primary)]">Platform Domains</h2>
-        <p className="text-sm text-[var(--text-secondary)]">
-          Platform-wide domain inventory per tenant. Tenant ids are explicit filters on the platform routes — no
-          support grant is involved.
-        </p>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h2 className="text-xl font-semibold text-[var(--text-primary)]">Platform Domains</h2>
+          <p className="text-sm text-[var(--text-secondary)]">
+            Platform-wide domain inventory per tenant. Tenant ids are explicit filters on the platform routes — no
+            support grant is involved.
+          </p>
+        </div>
+        {tenantId !== null && (
+          <button
+            type="button"
+            onClick={() => setShowCreate(true)}
+            className="inline-flex items-center gap-1.5 px-3 py-2 text-sm rounded bg-[var(--accent)] text-white shrink-0"
+          >
+            <Plus size={14} /> Create domain
+          </button>
+        )}
       </div>
 
       <TenantScopeBanner />
@@ -114,6 +127,10 @@ export default function DomainsPage() {
 
       {tenantId !== null && selectedId !== null && (
         <DomainDetailDrawer tenantId={tenantId} id={selectedId} onClose={() => setSelectedId(null)} />
+      )}
+
+      {tenantId !== null && showCreate && (
+        <CreateDomainDialog tenantId={tenantId} onClose={() => setShowCreate(false)} />
       )}
     </div>
   );

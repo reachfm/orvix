@@ -3,6 +3,8 @@
 // support-context header, no grant, no impersonation.
 import { request } from "../../../api";
 import type {
+  PlatformCreateDomainRequest,
+  PlatformCreateDomainResult,
   PlatformDomain,
   PlatformDomainFilter,
   PlatformDomainList,
@@ -34,6 +36,18 @@ export function setPlatformDomainStatus(
   return request<SetPlatformDomainStatusResponse>(`/platform/domains/${tenantId}/${id}/status`, {
     method: "POST",
     body: JSON.stringify(body),
+  });
+}
+
+export function createPlatformDomain(
+  tenantId: number,
+  body: PlatformCreateDomainRequest,
+  idempotencyKey: string,
+): Promise<PlatformCreateDomainResult> {
+  return request<PlatformCreateDomainResult>(`/platform/domains/${tenantId}`, {
+    method: "POST",
+    body: JSON.stringify(body),
+    headers: { "Idempotency-Key": idempotencyKey },
   });
 }
 
