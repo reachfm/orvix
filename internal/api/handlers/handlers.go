@@ -232,16 +232,17 @@ type Handler struct {
 	settingsBridge *settingsbridge.Bridge
 
 	// Enterprise admin services.
-	mailboxAdminSvc  *mailboxadminsvc.Service
-	orgAdminSvc      *orgadminsvc.Service
-	domainAdminSvc   *domainadminsvc.Service
-	platformAdminSvc *platformsvc.PlatformService
-	dashboardSvc     *dashboardsvc.DashboardService
-	bulkProvisionSvc *bulkprovision.Service
-	relaySvc         *relay.Service
-	clusterSvc       *cluster.Service
-	retentionSvc     *retention.Service
-	platformBillSvc  *platformbilling.Service
+	mailboxAdminSvc    *mailboxadminsvc.Service
+	orgAdminSvc        *orgadminsvc.Service
+	domainAdminSvc     *domainadminsvc.Service
+	platformAdminSvc   *platformsvc.PlatformService
+	dashboardSvc       *dashboardsvc.DashboardService
+	bulkProvisionSvc   *bulkprovision.Service
+	bulkMailboxStaging *importer.StagingService
+	relaySvc           *relay.Service
+	clusterSvc         *cluster.Service
+	retentionSvc       *retention.Service
+	platformBillSvc    *platformbilling.Service
 
 	billingSvc   *billing.Service
 	usageSvc     *billing.UsageService
@@ -479,6 +480,8 @@ func (h *Handler) SetAutomationJobs(service *platformjobs.Service, worker *platf
 	h.jobWorker = worker
 }
 
+func (h *Handler) AutomationJobsService() *platformjobs.Service { return h.jobSvc }
+
 func (h *Handler) StartAutomationWorker(ctx context.Context) {
 	if h.jobWorker == nil {
 		return
@@ -534,6 +537,16 @@ func (h *Handler) MailboxAdminService() *mailboxadminsvc.Service {
 // SetBulkProvisionService wires the bulk mailbox provisioning service.
 func (h *Handler) SetBulkProvisionService(s *bulkprovision.Service) {
 	h.bulkProvisionSvc = s
+}
+
+// SetBulkMailboxStaging wires the confined staging directory used to
+// hold an uploaded bulk-mailbox file between the platform stage and
+// validate/execute steps. Reuses internal/platform/importer's existing
+// staging primitive (confined paths, random server-generated IDs,
+// atomic fsync+rename writes, symlink rejection, hash verification) —
+// deliberately NOT a second staging subsystem.
+func (h *Handler) SetBulkMailboxStaging(s *importer.StagingService) {
+	h.bulkMailboxStaging = s
 }
 
 // SetRelayService wires the outbound relay control plane service.

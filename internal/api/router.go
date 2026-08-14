@@ -85,6 +85,8 @@ type Router struct {
 	startOnce    sync.Once
 	publicIdem   *kernel.IdempotencyStore
 	platformIdem *kernel.IdempotencyStore
+
+	bulkProvisionSvc *bulkprovision.Service
 }
 
 func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *zap.Logger,
@@ -346,7 +348,32 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 			if err := bulkProvisionRepo.EnsureSchema(context.Background()); err != nil {
 				logger.Warn("bulk provisioning schema init failed; service disabled", zap.Error(err))
 			} else {
-				router.h.SetBulkProvisionService(bulkprovision.NewService(bulkProvisionRepo, mailboxAdminSvc, domainAdminSvc, nil, nil, nil))
+				// Idempotency, outbox and audit were previously wired nil
+				// here, silently disabling the service's own idempotent-
+				// replay guard, its outbox evidence, and its audit trail
+				// despite the service already supporting all three.
+				bulkProvisionSvc := bulkprovision.NewService(bulkProvisionRepo, mailboxAdminSvc, domainAdminSvc, router.platformIdem, outboxRepo, auditExtendedStore, nil)
+				router.bulkProvisionSvc = bulkProvisionSvc
+				router.h.SetBulkProvisionService(bulkProvisionSvc)
+
+				// Bulk mailbox uploads are staged through the SAME confined
+				// staging primitive internal/platform/importer already
+				// implements (confined paths, random server-generated IDs,
+				// atomic fsync+rename writes, symlink rejection, hash
+				// verification) — a dedicated subdirectory, not a second
+				// staging subsystem.
+				bulkStagingDir := cfg.Imports.StagingDir
+				if bulkStagingDir == "" {
+					bulkStagingDir = filepath.Join(os.TempDir(), "orvix-imports")
+				}
+				bulkStagingDir = filepath.Join(bulkStagingDir, "bulk-mailboxes")
+				if err := os.MkdirAll(bulkStagingDir, 0o700); err != nil {
+					logger.Warn("bulk mailbox staging directory could not be created; staging disabled", zap.Error(err))
+				} else if bulkStaging, err := platformimporter.NewStagingService(bulkStagingDir); err != nil {
+					logger.Warn("bulk mailbox staging initialization failed; staging disabled", zap.Error(err))
+				} else {
+					router.h.SetBulkMailboxStaging(bulkStaging)
+				}
 			}
 
 			relayRepo, relayRepoErr := relay.NewRepositoryChecked(sqlDB)
@@ -772,6 +799,12 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 							logger.Info("durable import service wired")
 						}
 					}
+				}
+			}
+
+			if router.bulkProvisionSvc != nil {
+				if err := bulkprovision.RegisterImportJob(jobRegistry, router.bulkProvisionSvc); err != nil {
+					logger.Error("bulk mailbox import job registration failed", zap.Error(err))
 				}
 			}
 
@@ -1948,6 +1981,14 @@ func (r *Router) setupRoutes() {
 	protected.Post("/platform/domains/:tenant_id/:id/status", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermDomainsWrite), r.h.SetPlatformDomainStatus)
 	protected.Post("/platform/domains/:tenant_id/:id/mail-access-mode", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermDomainsWrite), r.h.SetPlatformDomainMailAccessMode)
 
+	// NOTE: GET /platform/mailboxes/bulk/template MUST be registered
+	// before GET /platform/mailboxes/:tenant_id/:id below. Fiber v3
+	// matches same-depth routes (both are 4 path segments) in
+	// REGISTRATION ORDER, not static-over-param — registering the
+	// param route first would silently shadow the bulk template route
+	// (":tenant_id"="bulk", ":id"="template"), producing a bogus
+	// "a valid tenant_id is required" 400 instead of the template.
+	protected.Get("/platform/mailboxes/bulk/template", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermMailboxesRead), r.h.GetPlatformBulkMailboxTemplate)
 	protected.Get("/platform/mailboxes/:tenant_id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermMailboxesRead), r.h.ListPlatformMailboxes)
 	protected.Get("/platform/mailboxes/:tenant_id/:id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermMailboxesRead), r.h.GetPlatformMailbox)
 	protected.Post("/platform/mailboxes/:tenant_id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermMailboxesWrite), r.h.CreatePlatformMailbox)
@@ -1957,6 +1998,19 @@ func (r *Router) setupRoutes() {
 	protected.Post("/platform/mailboxes/:tenant_id/:id/reset-password", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermMailboxesWrite), r.h.ResetPlatformMailboxPassword)
 	protected.Delete("/platform/mailboxes/:tenant_id/:id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermMailboxesWrite), r.h.DeletePlatformMailbox)
 	protected.Post("/platform/mailboxes/:tenant_id/bulk/status", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermMailboxesWrite), r.h.BulkPlatformMailboxStatus)
+
+	// ── Platform bulk mailbox provisioning (Stage 8) ─────────────
+	// (GET .../bulk/template is registered earlier, above, to avoid
+	// being shadowed by GET /platform/mailboxes/:tenant_id/:id.)
+	protected.Post("/platform/mailboxes/bulk/:tenant_id/stage", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermMailboxesWrite), r.h.PostPlatformBulkMailboxStage)
+	protected.Post("/platform/mailboxes/bulk/:tenant_id/validate", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermMailboxesWrite), r.h.PostPlatformBulkMailboxValidate)
+	protected.Post("/platform/mailboxes/bulk/:tenant_id/jobs", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermMailboxesWrite), r.h.PostPlatformBulkMailboxCreateJob)
+	protected.Get("/platform/mailboxes/bulk/:tenant_id/jobs", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermMailboxesRead), r.h.GetPlatformBulkMailboxJobs)
+	protected.Get("/platform/mailboxes/bulk/:tenant_id/jobs/:jobId", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermMailboxesRead), r.h.GetPlatformBulkMailboxJob)
+	protected.Get("/platform/mailboxes/bulk/:tenant_id/jobs/:jobId/rows", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermMailboxesRead), r.h.GetPlatformBulkMailboxJobRows)
+	protected.Post("/platform/mailboxes/bulk/:tenant_id/jobs/:jobId/execute", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermMailboxesWrite), r.h.PostPlatformBulkMailboxExecute)
+	protected.Post("/platform/mailboxes/bulk/:tenant_id/jobs/:jobId/cancel", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermMailboxesWrite), r.h.PostPlatformBulkMailboxCancel)
+	protected.Post("/platform/mailboxes/bulk/:tenant_id/jobs/:jobId/retry", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermMailboxesWrite), r.h.PostPlatformBulkMailboxRetry)
 
 	protected.Get("/platform/aliases/:tenant_id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermAliasesRead), r.h.ListPlatformAliases)
 	protected.Get("/platform/aliases/:tenant_id/:id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermAliasesRead), r.h.GetPlatformAlias)
