@@ -203,6 +203,7 @@ jobs:
           }
           run_smoke bash-syntax bash -c 'bash -n release/install.sh && bash -n release/install-public.sh && bash -n release/scripts/*.sh && bash -n release/scripts/tests/*.sh'
           run_smoke admin-build-fallback bash release/scripts/tests/test-admin-build.sh
+          run_smoke release-artifact-upload-contract bash release/scripts/tests/test-release-artifact-upload.sh
           run_smoke smoke-admin-browser bash release/scripts/smoke-admin-browser.sh
           run_smoke smoke-admin-functional-browser bash release/scripts/smoke-admin-functional-browser.sh
           run_smoke smoke-admin-js bash release/scripts/smoke-admin-js.sh
@@ -358,6 +359,46 @@ jobs:
             || { echo "::error::local Ed25519 signature verification failed" >&2; exit 1; }
           echo "SIGNATURE_VERIFIED_LOCALLY=YES"
           echo "SIGNATURE_VERIFIED_LOCALLY=YES" >> "$GITHUB_ENV"
+
+      - name: Archive signed bundle as a workflow-run artifact
+        # Runs for every workflow_dispatch (dry-run included) — this is
+        # deliberately NOT gated on env.DRY_RUN != 'true'. Without it, a
+        # dry_run:true dispatch proves signing works but leaves the signed
+        # binary/tarball unretrievable (the runner workspace is discarded),
+        # so an operator who needs a genuinely signed artifact for a
+        # non-public deployment (e.g. an experimental VPS smoke test) has
+        # no way to get one without a real, publicly-visible published
+        # GitHub Release. Uploading dist/* here as a private, repo-collaborator-
+        # only, time-boxed Actions artifact closes that gap without
+        # weakening the publish path itself.
+        #
+        # Placement: this step runs only after "Build release bundle" has
+        # already locally verified the checksum (sha256sum -c) AND the
+        # Ed25519 signature (openssl pkeyutl -verify) of the built tarball
+        # — both of which set SIGNATURE_VERIFIED_LOCALLY=YES on success or
+        # abort the job on failure, so this step can never run over an
+        # unverified or partially-built bundle.
+        #
+        # env.PUBLISH == 'true' is set only in "Release trigger preflight"
+        # when github.event_name == 'workflow_dispatch' — this step never
+        # runs from a pull_request or an ordinary push to main.
+        #
+        # Never touches: the signing algorithm/key, the trusted public key,
+        # tag creation, GitHub Release creation/publication, or the
+        # production deployment (install-public.sh / upgrade.sh) path —
+        # none of those are read, written, or referenced here.
+        if: env.PUBLISH == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: orvix-release-bundle-${{ github.sha }}-run${{ github.run_id }}
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+            dist/*.sig
+            dist/*.manifest.json
+            dist/*.sbom.spdx
+          if-no-files-found: error
+          retention-days: 3
 
       - name: Dry-run verdict
         if: env.PUBLISH == 'true' && env.DRY_RUN == 'true'
