@@ -15,7 +15,10 @@ import (
 // DefaultBatchSize bounds how many rows Execute attempts before it
 // checkpoints. Kept small enough that a single batch comfortably fits
 // inside a job's lease/heartbeat window under real SMTP/DB latency.
-const DefaultBatchSize = 50
+// DefaultBatchSize is a var, not a const, so tests can shrink it to
+// make batch-boundary/checkpoint behavior observable with a handful of
+// rows instead of needing thousands. Production code never mutates it.
+var DefaultBatchSize = 50
 
 type Service struct {
 	repo        *Repository
