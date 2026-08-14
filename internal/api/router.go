@@ -1011,23 +1011,76 @@ func (r *Router) setupMiddleware() {
 	// the limit changed.
 }
 
+// csrfBootstrapPath is the one route explicitly exempted from the general
+// API budget below — see apiRateLimitMiddleware's doc comment for why.
+const csrfBootstrapPath = "/api/v1/csrf-token"
+
 // apiRateLimitMiddleware returns the general API rate limiter
 // middleware for the /api/v1 group. It is built once in setupRoutes
 // and mounted only on the API group, so SPA static routes are
 // never counted against the per-IP budget. Credential endpoints get
 // the dedicated multi-dimensional throttle and do NOT also pass
 // through this handler, by mounting order.
+//
+// GET /api/v1/csrf-token is explicitly exempted here. Fiber v3's
+// Group(prefix, middleware) registers that middleware as a
+// prefix-matching USE route (see (*fiber.App).Group -> app.register
+// with methodUse): it matches every request whose path starts with
+// the prefix, regardless of which Router object the final route was
+// added through. Simply registering /api/v1/csrf-token outside the
+// `api` group variable (e.g. directly on r.app) does NOT exempt it,
+// because its path still starts with "/api/v1" and this middleware is
+// still mounted on that whole prefix. The only real way to exempt one
+// path from a prefix-mounted middleware is an explicit check inside
+// the middleware itself, as done here.
+//
+// This exemption exists because /api/v1/csrf-token previously shared
+// this general 100-req/min-per-IP budget with EVERY other /api/v1
+// call. A burst of ordinary API traffic (or one heavy admin/testing
+// session) could exhaust it and then lock every client behind that IP
+// out of ever bootstrapping a fresh CSRF token again until the window
+// rolled over — breaking login and webmail for legitimate traffic, not
+// abuse. Observed live 2026-08-14. csrf-token now relies solely on its
+// own dedicated, isolated budget — see csrfBootstrapRateLimitMiddleware,
+// mounted directly on that route.
 func (r *Router) apiRateLimitMiddleware() fiber.Handler {
+	var inner fiber.Handler
 	if r.redisLimiter != nil {
-		return r.redisLimiter.Middleware()
+		inner = r.redisLimiter.Middleware()
+	} else {
+		// NOTE: Expiration is a time.Duration. The previous literal
+		// `60 * 1000` was 60,000 NANOSECONDS (0.06 ms), so the
+		// no-Redis fallback window expired between consecutive
+		// requests and the general API limiter never actually limited
+		// anything — a silently-open API budget for single-node
+		// deployments. A real 1-minute window is intended.
+		inner = limiter.New(limiter.Config{Max: 100, Expiration: time.Minute})
 	}
-	// NOTE: Expiration is a time.Duration. The previous literal
-	// `60 * 1000` was 60,000 NANOSECONDS (0.06 ms), so the
-	// no-Redis fallback window expired between consecutive
-	// requests and the general API limiter never actually limited
-	// anything — a silently-open API budget for single-node
-	// deployments. A real 1-minute window is intended.
-	return limiter.New(limiter.Config{Max: 100, Expiration: time.Minute})
+	return func(c fiber.Ctx) error {
+		if c.Path() == csrfBootstrapPath {
+			return c.Next()
+		}
+		return inner(c)
+	}
+}
+
+// csrfBootstrapRateLimitMiddleware returns a DEDICATED, generous per-IP
+// budget for GET /api/v1/csrf-token, isolated from both the general API
+// budget (apiRateLimitMiddleware) and every credential-attempt budget
+// (authThrottle/authThrottleIP). Mounted directly on the csrf-token
+// route in place of the general limiter — see RedisRateLimiter.
+// CSRFBootstrapMiddleware's doc comment for why sharing that budget was
+// a real outage risk: a burst of ordinary API traffic could exhaust it
+// and lock every client behind that IP out of ever obtaining a fresh
+// CSRF token. Same fail-open-on-Redis-error behavior as the general
+// limiter (never block login/webmail bootstrap on a Redis outage); the
+// in-memory fallback uses the exact same newUserRateLimiter helper and
+// budget as the Redis path for parity on a single-node deployment.
+func (r *Router) csrfBootstrapRateLimitMiddleware() fiber.Handler {
+	if r.redisLimiter != nil {
+		return r.redisLimiter.CSRFBootstrapMiddleware()
+	}
+	return newUserRateLimiter("ratelimit:csrf", 60, time.Minute, 60, "too many token requests, try again later")
 }
 
 func (r *Router) setupRoutes() {
@@ -1160,7 +1213,21 @@ func (r *Router) setupRoutes() {
 	// protected group (otherwise the auth middleware returns 401 and the
 	// login page can never obtain a double-submit CSRF token).
 	//
-	// Security posture:
+	// Registered on r.app directly (full path), NOT via the `api` group,
+	// for the same reason /admin/login is above: the `api` group carries
+	// apiRateLimitMiddleware()'s general 100-req/min-per-IP budget shared
+	// by every /api/v1 route. Every ordinary page load/reload — plus every
+	// automatic 403-retry-with-fresh-token on a mutation — calls this
+	// endpoint, so that shared budget meant a burst of ordinary API
+	// traffic from one client IP could exhaust it and lock every user
+	// behind that IP out of ever obtaining a CSRF token again until the
+	// window rolled over: a full login/webmail outage caused by
+	// legitimate traffic, observed live on 2026-08-14. This route now
+	// gets its own dedicated, generous, isolated budget instead — see
+	// csrfBootstrapRateLimitMiddleware / RedisRateLimiter.
+	// CSRFBootstrapMiddleware.
+	//
+	// Security posture (unchanged from before this move):
 	//   - Reuses the existing CSRFManager.GenerateToken (random token stored
 	//     as a SHA-256 hash + double-submit cookie). CSRF validation is
 	//     unchanged and never weakened.
@@ -1173,7 +1240,7 @@ func (r *Router) setupRoutes() {
 	//     token to a different user.
 	//   - The response body contains only the CSRF token; no user, tenant,
 	//     or session data is ever included.
-	api.Get("/csrf-token", func(c fiber.Ctx) error {
+	r.app.Get("/api/v1/csrf-token", r.csrfBootstrapRateLimitMiddleware(), func(c fiber.Ctx) error {
 		if origin := c.Get("Origin"); origin != "" && !r.isAllowedOrigin(origin) {
 			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
 				"error": "origin not allowed",
