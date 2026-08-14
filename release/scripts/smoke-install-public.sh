@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# smoke-install-public.sh — Verifies install-public.sh is a
+# smoke-install-public.sh â€” Verifies install-public.sh is a
 # fully self-contained one-command installer entrypoint.
 #
 # What this smoke guards against:
@@ -18,7 +18,7 @@
 #      does NOT match the bundle's BUILDINFO claim.
 #
 # This script does NOT actually execute install-public end-to-end
-# against a live VPS — that needs real systemd and is gated behind
+# against a live VPS â€” that needs real systemd and is gated behind
 # smoke-install-systemd.sh in the production-readiness gate. What
 # it DOES do is statically verify the installer entrypoint's
 # contract by:
@@ -107,35 +107,35 @@ check "install-public.sh validates required bundle files" \
     "grep -q 'validate_bundle_layout' release/install-public.sh"
 
 check "validate_bundle_layout requires admin index.html" \
-    "sed -n '/^validate_bundle_layout/,/^}/p' release/install-public.sh | grep -qE 'release/admin/index\\.html'"
+    "sed -n '/^validate_bundle_layout/,/^}/p' release/install-public.sh | grep -E 'release/admin/index\\.html' >/dev/null"
 
 # The Admin UI is a React/Vite build with content-hashed asset filenames
-# (release/admin/assets/index-<hash>.js) that differ every build — a fixed
+# (release/admin/assets/index-<hash>.js) that differ every build â€” a fixed
 # filename requirement (the pre-migration legacy app.js/styles.css/
 # modules/*.js) rejects every genuinely complete, correctly-built bundle.
 # This exact defect shipped in release v1.0.3-rc6.recovery.0a6a557: a
 # correctly signed, correctly checksummed bundle was refused by
 # install-public.sh because it hardcoded those removed legacy filenames.
 # The fix must instead parse index.html's own module reference and
-# confirm THAT file exists — assert the hardcoded-legacy-filename check
+# confirm THAT file exists â€” assert the hardcoded-legacy-filename check
 # is gone and the dynamic reference check is present.
 check "validate_bundle_layout does not hardcode legacy admin filenames" \
-    "! sed -n '/^validate_bundle_layout/,/^}/p' release/install-public.sh | grep -qE 'release/admin/(app\\.js|styles\\.css|modules/auth\\.js|modules/components\\.js)'"
+    "! sed -n '/^validate_bundle_layout/,/^}/p' release/install-public.sh | grep -E 'release/admin/(app\\.js|styles\\.css|modules/auth\\.js|modules/components\\.js)' >/dev/null"
 
 check "validate_bundle_layout dynamically validates the admin module reference" \
-    "sed -n '/^validate_bundle_layout/,/^}/p' release/install-public.sh | grep -q 'admin_module_src'"
+    "sed -n '/^validate_bundle_layout/,/^}/p' release/install-public.sh | grep -E 'admin_module_src' >/dev/null"
 
 check "validate_bundle_layout requires webmail assets" \
-    "sed -n '/^validate_bundle_layout/,/^}/p' release/install-public.sh | grep -qE 'release/webmail/(index\\.html|sw\\.js|assets/auth-gate\\.js|assets/webmail\\.js)'"
+    "sed -n '/^validate_bundle_layout/,/^}/p' release/install-public.sh | grep -E 'release/webmail/(index\\.html|sw\\.js|assets/auth-gate\\.js|assets/webmail\\.js)' >/dev/null"
 
 check "validate_bundle_layout requires marketing assets" \
-    "sed -n '/^validate_bundle_layout/,/^}/p' release/install-public.sh | grep -qE 'release/marketing/(index\\.html|404\\.html|robots\\.txt|sitemap\\.xml)' && sed -n '/^validate_bundle_layout/,/^}/p' release/install-public.sh | grep -q 'marketing-assets/\\*.js'"
+    "sed -n '/^validate_bundle_layout/,/^}/p' release/install-public.sh | grep -E 'release/marketing/(index\\.html|404\\.html|robots\\.txt|sitemap\\.xml)' >/dev/null && sed -n '/^validate_bundle_layout/,/^}/p' release/install-public.sh | grep -E 'marketing-assets/\\*.js' >/dev/null"
 
 check "validate_bundle_layout requires systemd + sudoers" \
-    "sed -n '/^validate_bundle_layout/,/^}/p' release/install-public.sh | grep -qE 'orvix\\.service|orvix-update\\.service|orvix-update$'"
+    "sed -n '/^validate_bundle_layout/,/^}/p' release/install-public.sh | grep -E 'orvix\\.service|orvix-update\\.service|orvix-update$' >/dev/null"
 
 check "validate_bundle_layout requires admin smoke modules" \
-    "sed -n '/^validate_bundle_layout/,/^}/p' release/install-public.sh | grep -q 'release/scripts/smoke-admin-import-graph.mjs'"
+    "sed -n '/^validate_bundle_layout/,/^}/p' release/install-public.sh | grep -E 'release/scripts/smoke-admin-import-graph.mjs' >/dev/null"
 
 # 5. install-public must refuse to delegate to install.sh when the
 #    bundle is incomplete.
@@ -164,7 +164,7 @@ check "install-public.sh has no nodejs requirement" \
 check "install.sh rejects stale release/orvix-linux-amd64 mismatches" \
     "grep -qE 'stale prebuilt|exp_commit' release/install.sh"
 
-# ── Live exercise ────────────────────────────────────────────────
+# â”€â”€ Live exercise â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 if [ "$MODE" = "live" ]; then
     command -v tar >/dev/null 2>&1 || fail "tar is required for --live"
     command -v openssl >/dev/null 2>&1 || fail "openssl is required for --live (signature verification)"
@@ -175,7 +175,7 @@ if [ "$MODE" = "live" ]; then
 
     # Build a fully synthetic "remote" bundle directory that mirrors
     # what release/scripts/build-release-bundle.sh produces. We do
-    # NOT need a real orvix binary for this smoke — what we are
+    # NOT need a real orvix binary for this smoke â€” what we are
     # proving is that install-public validates the bundle layout
     # before delegating to install.sh.
     FIX="$WORK/fake-release-server/orvix-enterprise-mail-stable-linux-amd64.tar.gz"
@@ -206,16 +206,38 @@ commit=53ecf2400000000000000000000000000000000
 short_commit=53ecf24
 build_time=2026-07-03T17:40:57Z
 channel=stable
+target_os=linux
+target_arch=amd64
+built_by=smoke-install-public.sh
 BUILDINFO_EOF
 
-    # Stub binary. install.sh will run this in production; here
-    # install-public.sh must NOT execute it before validation.
+    # Stub binary. install-public.sh must verify its embedded
+    # metadata against BUILDINFO before delegation â€” the stub
+    # implements `version --full` so that verification is
+    # exercised end-to-end.
     cat > "$BUNDLE_STAGING/bin/orvix" <<'BIN_EOF'
 #!/usr/bin/env bash
+if [ "${1:-}" = "version" ]; then
+    if [ "${2:-}" = "--full" ]; then
+        printf 'orvix 1.0.3-rc5\n  commit:     53ecf2400000000000000000000000000000000\n  channel:    stable\n  build_time: 2026-07-03T17:40:57Z\n'
+        exit 0
+    fi
+    printf 'orvix 1.0.3-rc5\n'
+    exit 0
+fi
 echo "binary-in-bundle invoked" >&2
 exit 0
 BIN_EOF
     chmod +x "$BUNDLE_STAGING/bin/orvix"
+
+    # checksums.txt + SBOM.spdx mirror the sealed release bundle.
+    printf 'aa  bin/orvix\n' > "$BUNDLE_STAGING/checksums.txt"
+    cat > "$BUNDLE_STAGING/SBOM.spdx" <<'SBOM_EOF'
+SPDXVersion: SPDX-2.3
+DataLicense: CC0-1.0
+SPDXID: SPDXRef-DOCUMENT
+DocumentName: orvix-enterprise-mail-1.0.3-rc5
+SBOM_EOF
 
     # All required admin/webmail/systemd/sudoers/scripts files.
     #
@@ -224,12 +246,13 @@ BIN_EOF
     # PR #55 added the six external-backup systemd units and four scripts to
     # the validator, this fixture kept the shorter pre-PR#55 shape, so the
     # smoke test built a fake bundle without the new files and validate_
-    # bundle_layout correctly rejected it — cratering the post-merge Release
+    # bundle_layout correctly rejected it â€” cratering the post-merge Release
     # Bundle workflow. See release/scripts/tests/test-external-backup-manifests.sh
     # for the cross-manifest sync check that catches this drift.
     for rel in \
         release/install-public.sh release/upgrade.sh release/uninstall.sh \
         release/systemd/orvix.service release/systemd/orvix-update.service \
+        release/systemd/orvix-restore.service release/systemd/orvix-restore.path \
         release/systemd/orvix-external-backup.service \
         release/systemd/orvix-external-backup.timer \
         release/systemd/orvix-external-backup-check-weekly.service \
@@ -255,8 +278,17 @@ BIN_EOF
         release/scripts/publish-github-release.sh \
         release/scripts/verify-github-release-assets.sh \
         release/scripts/verify-fresh-vps-one-command.sh \
+        release/scripts/build-release-bundle.sh \
+        release/scripts/check-public-origin-contract.sh \
+        release/scripts/generate-sbom.sh release/scripts/lib-admin-build.sh \
+        release/scripts/sign-release-artifact.sh \
+        release/scripts/verify-release-signature.sh \
+        release/scripts/migrate-admin-root-route.sh \
+        release/scripts/lib-admin-route-migration.sh \
         release/scripts/healthcheck.sh release/scripts/diagnostics.sh \
         release/trust/orvix-release-signing.pub.pem \
+        release/configs/orvix.yaml.example \
+        release/admin/theme-init.js \
         release/webmail/index.html release/webmail/sw.js \
         release/webmail/assets/auth-gate.js release/webmail/assets/webmail.js \
         release/marketing/index.html release/marketing/404.html \
@@ -270,7 +302,7 @@ BIN_EOF
     # release/admin mirrors the real React/Vite build (build-release-bundle.sh
     # via lib-admin-build.sh's package_admin_spa()): index.html plus a
     # content-hashed assets/*.js entrypoint. There is no fixed app.js/
-    # styles.css/modules/*.js in the shipped bundle — a prior version of
+    # styles.css/modules/*.js in the shipped bundle â€” a prior version of
     # this fixture (and of install-public.sh's validate_bundle_layout)
     # hardcoded those legacy filenames, which caused install-public.sh to
     # reject a genuinely complete, correctly-built bundle in production
@@ -278,7 +310,7 @@ BIN_EOF
     # exercising the REAL contract: whatever index.html's own
     # <script type="module" src="..."> references must exist.
     mkdir -p "$BUNDLE_STAGING/release/admin/assets"
-    printf '<!doctype html><script type="module" crossorigin src="/admin/assets/index-testhash.js"></script>' \
+    printf '<!doctype html><script src="/admin/theme-init.js"></script><script type="module" crossorigin src="/admin/assets/index-testhash.js"></script>' \
         > "$BUNDLE_STAGING/release/admin/index.html"
     printf 'console.log("stub admin bundle");\n' \
         > "$BUNDLE_STAGING/release/admin/assets/index-testhash.js"
@@ -318,6 +350,16 @@ SPDXVersion: SPDX-2.3
 DataLicense: CC0-1.0
 SPDXID: SPDXRef-DOCUMENT
 DocumentName: orvix-enterprise-mail-1.0.3-rc5
+DocumentNamespace: https://orvix.email/sbom/orvix-enterprise-mail-1.0.3-rc5
+Creator: Tool: orvix-generate-sbom
+Created: 2026-07-03T17:40:57Z
+
+PackageName: orvix
+SPDXID: SPDXRef-Package-orvix
+PackageVersion: 1.0.3-rc5
+PackageDownloadLocation: https://github.com/reachfm/orvix/releases/download/v1.0.3-rc5/orvix-enterprise-mail-1.0.3-rc5-linux-amd64.tar.gz
+FilesAnalyzed: true
+PackageLicenseConcluded: NOASSERTION
 SBOM
     openssl pkeyutl -sign -rawin -inkey "$SRV/signing-key.pem" \
         -in "$SRV/orvix-enterprise-mail-stable-linux-amd64.tar.gz.sbom.spdx" \
@@ -344,7 +386,7 @@ MANIFEST
         -out "$SRV/orvix-enterprise-mail-stable-linux-amd64.tar.gz.manifest.json.sig" 2>/dev/null
 
     # Verify all required release sidecars exist before starting the
-    # HTTP server — the smoke must fail if any sidecar is absent.
+    # HTTP server â€” the smoke must fail if any sidecar is absent.
     for sidecar in \
         "$SRV/orvix-enterprise-mail-stable-linux-amd64.tar.gz" \
         "$SRV/orvix-enterprise-mail-stable-linux-amd64.tar.gz.sha256" \
@@ -393,7 +435,7 @@ PY
     tar -C "$BAD_DIR" -czf "$BAD" orvix
     info "negative fixture bundle at $BAD (intentionally incomplete)"
 
-    # ── 1. Negative: incomplete bundle must fail closed ─────────
+    # â”€â”€ 1. Negative: incomplete bundle must fail closed â”€â”€â”€â”€â”€â”€â”€â”€â”€
     info "negative test: incomplete bundle must fail with non-zero exit"
     set +e
     ORVIX_BUNDLE_URL="http://127.0.0.1:${HTTP_PORT}/incomplete.tar.gz" \
@@ -410,7 +452,7 @@ PY
         || fail "incomplete bundle was rejected but with no diagnostic message (got: $(head -3 "$WORK/neg.out"))"
     pass "incomplete bundle correctly rejected (rc=$NEG_RC)"
 
-    # ── 2. Positive: complete bundle must reach install.sh ──
+    # â”€â”€ 2. Positive: complete bundle must reach install.sh â”€â”€
     info "positive test: complete bundle must reach install.sh delegation"
     set +e
     ORVIX_BUNDLE_URL="http://127.0.0.1:${HTTP_PORT}/orvix-enterprise-mail-stable-linux-amd64.tar.gz" \
@@ -424,7 +466,7 @@ PY
     set -e
     grep -q 'INSTALL.SH_REACHED_MARKER' "$WORK/pos.out" \
         || fail "complete bundle did NOT reach install.sh (rc=$POS_RC; output: $(head -30 "$WORK/pos.out"))"
-    # Install-public execs install.sh — the marker must carry the
+    # Install-public execs install.sh â€” the marker must carry the
     # correct env we expect.
     if [ "$POS_RC" != "42" ]; then
         warn "install.sh exited with $POS_RC instead of the test sentinel 42; check $WORK/pos.out"
@@ -449,7 +491,7 @@ PY
     fi
 fi
 
-# ── Done ──────────────────────────────────────────────────────────
+# â”€â”€ Done â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 echo ""
 echo "================================================================"
 echo "Orvix install-public smoke: $CHECKS_PASSED / $CHECKS_TOTAL checks passed"
