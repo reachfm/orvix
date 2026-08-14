@@ -120,6 +120,8 @@ func coremailTables() []string {
 			recv_limit_per_hour INTEGER NOT NULL DEFAULT 0,
 			last_login DATETIME,
 			last_ip TEXT NOT NULL DEFAULT '',
+			mail_access_mode TEXT NOT NULL DEFAULT 'inherit',
+			version INTEGER NOT NULL DEFAULT 1,
 			created_at DATETIME NOT NULL,
 			updated_at DATETIME NOT NULL,
 			deleted_at DATETIME

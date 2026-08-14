@@ -378,7 +378,9 @@ func postgresTables() []string {
 			allow_imap BOOLEAN NOT NULL DEFAULT true,
 			allow_pop3 BOOLEAN NOT NULL DEFAULT true,
 			allow_jmap BOOLEAN NOT NULL DEFAULT true,
-			allow_webmail BOOLEAN NOT NULL DEFAULT true
+			allow_webmail BOOLEAN NOT NULL DEFAULT true,
+			mail_access_mode TEXT NOT NULL DEFAULT 'inherit',
+			version INTEGER NOT NULL DEFAULT 1
 		)`,
 
 		// --- Mail storage (messages, folders, attachments) ---
@@ -1156,6 +1158,16 @@ func postgresColumnAdditions() []string {
 		// domain to local-only delivery (Milestone 5, Feature 6/7);
 		// internal_external is the default, unrestricted mode.
 		`ALTER TABLE coremail_domains ADD COLUMN IF NOT EXISTS mail_access_mode TEXT NOT NULL DEFAULT 'internal_external'`,
+
+		// coremail_mailboxes.mail_access_mode (MAILBOX-ACCESS-MODE-PHASE1):
+		// per-mailbox mail-access policy. 'inherit' is the additive default
+		// so every pre-existing mailbox keeps resolving through the domain
+		// policy exactly as before.
+		`ALTER TABLE coremail_mailboxes ADD COLUMN IF NOT EXISTS mail_access_mode TEXT NOT NULL DEFAULT 'inherit'`,
+
+		// coremail_mailboxes.version (MAILBOX-ACCESS-MODE-PHASE1):
+		// optimistic-concurrency guard for guarded mailbox mutations.
+		`ALTER TABLE coremail_mailboxes ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1`,
 
 		`ALTER TABLE licenses ADD COLUMN IF NOT EXISTS tier TEXT NOT NULL DEFAULT 'smb'`,
 		`ALTER TABLE licenses ADD COLUMN IF NOT EXISTS max_domains INTEGER NOT NULL DEFAULT 10`,
