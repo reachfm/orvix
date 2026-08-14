@@ -13,6 +13,7 @@ build/
 # directory by default, then re-include the bundle CI actually diffs.
 release/admin/*
 !release/admin/index.html
+!release/admin/theme-init.js
 !release/admin/assets/
 !release/admin/assets/*
 release/orvix-linux-amd64
