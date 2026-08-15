@@ -148,6 +148,23 @@ GIT_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
 GIT_BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 # Resolve version: --version > release/VERSION > "0.0.0-dev"
+#
+# release/VERSION (or an explicit --version override for a dispatched
+# workflow run) is the ONE canonical version source for what gets
+# embedded in a built artifact — see item 4 of the Phase 8 production-
+# acceptance remediation. This script does not itself enforce that a
+# new build's version is higher than any previously built one: a
+# human can legitimately dispatch a hotfix build for an older branch.
+# The actual monotonicity gate is at DEPLOY time, in
+# release/upgrade.sh's enforce_version_monotonicity — it compares the
+# new binary's version against the currently-installed one on the
+# target host and refuses a regression unless the operator explicitly
+# passes --rollback --rollback-reason. That gate is what would have
+# caught the 1.0.4-rc2 -> 1.0.3-rc4 incident this item was opened for:
+# an unmerged branch (v1.0.4-rc2, commit 65108dc4) was deployed
+# directly to the VPS outside the normal main-derived release flow,
+# so the next real deploy from main's actual lineage appeared to be a
+# downgrade even though its commit was chronologically newer.
 RESOLVED_VERSION="$VERSION_OVERRIDE"
 if [ -z "$RESOLVED_VERSION" ] && [ -f release/VERSION ]; then
     RESOLVED_VERSION="$(awk 'NF && $1 !~ /^#/ {print; exit}' release/VERSION | tr -d '[:space:]')"

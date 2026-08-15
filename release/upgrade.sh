@@ -113,6 +113,9 @@ FROM_URL=""
 CHECKSUM_FILE=""
 ALLOW_UNSIGNED_LOCAL=0
 DEV_UNSAFE=0
+ROLLBACK=0
+ROLLBACK_REASON=""
+VERSION_AUDIT_LOG="${ORVIX_VERSION_AUDIT_LOG:-/var/log/orvix/version-audit.log}"
 
 REPORT_LINES=()
 
@@ -157,6 +160,31 @@ Behaviour:
 
   --allow-unsigned-local-artifact   DEPRECATED: same as --dev-unsafe for local
                                     artifacts. Kept for backward compatibility.
+
+  --rollback                        REQUIRED to install a binary whose version
+                                    is lower than the currently-installed one.
+                                    Without it, a version regression fails
+                                    closed before any state is mutated, no
+                                    matter why the new binary reports a lower
+                                    version. Must be paired with
+                                    --rollback-reason.
+
+  --rollback-reason <text>          Free-text reason recorded in the append-
+                                    only version-audit log
+                                    (/var/log/orvix/version-audit.log by
+                                    default; override with
+                                    ORVIX_VERSION_AUDIT_LOG). Required
+                                    together with --rollback.
+
+Version monotonicity: the script compares the new binary's reported
+version (via `orvix --version`) against the currently-installed
+binary's version before installing anything. A same-or-higher version
+proceeds normally and is logged. A lower version is REFUSED unless
+--rollback + --rollback-reason are both given, in which case it is
+allowed and the rollback is recorded (actor, timestamp, from/to
+version, reason) in the version-audit log. A binary that cannot report
+its own version, or a fresh install with no prior binary, skips the
+comparison — there is nothing to compare against.
 
 Production-readiness gate BLOCKER 5: checksum verification is
 FAIL-CLOSED. The script refuses to install a binary whose SHA256
@@ -798,6 +826,127 @@ resolve_input() {    if [ -n "$FROM_URL" ]; then
     fi
 }
 
+# ── Version monotonicity (item 4: reject accidental downgrades) ────
+#
+# parse_semverish splits a version string like "1.0.4-rc2" into
+# VC_MAJOR/VC_MINOR/VC_PATCH/VC_PRE. Tolerant of a leading "v" and of
+# a missing/short core (missing components default to 0) so it never
+# aborts the script on an unexpected format — an unparseable version
+# just compares as 0.0.0, which is the safe (block-if-uncertain, but
+# only relative to a real installed version) direction.
+parse_semverish() {
+    local v="$1"
+    v="${v#v}"
+    local core="${v%%-*}"
+    VC_PRE=""
+    if [[ "$v" == *-* ]]; then
+        VC_PRE="${v#*-}"
+    fi
+    IFS='.' read -r VC_MAJOR VC_MINOR VC_PATCH <<< "$core"
+    VC_MAJOR="${VC_MAJOR:-0}"
+    VC_MINOR="${VC_MINOR:-0}"
+    VC_PATCH="${VC_PATCH:-0}"
+    [[ "$VC_MAJOR" =~ ^[0-9]+$ ]] || VC_MAJOR=0
+    [[ "$VC_MINOR" =~ ^[0-9]+$ ]] || VC_MINOR=0
+    [[ "$VC_PATCH" =~ ^[0-9]+$ ]] || VC_PATCH=0
+}
+
+# version_compare A B -> echoes "gt" | "lt" | "eq" (A relative to B).
+# Core (major.minor.patch) compares numerically. Equal core: a release
+# (no prerelease suffix) beats any prerelease of the same core
+# ("1.0.4" > "1.0.4-rc2"); two "rcN" prereleases compare by N
+# numerically; anything else falls back to a lexical compare rather
+# than guessing.
+version_compare() {
+    local a="$1" b="$2"
+    parse_semverish "$a"
+    local a_major=$VC_MAJOR a_minor=$VC_MINOR a_patch=$VC_PATCH a_pre=$VC_PRE
+    parse_semverish "$b"
+    local b_major=$VC_MAJOR b_minor=$VC_MINOR b_patch=$VC_PATCH b_pre=$VC_PRE
+
+    if [ "$a_major" -ne "$b_major" ]; then
+        [ "$a_major" -gt "$b_major" ] && { echo gt; return; } || { echo lt; return; }
+    fi
+    if [ "$a_minor" -ne "$b_minor" ]; then
+        [ "$a_minor" -gt "$b_minor" ] && { echo gt; return; } || { echo lt; return; }
+    fi
+    if [ "$a_patch" -ne "$b_patch" ]; then
+        [ "$a_patch" -gt "$b_patch" ] && { echo gt; return; } || { echo lt; return; }
+    fi
+    if [ -z "$a_pre" ] && [ -z "$b_pre" ]; then echo eq; return; fi
+    if [ -z "$a_pre" ] && [ -n "$b_pre" ]; then echo gt; return; fi
+    if [ -n "$a_pre" ] && [ -z "$b_pre" ]; then echo lt; return; fi
+    if [[ "$a_pre" =~ ^rc([0-9]+)$ ]]; then
+        local an="${BASH_REMATCH[1]}"
+        if [[ "$b_pre" =~ ^rc([0-9]+)$ ]]; then
+            local bn="${BASH_REMATCH[1]}"
+            if [ "$an" -eq "$bn" ]; then echo eq; return; fi
+            [ "$an" -gt "$bn" ] && { echo gt; return; } || { echo lt; return; }
+        fi
+    fi
+    if [ "$a_pre" = "$b_pre" ]; then echo eq; return
+    elif [[ "$a_pre" > "$b_pre" ]]; then echo gt; return
+    else echo lt; return
+    fi
+}
+
+# binary_version PATH -> the version token `orvix --version` reports,
+# or empty if the binary can't be run or reports nothing usable.
+binary_version() {
+    local bin="$1"
+    [ -x "$bin" ] || { echo ""; return; }
+    "$bin" --version 2>/dev/null | awk 'NR==1{print $1}'
+}
+
+# enforce_version_monotonicity aborts (fail-closed) if NEW_BIN reports
+# a lower version than the currently-installed ORVIX_BIN, unless
+# --rollback (+ --rollback-reason) was explicitly given. Every
+# forward upgrade and every explicit rollback is appended to
+# VERSION_AUDIT_LOG. Skips silently (nothing to compare against) when
+# either binary can't report a version, or there is no prior install.
+enforce_version_monotonicity() {
+    local current_version new_version
+    current_version="$(binary_version "$ORVIX_BIN")"
+    new_version="$(binary_version "$NEW_BIN")"
+
+    if [ -z "$current_version" ] || [ -z "$new_version" ]; then
+        log "version monotonicity check skipped (current='${current_version:-<none>}' new='${new_version:-<unknown>}')"
+        return 0
+    fi
+
+    local cmp
+    cmp="$(version_compare "$new_version" "$current_version")"
+    local actor
+    actor="${SUDO_USER:-$(whoami)}"
+    local now
+    now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+    if [ "$cmp" = "lt" ]; then
+        if [ "$ROLLBACK" != "1" ]; then
+            report "red" "REFUSED: new version ($new_version) is lower than the installed version ($current_version)"
+            fail "version regression refused: $current_version -> $new_version. If this is an intentional rollback, re-run with --rollback --rollback-reason \"<why>\""
+        fi
+        report "yellow" "explicit rollback: $current_version -> $new_version ($ROLLBACK_REASON)"
+        if [ "$DRY_RUN" != "1" ]; then
+            record_version_audit "rollback" "$actor" "$now" "$current_version" "$new_version" "$ROLLBACK_REASON"
+        fi
+    else
+        if [ "$DRY_RUN" != "1" ]; then
+            record_version_audit "upgrade" "$actor" "$now" "$current_version" "$new_version" ""
+        fi
+    fi
+}
+
+record_version_audit() {
+    local kind="$1" actor="$2" ts="$3" from="$4" to="$5" reason="$6"
+    local dir
+    dir="$(dirname "$VERSION_AUDIT_LOG")"
+    mkdir -p "$dir" 2>/dev/null || true
+    printf 'ts=%s kind=%s actor=%s from=%s to=%s reason=%s\n' \
+        "$ts" "$kind" "$actor" "$from" "$to" "$reason" >> "$VERSION_AUDIT_LOG" 2>/dev/null || \
+        log "WARNING: could not write version audit log at $VERSION_AUDIT_LOG"
+}
+
 install_and_restart() {
     report "" "--- Verification ---"
 
@@ -817,6 +966,10 @@ install_and_restart() {
         fail "release signature verification failed (fail-closed)"
     fi
     report "green" "release signature verification passed"
+
+    log "checking version monotonicity"
+    enforce_version_monotonicity
+    report "green" "version check passed"
 
     if [ "$DRY_RUN" = "1" ]; then
         report "" "--- Dry Run Summary ---"
@@ -977,6 +1130,15 @@ main() {
                 ALLOW_UNSIGNED_LOCAL=1
                 shift
                 ;;
+            --rollback)
+                ROLLBACK=1
+                shift
+                ;;
+            --rollback-reason)
+                [ $# -ge 2 ] || fail "--rollback-reason requires a value"
+                ROLLBACK_REASON="$2"
+                shift 2
+                ;;
             -h|--help)
                 usage
                 exit 0
@@ -1025,6 +1187,12 @@ DEVUNSAFE
     fi
     if [ -n "$FROM_URL" ] && [ "$ALLOW_UNSIGNED_LOCAL" = "1" ] && [ "$DEV_UNSAFE" != "1" ]; then
         fail "--allow-unsigned-local-artifact is refused for --from-url upgrades (URL downloads are always fail-closed)"
+    fi
+    if [ "$ROLLBACK" = "1" ] && [ -z "$ROLLBACK_REASON" ]; then
+        fail "--rollback requires --rollback-reason \"<why>\" (the audited rollback operation always names its reason)"
+    fi
+    if [ "$ROLLBACK" != "1" ] && [ -n "$ROLLBACK_REASON" ]; then
+        fail "--rollback-reason was given without --rollback; pass both together"
     fi
 
     log "Orvix upgrade starting"
