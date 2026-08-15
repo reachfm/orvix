@@ -6,8 +6,10 @@ package handlers_test
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -17,6 +19,7 @@ import (
 	"github.com/gofiber/fiber/v3"
 	"go.uber.org/zap"
 
+	"github.com/orvix/orvix/internal/admin/domain"
 	"github.com/orvix/orvix/internal/api"
 	"github.com/orvix/orvix/internal/auth"
 	"github.com/orvix/orvix/internal/config"
@@ -312,7 +315,7 @@ func TestDeactivatePlatformDomain_SuccessPreservesDKIMAndAudits(t *testing.T) {
 	if resp.StatusCode != fiber.StatusOK {
 		t.Fatalf("expected 200, got %d: %v", resp.StatusCode, out)
 	}
-	if out["status"] != "deactivated" {
+	if out["status"] != "disabled" {
 		t.Fatalf("expected status=deactivated, got %v", out["status"])
 	}
 
@@ -322,7 +325,7 @@ func TestDeactivatePlatformDomain_SuccessPreservesDKIMAndAudits(t *testing.T) {
 	if err := env.db.QueryRow("SELECT status, deleted_at, deactivated_at FROM coremail_domains WHERE id = ?", domID).Scan(&status, &deletedAt, &deactivatedAt); err != nil {
 		t.Fatalf("read domain: %v", err)
 	}
-	if status != "deactivated" {
+	if status != "disabled" {
 		t.Fatalf("expected status=deactivated, got %s", status)
 	}
 	if deletedAt.Valid {
@@ -342,5 +345,35 @@ func TestDeactivatePlatformDomain_SuccessPreservesDKIMAndAudits(t *testing.T) {
 	_ = env.db.QueryRow("SELECT COUNT(*) FROM coremail_audit WHERE action = 'platform_domain.deactivate'").Scan(&auditCount)
 	if auditCount != 1 {
 		t.Fatalf("expected exactly 1 audit entry, got %d", auditCount)
+	}
+}
+
+// TestDeactivatePlatformDomain_ThenGuardRejectsIt is the integration
+// proof that item 3's lifecycle endpoint and the C1 canonical
+// operability guard (internal/admin/domain.CheckOperabilityTx) are
+// genuinely consistent: a domain this endpoint deactivates must be
+// the SAME domain the guard used by every other subsystem (mailbox
+// creation today; aliases/DKIM/SMTP/webmail-send/queue once C2/C3
+// wire it in) refuses. This would have caught the earlier bug where
+// this endpoint wrote an invented "deactivated" status value the
+// guard's DomainStatus enum didn't recognize.
+func TestDeactivatePlatformDomain_ThenGuardRejectsIt(t *testing.T) {
+	env := buildPlatformDomainLifecycleEnv(t)
+	domID := env.seedDomain(t, 1, "guard-check.example")
+
+	resp, _ := env.deactivate(t, 1, domID, domainDeactivateOpts{token: env.psaTok, csrf: env.psaCSRF, idempotencyKey: "k-guard-check"},
+		map[string]any{"confirm": domainConfirm(domID), "reason": "prove guard consistency", "expected_version": 1})
+	if resp.StatusCode != fiber.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	repo := domain.NewDomainAdminRepo(env.db)
+	out := repo.CheckOperabilityTx(context.Background(), "guard-check.example", 1, false)
+	if out.Operational() {
+		t.Fatal("the canonical operability guard reports a just-deactivated domain as operational — " +
+			"item 3's lifecycle endpoint and the guard have drifted apart")
+	}
+	if !errors.Is(out.Err, domain.ErrDomainDisabled) {
+		t.Fatalf("expected ErrDomainDisabled from the guard, got %v", out.Err)
 	}
 }

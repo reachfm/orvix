@@ -198,22 +198,12 @@ func (s *Service) createMailbox(ctx context.Context, req CreateMailboxRequest, t
 			return err
 		}
 		domainID, status := alloc.DomainID, alloc.Status
-		if status != string(domain.DomainStatusActive) {
-			// Explicit status model: disabled and administratively restricted
-			// states are distinct. No verification state exists on
-			// coremail_domains, so unknown/legacy values fail closed with a
-			// safe "unavailable" error rather than being mislabeled as
-			// DNS-unverified (DOMAIN_NOT_VERIFIED is reserved).
-			switch domain.DomainStatus(status) {
-			case domain.DomainStatusDisabled:
-				return domain.ErrDomainDisabled
-			case domain.DomainStatusSuspended:
-				return domain.ErrDomainSuspended
-			case domain.DomainStatusLocked:
-				return domain.ErrDomainLocked
-			default:
-				return domain.ErrDomainUnavailable
-			}
+		// Canonical operability mapping — see
+		// internal/admin/domain/operability.go (StatusError). Every
+		// subsystem that gates on domain status shares this exact
+		// mapping instead of re-deriving it.
+		if err := domain.StatusError(domain.DomainStatus(status)); err != nil {
+			return err
 		}
 
 		exists, err := repo.ExistsByEmail(ctx, req.Email, 0)

@@ -51,7 +51,11 @@ import (
 //     active aliases, or mail still in flight in the queue (pending/
 //     leased/deferred) for this domain — each refusal names which
 //     dependency blocked it;
-//   - sets status='deactivated', deactivated_at=now,
+//   - sets status='disabled' (the pre-existing canonical
+//     coremail_domains.status value every other subsystem's domain
+//     operability check already recognizes — see
+//     internal/admin/domain/operability.go — NOT an invented
+//     "deactivated" string), deactivated_at=now,
 //     deactivation_reason=<reason>, bumps version;
 //   - never touches deleted_at, coremail_dkim_config, or any history
 //     table — DKIM material and history survive deactivation intact;
@@ -126,7 +130,7 @@ func (h *Handler) DeactivatePlatformDomain(c fiber.Ctx) error {
 		resp := fiber.Map{
 			"id":         domainID,
 			"tenant_id":  tenantID,
-			"status":     "deactivated",
+			"status":     "disabled",
 			"version":    result.NewVersion,
 			"request_id": result.RequestID,
 		}
@@ -216,7 +220,7 @@ func deactivatePlatformDomainTx(ctx context.Context, sqlDB *sql.DB, dialect *dbd
 	now := time.Now().UTC()
 	res, err := tx.ExecContext(ctx,
 		`UPDATE coremail_domains SET status = `+dialect.Placeholder(1)+`, deactivated_at = `+dialect.Placeholder(2)+`, deactivation_reason = `+dialect.Placeholder(3)+`, version = version + 1, updated_at = `+dialect.Placeholder(4)+` WHERE id = `+dialect.Placeholder(5)+` AND tenant_id = `+dialect.Placeholder(6)+` AND version = `+dialect.Placeholder(7),
-		"deactivated", now, reason, now, domainID, tenantID, expectedVersion)
+		"disabled", now, reason, now, domainID, tenantID, expectedVersion)
 	if err != nil {
 		return nil, kernel.NewError(kernel.ErrCodeInternal, "failed to process request")
 	}
