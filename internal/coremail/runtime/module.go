@@ -362,6 +362,7 @@ func (m *Module) initCore(cfg *config.Config, sqlDB *sql.DB) error {
 	m.smtpServer.SetLocalDomainChecker(identity.IsLocalDomain)
 	m.smtpServer.SetMailAccessModeChecker(identity.MailAccessMode)
 	m.smtpServer.SetMailAccessPolicy(m.smtpMailAccessPolicy)
+	m.smtpServer.PreAcceptFn = m.smtpPreAcceptRecheck
 	m.smtpServer.Observability = m.obs
 
 	// ── Submission SMTP (port 587, STARTTLS) ───────────────
@@ -399,6 +400,7 @@ func (m *Module) initCore(cfg *config.Config, sqlDB *sql.DB) error {
 			m.submissionServer.SetLocalDomainChecker(identity.IsLocalDomain)
 			m.submissionServer.SetMailAccessModeChecker(identity.MailAccessMode)
 			m.submissionServer.SetMailAccessPolicy(m.smtpMailAccessPolicy)
+			m.submissionServer.PreAcceptFn = m.smtpPreAcceptRecheck
 			m.submissionServer.SenderValidator = identity.ResolveSender
 			m.submissionServer.Observability = m.obs
 		}
@@ -1236,6 +1238,20 @@ func (m *Module) smtpMailAccessPolicy(ctx context.Context, session *smtp.Session
 // temporary (4.x) SMTP failure — never a permanent rejection and
 // never silent acceptance.
 func (m *Module) checkRecipientDomainOperability(ctx context.Context, rcptAddr string) (allow bool, reason string, err error) {
+	at := strings.LastIndex(rcptAddr, "@")
+	if at < 0 || at == len(rcptAddr)-1 {
+		return true, "", nil
+	}
+	domainName := strings.ToLower(rcptAddr[at+1:])
+	return m.checkDomainNameOperability(ctx, domainName)
+}
+
+// checkDomainNameOperability is the domain-name-keyed core shared by
+// the RCPT-time check (checkRecipientDomainOperability, one address)
+// and the pre-DATA-acceptance recheck (checkRecipientDomainsOperable,
+// a deduplicated set of addresses gathered over the whole
+// transaction). Only this function touches the database.
+func (m *Module) checkDomainNameOperability(ctx context.Context, domainName string) (allow bool, reason string, err error) {
 	if m.db == nil {
 		// Fail closed: this hook only runs once mailPolicy is wired
 		// (smtpMailAccessPolicy's earlier nil-mailPolicy check already
@@ -1246,11 +1262,6 @@ func (m *Module) checkRecipientDomainOperability(ctx context.Context, rcptAddr s
 		// of silently accepting the recipient.
 		return false, "", errPolicyUnavailable
 	}
-	at := strings.LastIndex(rcptAddr, "@")
-	if at < 0 || at == len(rcptAddr)-1 {
-		return true, "", nil
-	}
-	domainName := strings.ToLower(rcptAddr[at+1:])
 
 	var domainID, tenantID uint
 	var status string
@@ -1272,6 +1283,64 @@ func (m *Module) checkRecipientDomainOperability(ctx context.Context, rcptAddr s
 		return false, "recipient domain unavailable", nil
 	}
 	return true, "", nil
+}
+
+// checkRecipientDomainsOperable is the pre-commit/pre-enqueue recheck
+// (Phase 8 C3A #4): the RCPT-time check only proves a domain was
+// operable at RCPT, but a concurrent disable can commit any time
+// before DATA finishes. This re-validates every distinct local
+// recipient domain gathered over the whole transaction, immediately
+// before the caller accepts the completed message into spool/queue —
+// it never trusts MAIL FROM, and it dedupes by domain name so a
+// message with many recipients on the same domain issues one query
+// per distinct domain, not one per recipient.
+func (m *Module) checkRecipientDomainsOperable(ctx context.Context, rcptAddrs []string) error {
+	seen := make(map[string]struct{}, len(rcptAddrs))
+	for _, addr := range rcptAddrs {
+		at := strings.LastIndex(addr, "@")
+		if at < 0 || at == len(addr)-1 {
+			continue
+		}
+		domainName := strings.ToLower(addr[at+1:])
+		if _, ok := seen[domainName]; ok {
+			continue
+		}
+		seen[domainName] = struct{}{}
+
+		allow, _, err := m.checkDomainNameOperability(ctx, domainName)
+		if err != nil {
+			return err
+		}
+		if !allow {
+			return errRecipientDomainInoperable
+		}
+	}
+	return nil
+}
+
+// errRecipientDomainInoperable is returned by the pre-accept recheck
+// when a recipient's domain has become disabled/suspended/locked
+// since RCPT time. The SMTP server maps it to a permanent (5.x)
+// rejection at DATA — the message is never spooled or queued.
+var errRecipientDomainInoperable = errors.New("recipient domain no longer operable")
+
+// smtpPreAcceptRecheck is wired as smtp.Server.PreAcceptFn (Phase 8
+// C3A #4): called with the full accumulated session.Recipients set
+// right after the DATA body has been fully read but before
+// Receiver.AcceptMessage ever runs, so a rejection here persists no
+// partial message and never touches spool/queue. Translates the
+// internal not-operable sentinel to the exported smtp sentinel so the
+// server can distinguish a permanent (5.x) domain-policy rejection
+// from a transient (4.x) infrastructure failure.
+func (m *Module) smtpPreAcceptRecheck(ctx context.Context, session *smtp.Session) error {
+	if session == nil {
+		return nil
+	}
+	err := m.checkRecipientDomainsOperable(ctx, session.Recipients)
+	if err == errRecipientDomainInoperable {
+		return smtp.ErrRecipientDomainInoperable
+	}
+	return err
 }
 
 // errPolicyUnavailable is returned by the SMTP policy adapter when the

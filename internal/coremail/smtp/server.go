@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -15,6 +16,12 @@ import (
 
 	"github.com/orvix/orvix/internal/observability"
 )
+
+// ErrRecipientDomainInoperable is returned by PreAcceptFn when a
+// recipient's domain became disabled/suspended/locked since RCPT
+// time. It maps to a permanent (5.x) DATA rejection; any other
+// non-nil PreAcceptFn error maps to a transient (4.x) rejection.
+var ErrRecipientDomainInoperable = errors.New("recipient domain no longer operable")
 
 // Server represents an SMTP server instance.
 type Server struct {
@@ -31,6 +38,16 @@ type Server struct {
 	// Params: ctx, tenantID, mailboxID, recipientCount, eventID.
 	// eventID is a content-deterministic hash enabling retry-safe idempotency.
 	PostAcceptFn func(ctx context.Context, tenantID, mailboxID uint, count int, eventID string)
+	// PreAcceptFn (Phase 8 C3A #4) is the pre-commit/pre-enqueue
+	// recheck: called with the full accumulated recipient set
+	// immediately before Receiver.AcceptMessage, i.e. after the
+	// complete DATA body has been read but before anything is
+	// spooled or enqueued. This closes the window between an
+	// early RCPT-time check and a domain being disabled while the
+	// client is still transmitting the message body. A non-nil
+	// error rejects the message (no spool/queue write ever
+	// happens) — AcceptMessage is never called in that case.
+	PreAcceptFn func(ctx context.Context, session *Session) error
 
 	mu       sync.Mutex
 	sessions map[string]*Session
@@ -332,6 +349,20 @@ func (s *Server) handleConn(conn net.Conn) {
 			}
 
 			session.DataBuffer = data
+
+			if s.PreAcceptFn != nil {
+				if err := s.PreAcceptFn(context.Background(), session); err != nil {
+					if err == ErrRecipientDomainInoperable {
+						writeResponse(writer, responsef(StatusMailboxNotFound, "5.7.1 one or more recipient domains are no longer accepting mail"))
+					} else {
+						writeResponse(writer, responsef(StatusServiceNotAvailable, "4.7.0 recipient policy temporarily unavailable"))
+					}
+					session.State = StateGreeted
+					session.ResetTransaction()
+					writer.Flush()
+					continue
+				}
+			}
 
 			if s.Receiver != nil {
 				var acceptErr error
