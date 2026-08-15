@@ -6,12 +6,23 @@ import (
 	"strings"
 	"time"
 
+	"github.com/orvix/orvix/internal/admin/domain"
 	"github.com/orvix/orvix/internal/dbdialect"
 )
 
 type Repository struct {
 	db      *sql.DB
 	dialect *dbdialect.Info
+	// domainRepo is constructed ONCE here, at Repository construction
+	// time — never inside CreateJob after a transaction is already
+	// open. domain.NewDomainAdminRepo runs its own dialect-detection
+	// query against the raw *sql.DB; doing that while a tx already
+	// holds the pool's only connection (SQLite test pools are
+	// frequently capped at 1) deadlocks forever. This exact bug was
+	// found and fixed once already in the alias-creation handler
+	// (Phase 8 C2) — same root cause, same fix: construct before any
+	// transaction, then only ever call .WithTx() (no query) on it.
+	domainRepo *domain.DomainAdminRepo
 }
 
 func NewRepository(db *sql.DB) *Repository {
@@ -19,7 +30,7 @@ func NewRepository(db *sql.DB) *Repository {
 	if err != nil {
 		d = dbdialect.FromDriver("sqlite")
 	}
-	return &Repository{db: db, dialect: d}
+	return &Repository{db: db, dialect: d, domainRepo: domain.NewDomainAdminRepo(db)}
 }
 
 func (r *Repository) EnsureSchema(ctx context.Context) error {
@@ -137,6 +148,16 @@ func (r *Repository) CreateJob(ctx context.Context, j *Job, rows []Row) error {
 		return err
 	}
 	defer tx.Rollback()
+
+	// Canonical domain operability guard (Phase 8 C2-R1), inside this
+	// same transaction, FOR UPDATE-locked on Postgres. Validation
+	// success does not authorize job creation on its own — a domain
+	// disabled between validation and this call must still be
+	// rejected, and rejection here means the job/row insert below
+	// never runs and the deferred Rollback discards everything.
+	if opOut := r.domainRepo.WithTx(tx).CheckOperabilityByIDTx(ctx, j.DomainID, j.TenantID, true); !opOut.Operational() {
+		return opOut.Err
+	}
 
 	now := j.CreatedAt
 	id, err := r.insertReturningID(ctx, tx,

@@ -112,6 +112,19 @@ func newTestRepo(t *testing.T) (*sql.DB, *Repository) {
 	if err := repo.EnsureSchema(context.Background()); err != nil {
 		t.Fatalf("ensure schema: %v", err)
 	}
+	// CreateJob's C2-R1 domain-operability guard queries
+	// coremail_domains directly — every test in this package calls
+	// CreateJob(ctx, tenantID=1, domainID=1, ...), so seed exactly the
+	// row that convention needs. Tests that want a non-active domain
+	// (disabled/suspended/etc.) UPDATE this row's status themselves.
+	if _, err := db.Exec(`CREATE TABLE coremail_domains (
+		id INTEGER PRIMARY KEY, tenant_id INTEGER NOT NULL, name TEXT NOT NULL,
+		status TEXT NOT NULL DEFAULT 'active', deleted_at DATETIME)`); err != nil {
+		t.Fatalf("create coremail_domains: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO coremail_domains (id, tenant_id, name, status) VALUES (1, 1, 'test.example', 'active')`); err != nil {
+		t.Fatalf("seed coremail_domains: %v", err)
+	}
 	return db, repo
 }
 
