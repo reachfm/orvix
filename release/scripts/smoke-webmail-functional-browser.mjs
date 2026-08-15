@@ -150,8 +150,16 @@ const MOCK_MODE = {
 const REQUEST_LOG = [];
 const COUNTERS = { messagesSent: 0 };
 
+// resetMockTestState clears observation state (the request log, the
+// message counter, and any pending forced-failure mode) between
+// phases. It deliberately does NOT touch CSRF_STATE.token: the
+// client's csrfTokenCache is a real, persistent client-side cache
+// that this reset has no way to invalidate remotely, so rotating the
+// server's expected token here would desync from what the client
+// still has cached and turn every "clean" phase into an accidental
+// CSRF-retry scenario. Only phase 12 (which explicitly tests the
+// retry path) sets rotateOnNextMutation itself, via /__test__/mode.
 function resetMockTestState() {
-    CSRF_STATE.token = 'mock-csrf-token-' + Date.now();
     CSRF_STATE.rotateOnNextMutation = false;
     MOCK_MODE.forceOrdinary403Once = false;
     MOCK_MODE.force429Once = false;
