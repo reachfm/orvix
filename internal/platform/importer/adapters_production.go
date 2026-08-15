@@ -277,6 +277,16 @@ func (a *prodAliasAdapter) CreateAlias(ctx context.Context, fromEmail, toEmail s
 			return 0, err
 		}
 	}
+	// Canonical domain operability guard (Phase 8 C2). This adapter has
+	// no transaction wrapping today (insertReturningID runs directly
+	// against the pool, not a *sql.Tx) — a full rewrite to make this
+	// check-then-insert atomic is a larger adapter refactor out of
+	// scope for this change; this closes the "zero domain-status
+	// checking at all" gap without expanding scope. lock=false since
+	// there is no transaction for a FOR UPDATE lock to be scoped to.
+	if opOut := domain.NewDomainAdminRepo(a.db).CheckOperabilityByIDTx(ctx, domainID, tenantID, false); !opOut.Operational() {
+		return 0, opOut.Err
+	}
 	now := timeNow()
 	return insertReturningID(ctx, a.db, a.dialect,
 		`INSERT INTO coremail_aliases (domain_id, tenant_id, from_addr, to_addr, active, created_at, updated_at) VALUES (?,?,?,?,1,?,?)`,
