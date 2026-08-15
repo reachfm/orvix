@@ -1053,6 +1053,28 @@ func (h *Handler) WebmailSend(c fiber.Ctx) error {
 		})
 	}
 
+	// Attachment metadata is part of the SAME acceptance transaction as
+	// the Sent-message row and the recipient queue rows. The RFC822
+	// payload already contains the attachment bytes in memory, so this
+	// is a pure metadata/reference operation on the shared *sql.Tx — no
+	// separate staging subsystem. If extraction fails the whole send is
+	// rolled back: zero attachment metadata rows survive, and no
+	// committed message can ever exist with missing or inconsistent
+	// attachment references. (The tx-scoped method is used precisely
+	// because the post-commit best-effort path could leave a committed
+	// Sent message whose attachment metadata is missing or partial.)
+	if len(rfc822) > 0 {
+		if err := ctx.MailboxStore.ExtractAndStoreAttachmentsTx(c.Context(), msg.ID, rfc822, tx); err != nil {
+			h.logger.Error("webmail send: attachment metadata extraction failed, rolling back whole send",
+				zap.String("message_id", messageID),
+				zap.Error(err))
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"error": "failed to store attachment metadata",
+				"code":  "INTERNAL_ERROR",
+			})
+		}
+	}
+
 	for _, entry := range entries {
 		if err := qe.Repo.Enqueue(c.Context(), entry, tx); err != nil {
 			h.logger.Error("webmail send: enqueue failed inside acceptance transaction, rolling back whole send",
@@ -1084,13 +1106,6 @@ func (h *Handler) WebmailSend(c fiber.Ctx) error {
 		})
 	}
 	committed = true
-
-	// Attachment extraction deliberately runs after commit, not inside
-	// the acceptance transaction — see the tx-provided branch of
-	// StoreMessage for why (single-connection deadlock risk).
-	if len(rfc822) > 0 {
-		ctx.MailboxStore.ExtractAndStoreAttachments(c.Context(), msg.ID, rfc822)
-	}
 
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{
 		"id":               msg.ID,

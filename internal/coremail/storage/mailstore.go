@@ -121,14 +121,19 @@ func (ms *MailStore) StoreMessage(ctx context.Context, msg *Message, rfc822Data 
 
 	// Step 3: Insert database record inside a transaction.
 	// If a tx is already provided, use it directly (caller manages
-	// locking). Attachment extraction is deliberately NOT run here in
-	// that case: it does its own ms.Attachments.Create(ctx, att, nil)
-	// calls against the raw *sql.DB, which would try to acquire a
-	// second connection while the caller's tx still holds the only
-	// one on a single-connection pool (sqlite) — a guaranteed
-	// deadlock. The caller is responsible for calling
-	// ExtractAndStoreAttachments itself, after its transaction
-	// commits.
+	// locking). Attachment extraction is NOT run here in that case —
+	// the historical path called ms.Attachments.Create(ctx, att, nil)
+	// against the raw *sql.DB, which would try to acquire a second
+	// connection while the caller's tx still holds the only one on a
+	// single-connection pool (sqlite) — a guaranteed deadlock.
+	// Transaction-aware callers must call
+	// ExtractAndStoreAttachmentsTx(ctx, msgID, rfc822, tx) with the
+	// SAME tx, which inserts attachment metadata rows on the shared
+	// transaction (no second connection, no deadlock) and makes the
+	// attachment metadata commit or roll back atomically with the
+	// message. Callers that want the legacy best-effort post-commit
+	// behavior can call ExtractAndStoreAttachments after their own
+	// transaction commits.
 	if tx != nil {
 		if err := ms.Messages.Create(ctx, msg, tx); err != nil {
 			os.Remove(msg.RFC822Path)
@@ -166,7 +171,7 @@ func (ms *MailStore) StoreMessage(ctx context.Context, msg *Message, rfc822Data 
 	// The message is already stored successfully; attachment extraction is
 	// an optimization that can be re-run from the RFC822 file at any time.
 	if len(rfc822Data) > 0 {
-		ms.extractAndStoreAttachments(ctx, msg.ID, rfc822Data)
+		_ = ms.extractAndStoreAttachmentsCore(ctx, msg.ID, rfc822Data, nil)
 	}
 
 	return nil
@@ -224,20 +229,75 @@ func (ms *MailStore) DeleteMessage(ctx context.Context, id uint, tx interface{})
 
 // ExtractAndStoreAttachments is the exported entry point for callers that
 // passed a non-nil tx to StoreMessage (which deliberately skips attachment
-// extraction in that path — see the comment there). Call this AFTER your
-// own transaction has committed; it opens its own connection(s) exactly
-// like the nil-tx path already did internally.
+// extraction in that path — see the comment there). It is best-effort: it
+// opens its own connection(s) and logs nothing on failure, exactly like the
+// nil-tx path already did internally.
+//
+// Transaction-aware callers that want attachment metadata to commit
+// atomically with the Sent message should use ExtractAndStoreAttachmentsTx
+// instead, passing the SAME *sql.Tx used for the message and queue writes.
 func (ms *MailStore) ExtractAndStoreAttachments(ctx context.Context, msgID uint, rfc822Data []byte) {
-	ms.extractAndStoreAttachments(ctx, msgID, rfc822Data)
+	_ = ms.extractAndStoreAttachmentsCore(ctx, msgID, rfc822Data, nil)
 }
 
-// extractAndStoreAttachments parses RFC822 data and stores extracted attachments
-// to both filesystem and database. This is best-effort: errors are logged only
-// to observability (not returned) so that message storage always succeeds.
-func (ms *MailStore) extractAndStoreAttachments(ctx context.Context, msgID uint, rfc822Data []byte) {
+// ExtractAndStoreAttachmentsTx is the transaction-scoped variant of
+// ExtractAndStoreAttachments: it writes attachment metadata rows on the
+// caller-supplied *sql.Tx (the same one used for the Sent-message write
+// and queue enqueues), so the attachment metadata commits or rolls back
+// atomically with the message. The attachment bytes are already contained
+// in the in-memory RFC822 payload — nothing is re-read from disk and no
+// separate staging architecture is introduced; the extraction writes the
+// same per-attachment files and rows as the best-effort path, only inside
+// the caller's transaction.
+//
+// Guarantees:
+//   - on error, zero attachment metadata rows have been inserted (the
+//     caller rolls back the whole tx) and any attachment file written for
+//     the failing part is removed;
+//   - on success, each extracted attachment is referenced by the message
+//     exactly once (the extraction is idempotent per message: if the
+//     message already has attachment rows visible in this tx, it is a no-op);
+//   - retry/replay cannot duplicate rows: a repeated StoreMessage with the
+//     same MessageID fails on the UNIQUE(message_id) constraint before any
+//     attachment row is written, and a repeated extraction on the same
+//     message is a no-op.
+//
+// Unlike the best-effort entry point, failures are returned to the caller
+// so a send that cannot produce consistent attachment metadata fails
+// closed instead of committing a message with missing/inconsistent
+// attachment references.
+func (ms *MailStore) ExtractAndStoreAttachmentsTx(ctx context.Context, msgID uint, rfc822Data []byte, tx *sql.Tx) error {
+	// A typed nil *sql.Tx must degrade to the best-effort path rather
+	// than being wrapped as a non-nil interface{} (which would make
+	// exec() return a nil *sql.Tx and panic on first use).
+	if tx == nil {
+		return ms.extractAndStoreAttachmentsCore(ctx, msgID, rfc822Data, nil)
+	}
+	return ms.extractAndStoreAttachmentsCore(ctx, msgID, rfc822Data, tx)
+}
+
+// extractAndStoreAttachmentsCore parses RFC822 data and stores extracted
+// attachments (filesystem content + metadata rows). When tx is nil the
+// behavior is the historical best-effort one: per-part failures are
+// skipped silently. When tx is non-nil every metadata row is inserted on
+// that tx and the first failure aborts the whole extraction with an error
+// (files written for the failing part are removed; earlier rows are rolled
+// back by the caller's tx rollback).
+func (ms *MailStore) extractAndStoreAttachmentsCore(ctx context.Context, msgID uint, rfc822Data []byte, tx interface{}) error {
+	// Idempotency guard: a message that already has attachment rows must
+	// never get a second set of rows, whether a caller replays the
+	// extraction on the same committed message or retries within the
+	// same transaction. CountByMessage sees uncommitted rows when tx is
+	// non-nil, so in-tx replays are no-ops too.
+	if n, err := ms.Attachments.CountByMessage(ctx, msgID, tx); err != nil {
+		return fmt.Errorf("count existing attachments: %w", err)
+	} else if n > 0 {
+		return nil
+	}
+
 	parts, err := mime.ExtractParts(rfc822Data)
 	if err != nil || len(parts) == 0 {
-		return
+		return nil
 	}
 
 	var attachParts []*mime.Part
@@ -247,7 +307,7 @@ func (ms *MailStore) extractAndStoreAttachments(ctx context.Context, msgID uint,
 		}
 	}
 	if len(attachParts) == 0 {
-		return
+		return nil
 	}
 
 	// Enforce max attachments (20).
@@ -256,7 +316,9 @@ func (ms *MailStore) extractAndStoreAttachments(ctx context.Context, msgID uint,
 	}
 
 	for i, p := range attachParts {
-		// Enforce max size per attachment (25 MB).
+		// Enforce max size per attachment (25 MB). Oversized parts are
+		// skipped by design (preserved from the best-effort path); a
+		// part that is simply too big is not an extraction failure.
 		if p.Size > 25*1024*1024 {
 			continue
 		}
@@ -269,6 +331,9 @@ func (ms *MailStore) extractAndStoreAttachments(ctx context.Context, msgID uint,
 		// Storage layout: {BasePath}/attachments/{messageID}/{counter}_{filename}
 		attDir := filepath.Join(ms.BasePath, "attachments", fmt.Sprintf("%d", msgID))
 		if err := os.MkdirAll(attDir, 0750); err != nil {
+			if tx != nil {
+				return fmt.Errorf("create attachment dir: %w", err)
+			}
 			continue
 		}
 
@@ -276,12 +341,18 @@ func (ms *MailStore) extractAndStoreAttachments(ctx context.Context, msgID uint,
 		storagePath := filepath.Join(attDir, storageName)
 
 		if err := atomicWriteFile(storagePath, p.Body, 0600); err != nil {
+			if tx != nil {
+				return fmt.Errorf("write attachment file: %w", err)
+			}
 			continue
 		}
 
 		sha, err := ComputeSHA256(storagePath)
 		if err != nil {
 			os.Remove(storagePath)
+			if tx != nil {
+				return fmt.Errorf("compute attachment sha256: %w", err)
+			}
 			continue
 		}
 
@@ -294,11 +365,15 @@ func (ms *MailStore) extractAndStoreAttachments(ctx context.Context, msgID uint,
 			StoragePath: storagePath,
 			CID:         p.ContentID,
 		}
-		if err := ms.Attachments.Create(ctx, att, nil); err != nil {
+		if err := ms.Attachments.Create(ctx, att, tx); err != nil {
 			os.Remove(storagePath)
+			if tx != nil {
+				return fmt.Errorf("create attachment metadata: %w", err)
+			}
 			continue
 		}
 	}
+	return nil
 }
 
 // sanitizeFilenameForStorage prepares a filename for safe filesystem storage.
