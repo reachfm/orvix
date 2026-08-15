@@ -2048,6 +2048,11 @@ func (r *Router) setupRoutes() {
 	protected.Post("/platform/domains/:tenant_id/:id/status", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermDomainsWrite), r.h.SetPlatformDomainStatus)
 	protected.Post("/platform/domains/:tenant_id/:id/mail-access-mode", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermDomainsWrite), r.h.SetPlatformDomainMailAccessMode)
 
+	// Platform user lifecycle (Phase 8 production-acceptance remediation):
+	// canonical, audited, non-self deactivation of another platform-scoped
+	// user account. See platform_user_lifecycle.go for the full contract.
+	protected.Post("/platform/users/:id/deactivate", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermPlatformSessionsRevoke), r.h.DeactivatePlatformUser)
+
 	// NOTE: GET /platform/mailboxes/bulk/template MUST be registered
 	// before GET /platform/mailboxes/:tenant_id/:id below. Fiber v3
 	// matches same-depth routes (both are 4 path segments) in
