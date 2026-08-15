@@ -9,8 +9,10 @@ on:
       - "scripts/build-marketing-release.mjs"
       - "internal/api/router.go"
       - "internal/api/router_test.go"
+      - "internal/api/handlers/webmail_source_provenance_test.go"
       - "internal/config/**"
       - "release/**"
+      - "web/webmail-release/**"
   push:
     branches: [main]
     paths:
@@ -20,8 +22,10 @@ on:
       - "scripts/build-marketing-release.mjs"
       - "internal/api/router.go"
       - "internal/api/router_test.go"
+      - "internal/api/handlers/webmail_source_provenance_test.go"
       - "internal/config/**"
       - "release/**"
+      - "web/webmail-release/**"
 
 permissions:
   contents: read
@@ -91,6 +95,17 @@ jobs:
           bash -n release/install.sh release/install-public.sh release/upgrade.sh release/uninstall.sh release/scripts/*.sh
           go test ./internal/api -run TestMarketingSPADeepLinksAndExistingUISurvive -count=1
           go test ./internal/config -count=1
+          go test ./internal/api/handlers -run TestWebmailProvenance -count=1
+      - name: Install Chrome for webmail functional smoke
+        uses: browser-actions/setup-chrome@v1
+        id: setup-chrome
+      - name: Webmail functional CSRF/retry/no-duplicate smoke (item 2 runtime coverage)
+        shell: bash
+        env:
+          CHROME: ${{ steps.setup-chrome.outputs.chrome-path }}
+        run: |
+          set -euo pipefail
+          bash release/scripts/smoke-webmail-functional-browser.sh
       - name: Archive browser diagnostics on failure
         if: failure()
         uses: actions/upload-artifact@v7
