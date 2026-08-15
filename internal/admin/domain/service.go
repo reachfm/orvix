@@ -699,6 +699,16 @@ func (s *Service) generateDKIMTx(ctx context.Context, tx *sql.Tx, repo *DomainAd
 	if s.dkimRepo == nil {
 		return nil, fmt.Errorf("dkim repository unavailable")
 	}
+	// Canonical domain operability guard (Phase 8 C2), inside the same
+	// transaction the key generation and persistence run in, FOR
+	// UPDATE-locked on Postgres. Refuses BEFORE any key material is
+	// generated or persisted — a rejected request never touches
+	// dkim.GenerateKeyPair. Both the standalone GenerateDKIM
+	// entrypoint and the domain-provisioning wizard call this shared
+	// function, so both get the same enforcement automatically.
+	if opOut := repo.CheckOperabilityByIDTx(ctx, domainID, tenantID, true); !opOut.Operational() {
+		return nil, opOut.Err
+	}
 	if selector == "" {
 		selector = "mail"
 	}
@@ -773,6 +783,13 @@ func (s *Service) RotateDKIM(ctx context.Context, id, tenantID uint, selector st
 	defer tx.Rollback()
 
 	repo := s.repo.WithTx(tx)
+
+	// Canonical domain operability guard (Phase 8 C2) — refuses before
+	// any key material is generated or the existing key is touched.
+	// Rotation never mutates the stored key when this rejects.
+	if opOut := repo.CheckOperabilityByIDTx(ctx, id, tenantID, true); !opOut.Operational() {
+		return nil, opOut.Err
+	}
 
 	existing, err := s.dkimRepo.GetByDomain(ctx, d.Name, tx)
 	if err != nil {
@@ -897,6 +914,15 @@ func (s *Service) PlatformDKIM(ctx context.Context, domainName, selector, confir
 	defer tx.Rollback()
 
 	repo := s.repo.WithTx(tx)
+
+	// Canonical domain operability guard (Phase 8 C2). PlatformDKIM
+	// resolves the domain by name globally (no caller-supplied
+	// tenantID to isolate against), so the guard is scoped to the
+	// resolved row's own tenant — refuses before any key material is
+	// generated or the existing key is touched.
+	if opOut := repo.CheckOperabilityByIDTx(ctx, d.ID, d.TenantID, true); !opOut.Operational() {
+		return nil, opOut.Err
+	}
 
 	existing, err := s.dkimRepo.GetByDomain(ctx, d.Name, tx)
 	if err != nil {
