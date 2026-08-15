@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	domainpkg "github.com/orvix/orvix/internal/admin/domain"
 	"github.com/orvix/orvix/internal/antivirus"
 	"github.com/orvix/orvix/internal/audit"
 	"github.com/orvix/orvix/internal/config"
@@ -1191,6 +1192,20 @@ func (m *Module) smtpMailAccessPolicy(ctx context.Context, session *smtp.Session
 		return true, "", nil
 	}
 
+	// Canonical domain operability guard (Phase 8 C3A), checked for
+	// the RECIPIENT's local domain — never MAIL FROM, which a client
+	// fully controls and could spoof to try to bypass this. Runs
+	// before alias/group expansion, before mailAccessPolicy's
+	// mailbox-level check, before DATA is ever accepted: RCPT is
+	// evaluated per-recipient before the message body is read at all,
+	// so refusing here means no spool write, no queue enqueue, and no
+	// delivery record for this recipient ever happens.
+	if allow, reason, err := m.checkRecipientDomainOperability(ctx, rcptAddr); err != nil {
+		return false, "", err
+	} else if !allow {
+		return false, reason, nil
+	}
+
 	sender := mailpolicy.Sender{Authenticated: session.Authenticated}
 	if session.AuthIdentity != nil {
 		sender.MailboxEmail = session.AuthIdentity.Username
@@ -1203,6 +1218,51 @@ func (m *Module) smtpMailAccessPolicy(ctx context.Context, session *smtp.Session
 		return false, "", errPolicyUnavailable
 	case decision.Denied:
 		return false, string(decision.Reason), nil
+	}
+	return true, "", nil
+}
+
+// checkRecipientDomainOperability resolves the recipient address's
+// local domain by name (global lookup — there is no caller tenant to
+// scope an inbound SMTP recipient against; the domain's OWN tenant,
+// from the resolved row, is what CheckOperabilityByIDTx checks) and
+// applies the canonical C1 guard. An unknown domain preserves the
+// existing anti-enumeration/open-relay behavior by allowing (the
+// isLocalDomain check upstream of this hook is the actual existence
+// gate; this function only refuses an EXISTING domain that is
+// disabled/suspended/locked, and never distinguishes "doesn't exist"
+// from "exists but not owned here" in its own right). A repository
+// failure returns errPolicyUnavailable, which handleRCPT maps to a
+// temporary (4.x) SMTP failure — never a permanent rejection and
+// never silent acceptance.
+func (m *Module) checkRecipientDomainOperability(ctx context.Context, rcptAddr string) (allow bool, reason string, err error) {
+	if m.db == nil {
+		return true, "", nil
+	}
+	at := strings.LastIndex(rcptAddr, "@")
+	if at < 0 || at == len(rcptAddr)-1 {
+		return true, "", nil
+	}
+	domainName := strings.ToLower(rcptAddr[at+1:])
+
+	var domainID, tenantID uint
+	var status string
+	var deletedAt sql.NullTime
+	qerr := m.db.QueryRowContext(ctx,
+		`SELECT id, tenant_id, status, deleted_at FROM coremail_domains WHERE name = ? AND deleted_at IS NULL`,
+		domainName).Scan(&domainID, &tenantID, &status, &deletedAt)
+	if qerr == sql.ErrNoRows {
+		// No row -- either genuinely unknown or already soft-deleted;
+		// preserve existing anti-enumeration behavior (allow; the
+		// isLocalDomain gate upstream is the real existence check).
+		return true, "", nil
+	}
+	if qerr != nil {
+		return false, "", errPolicyUnavailable
+	}
+
+	if err := domainpkg.StatusError(domainpkg.DomainStatus(status)); err != nil {
+		return false, "recipient domain unavailable", nil
 	}
 	return true, "", nil
 }
