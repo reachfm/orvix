@@ -175,7 +175,7 @@ func TestGenerateDKIM_KeygenNeverInvokedOnRejection(t *testing.T) {
 				}
 			}
 			gen := newCountingKeyGen()
-			svc.SetDKIMKeyGenerator(gen.generate)
+			svc.dkimKeyGen = gen.generate
 
 			_, err = svc.GenerateDKIM(ctx, d.ID, tc.tenantID, "mail")
 			if err != tc.wantOpErr {
@@ -210,7 +210,7 @@ func TestGenerateDKIM_KeygenInvokedExactlyOnceOnSuccess(t *testing.T) {
 		t.Fatalf("create domain: %v", err)
 	}
 	gen := newCountingKeyGen()
-	svc.SetDKIMKeyGenerator(gen.generate)
+	svc.dkimKeyGen = gen.generate
 
 	res, err := svc.GenerateDKIM(ctx, d.ID, 5, "mail")
 	if err != nil {
@@ -251,7 +251,7 @@ func TestRotateDKIM_KeygenNeverInvokedOnRejection(t *testing.T) {
 		t.Fatalf("disable domain: %v", err)
 	}
 	gen := newCountingKeyGen()
-	svc.SetDKIMKeyGenerator(gen.generate)
+	svc.dkimKeyGen = gen.generate
 
 	if _, err := svc.RotateDKIM(ctx, d.ID, 5, "mail"); err != ErrDomainDisabled {
 		t.Fatalf("expected ErrDomainDisabled, got %v", err)
@@ -280,7 +280,7 @@ func TestPlatformDKIM_KeygenNeverInvokedOnRejection(t *testing.T) {
 		t.Fatalf("suspend domain: %v", err)
 	}
 	gen := newCountingKeyGen()
-	svc.SetDKIMKeyGenerator(gen.generate)
+	svc.dkimKeyGen = gen.generate
 
 	if _, err := svc.PlatformDKIM(ctx, "platform-keygen.example.test", "mail", ""); err != ErrDomainSuspended {
 		t.Fatalf("expected ErrDomainSuspended, got %v", err)
