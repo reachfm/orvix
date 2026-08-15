@@ -498,19 +498,25 @@ else
     fail "admin SPA packaging failed (see errors above); refusing to ship a bundle with stale or missing admin assets" 2
 fi
 # Asset trees — webmail SPA.
-# release/webmail (hand-authored, committed) is the CANONICAL, deployed
-# webmail source — copied verbatim, matching every prior release.
-# web/webmail/src is a parallel Vite/React rewrite: it IS built and
-# typechecked in CI (postgres-readiness.yml, "Webmail frontend
-# typecheck and build") but is NOT wired into this release pipeline
-# and is NOT yet functionally complete — its ComposeModal Send control
-# has no onClick handler, so it cannot send mail. Do not switch this
-# packaging step to build from web/webmail/src until that gap is
-# closed and full mutation parity (drafts/flags/move/delete/archive/
-# settings/push/batch) is verified; see
-# internal/api/handlers/webmail_source_provenance_test.go for the
-# guard that keeps this decision from drifting silently.
-(cd release/webmail && tar -cf - .) | (cd "$BUNDLE_ROOT/release/webmail" && tar -xf -)
+# web/webmail-release (hand-authored, committed) is the CANONICAL
+# source for the deployed webmail bundle — copied verbatim into the
+# release/webmail/ location every build artifact ships under. It used
+# to live at repo-root release/webmail/ directly; it was moved under
+# web/ so every deployable frontend source (admin, marketing, webmail)
+# has one consistent home, and release/ contains only generated/
+# packaging content, never a directly-edited source tree.
+# web/webmail/src is a SEPARATE, EXPERIMENTAL Vite/React rewrite: it IS
+# built and typechecked in CI (postgres-readiness.yml, "Webmail
+# frontend typecheck and build") but is NOT wired into this release
+# pipeline and is NOT yet functionally complete — its ComposeModal Send
+# control has no onClick handler, so it cannot send mail. It carries no
+# production provenance. Do not switch this packaging step to build
+# from web/webmail/src until that gap is closed and full mutation
+# parity (drafts/flags/move/delete/archive/settings/push/batch) is
+# verified; see internal/api/handlers/webmail_source_provenance_test.go
+# for the guard (including a byte-for-byte drift check against
+# web/webmail-release) that keeps this decision from drifting silently.
+(cd web/webmail-release && tar -cf - .) | (cd "$BUNDLE_ROOT/release/webmail" && tar -xf -)
 
 # Marketing SPA. With Node/npm available, the source build is mandatory and
 # any install/build/verification failure aborts the release. The committed
