@@ -1209,42 +1209,51 @@ async function sendComposeMessage(to, subject, bodyText) {
     setVal(bodyInput, ${JSON.stringify(bodyText)});
     const sendBtn = modal.querySelector('.modal-footer .btn.primary');
     if (!sendBtn) return { ok: false, reason: 'send button missing' };
-    const preClickDisabled = sendBtn.disabled;
     sendBtn.click();
+    // toast() auto-removes itself after 3.5s (see webmail.js), so
+    // polling for a still-visible .toast element races that timeout —
+    // under real CI load (this workflow runs alongside a dozen others
+    // sharing runner scheduling) a 100ms poll can genuinely straddle a
+    // toast's entire visible window and see nothing on either side of
+    // it, even though the send itself completed correctly. Key off the
+    // DURABLE signals instead: success removes the whole modal
+    // backdrop (see the sendBtn click handler's .then()); failure
+    // resets sendBtn.disabled back to false while the modal stays
+    // open (see setSending(false) in the same handler's final .then()).
+    // Grab toast text opportunistically for diagnostics only — never
+    // gate the outcome on it.
     const deadline2 = Date.now() + 12000;
     let result = null;
     while (Date.now() < deadline2) {
-        const toastSuccess = document.querySelector('.toast.success');
-        const toastError = document.querySelector('.toast.error');
-        if (toastSuccess) { result = { ok: true, outcome: 'success', text: toastSuccess.textContent }; break; }
-        if (toastError) { result = { ok: true, outcome: 'error', text: toastError.textContent }; break; }
+        const stillOpen = document.querySelector('.modal[role="dialog"][aria-label="Compose message"]');
+        if (!stillOpen) {
+            const t = document.querySelector('.toast.success');
+            result = { ok: true, outcome: 'success', text: t ? t.textContent : '(toast already dismissed)' };
+            break;
+        }
+        if (!sendBtn.disabled) {
+            const t = document.querySelector('.toast.error');
+            result = { ok: true, outcome: 'error', text: t ? t.textContent : '(toast already dismissed)' };
+            break;
+        }
         await new Promise(r => setTimeout(r, 100));
     }
     if (!result) {
-        // Diagnostics: is the button still stuck in the "Sending..."
-        // disabled state (the async chain is stuck somewhere) or back
-        // to normal (the click never actually started anything)? Any
-        // toast at all, even one without the expected class? What did
-        // the mock actually receive for /send, if anything?
         let mockState = null;
         try { mockState = await fetch('/__test__/state').then(r => r.json()); } catch (e) { mockState = { fetchError: String(e) }; }
-        const anyToasts = Array.from(document.querySelectorAll('.toast')).map(t => ({ className: t.className, text: t.textContent }));
         result = {
             ok: false,
-            reason: 'no toast within 12s',
+            reason: 'neither modal-closed (success) nor button-reenabled (failure) within 12s',
             diagnostics: {
-                preClickDisabled,
-                postWaitDisabled: sendBtn.disabled,
+                sendBtnDisabled: sendBtn.disabled,
                 sendBtnHTML: sendBtn.outerHTML.slice(0, 200),
-                anyToasts,
                 sendRequestsSeen: (mockState && mockState.requests || []).filter(r => r.path === '/api/v1/webmail/send'),
-                csrfRequestsSeen: (mockState && mockState.requests || []).filter(r => r.path === '/api/v1/csrf-token'),
                 totalRequestsLogged: (mockState && mockState.requests || []).length,
             },
         };
     }
-    // Close the modal (if a send succeeded it already removed itself;
-    // on failure it stays open, so force it closed for the next phase).
+    // Force-close the modal for the next phase (success already
+    // removed it; failure leaves it open).
     const dialog = document.querySelector('.modal[role="dialog"][aria-label="Compose message"]');
     const backdrop = dialog && dialog.closest('.modal-backdrop');
     if (backdrop) backdrop.remove();
