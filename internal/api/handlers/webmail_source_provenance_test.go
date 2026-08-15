@@ -1,15 +1,26 @@
 package handlers_test
 
-// Guards the item-2 canonical-webmail-source decision (Phase 8
+// Guards the item-2 canonical-webmail-source architecture (Phase 8
 // production-acceptance remediation) from silently drifting.
 //
-// Decision: web/webmail-release (hand-authored, committed) is the
-// canonical source for the deployed webmail bundle. It used to live
-// directly at repo-root release/webmail/; it was moved under web/ so
-// release/ contains only generated/packaging content, never a
-// directly-edited source tree, matching how web/admin and
-// web/marketing are laid out. build-release-bundle.sh copies it
-// verbatim into every built artifact's release/webmail/ location.
+// Architecture: web/webmail-release is the canonical, ONLY-EDITABLE
+// source. release/webmail is a GENERATED staging copy of it, always
+// produced by the shared stage_webmail() function in
+// release/scripts/lib-webmail-stage.sh, and — like release/admin's
+// legacy fallback tree — committed to git rather than merely
+// git-ignored build output: internal/config's WebmailUIDir test
+// default and several router tests (internal/api/router_test.go)
+// read release/webmail directly off a fixed relative path on disk and
+// must not depend on a build step having run first in this checkout.
+// A prior attempt at this remediation deleted release/webmail
+// entirely on the theory that release/ should only ever contain
+// generated content never checked in — that broke
+// TestMarketingSPADeepLinksAndExistingUISurvive and the production
+// router's default webmail path in CI (GET /webmail and
+// GET /assets/webmail.js both 404'd). The fix is not "release/webmail
+// must not exist" but "release/webmail must never be hand-edited
+// directly — it must always be byte-identical to what stage_webmail()
+// produces from web/webmail-release".
 //
 // web/webmail/src is a SEPARATE, EXPERIMENTAL Vite/React rewrite that
 // IS built and typechecked in CI (postgres-readiness.yml) but is NOT
@@ -19,22 +30,6 @@ package handlers_test
 //
 // See the provenance comment in release/scripts/build-release-bundle.sh
 // next to the webmail asset packaging step for the full rationale.
-//
-// These tests fail loudly, rather than silently, the moment any part
-// of that split changes:
-//   - if the release script starts building web/webmail/src instead
-//     of copying web/webmail-release verbatim (an un-reviewed switch
-//     of canonical source);
-//   - if the CSRF fix (getCsrfToken attached to every mutation) is
-//     ever reverted from the canonical source;
-//   - if a built bundle's release/webmail/ ever diverges byte-for-byte
-//     from web/webmail-release (proves the release build actually
-//     generates release/webmail exclusively from the canonical
-//     source, not from some other stale copy);
-//   - if ComposeModal's Send control quietly gets wired up, which
-//     means the "web/webmail/src cannot send mail" premise behind
-//     staying on the hand-authored tree no longer holds and the
-//     canonical-source decision should be revisited.
 
 import (
 	"os"
@@ -55,7 +50,106 @@ func repoRootFromThisFile(t *testing.T) string {
 	return filepath.Clean(filepath.Join(filepath.Dir(thisFile), "..", "..", ".."))
 }
 
-func TestWebmailProvenance_ReleaseScriptCopiesCanonicalTreeVerbatim(t *testing.T) {
+// TestWebmailProvenance_ReleaseWebmailExistsAndIsRuntimeReady proves the
+// exact regression this test file was rewritten over: release/webmail
+// must exist, checked in, with the files the production router and
+// the direct repository tests expect — not conditionally present only
+// after a build step runs.
+func TestWebmailProvenance_ReleaseWebmailExistsAndIsRuntimeReady(t *testing.T) {
+	root := repoRootFromThisFile(t)
+	releaseWebmail := filepath.Join(root, "release", "webmail")
+	for _, rel := range []string{"index.html", "sw.js", filepath.Join("assets", "webmail.js")} {
+		p := filepath.Join(releaseWebmail, rel)
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("release/webmail/%s missing: %v — the production router's default "+
+				"WebmailUIDir and the router tests read this path directly off disk; it "+
+				"must be a committed, always-present staged copy of web/webmail-release, "+
+				"not something only present after a build step runs", rel, err)
+		}
+	}
+}
+
+// TestWebmailProvenance_StagedOutputByteIdenticalToCanonicalSource runs
+// the real stage_webmail() function (not a reimplementation of it)
+// against a temp destination and diffs it against the canonical
+// source AND against the currently-committed release/webmail —
+// proving both that staging is deterministic and that the committed
+// copy is not stale relative to the canonical source.
+func TestWebmailProvenance_StagedOutputByteIdenticalToCanonicalSource(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available; skipping staging script test")
+	}
+	if _, err := exec.LookPath("tar"); err != nil {
+		t.Skip("tar not available; skipping staging script test")
+	}
+	root := repoRootFromThisFile(t)
+	canonical := filepath.Join(root, "web", "webmail-release")
+	committed := filepath.Join(root, "release", "webmail")
+	stageScript := filepath.Join(root, "release", "scripts", "stage-webmail.sh")
+
+	if _, err := os.Stat(canonical); err != nil {
+		t.Fatalf("canonical source missing: %v", err)
+	}
+	if _, err := os.Stat(stageScript); err != nil {
+		t.Fatalf("stage-webmail.sh missing: %v", err)
+	}
+
+	dest := t.TempDir()
+	stageDest := filepath.Join(dest, "staged")
+	// The script's default destination is release/webmail relative to
+	// the passed repo root; to stage into an isolated temp dir instead
+	// (so this test never mutates the working tree), invoke
+	// lib-webmail-stage.sh's stage_webmail() directly.
+	cmd := exec.Command("bash", "-c",
+		"source "+shellQuote(filepath.Join(root, "release", "scripts", "lib-webmail-stage.sh"))+
+			" && stage_webmail "+shellQuote(canonical)+" "+shellQuote(stageDest))
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("stage_webmail failed: %v\n%s", err, out)
+	}
+
+	if out, err := exec.Command("diff", "-rq", canonical, stageDest).CombinedOutput(); err != nil {
+		t.Fatalf("staged output diverges from canonical source:\n%s", out)
+	}
+	if out, err := exec.Command("diff", "-rq", canonical, committed).CombinedOutput(); err != nil {
+		t.Fatalf("committed release/webmail diverges from web/webmail-release — it is "+
+			"stale relative to the canonical source; run "+
+			"'bash release/scripts/stage-webmail.sh' and commit the result:\n%s", out)
+	}
+}
+
+// TestWebmailProvenance_StagingFailsClosedOnMissingSource proves
+// stage_webmail() refuses to produce output from an incomplete
+// source rather than silently shipping a partial/empty tree.
+func TestWebmailProvenance_StagingFailsClosedOnMissingSource(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available; skipping staging script test")
+	}
+	root := repoRootFromThisFile(t)
+	libScript := filepath.Join(root, "release", "scripts", "lib-webmail-stage.sh")
+
+	emptySrc := t.TempDir()
+	dest := t.TempDir()
+	destPath := filepath.Join(dest, "out")
+
+	cmd := exec.Command("bash", "-c",
+		"source "+shellQuote(libScript)+" && stage_webmail "+shellQuote(emptySrc)+" "+shellQuote(destPath))
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("stage_webmail must fail closed on a source missing index.html/assets/webmail.js, but it succeeded:\n%s", out)
+	}
+	if !strings.Contains(string(out), "index.html") && !strings.Contains(string(out), "webmail.js") {
+		t.Fatalf("expected a clear missing-file error, got:\n%s", out)
+	}
+	if _, statErr := os.Stat(destPath); statErr == nil {
+		t.Fatal("stage_webmail must not create a partial destination directory on failure")
+	}
+}
+
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+func TestWebmailProvenance_ReleaseScriptUsesSharedStagingFunction(t *testing.T) {
 	root := repoRootFromThisFile(t)
 	scriptPath := filepath.Join(root, "release", "scripts", "build-release-bundle.sh")
 	b, err := os.ReadFile(scriptPath)
@@ -64,21 +158,19 @@ func TestWebmailProvenance_ReleaseScriptCopiesCanonicalTreeVerbatim(t *testing.T
 	}
 	script := string(b)
 
-	if !strings.Contains(script, `(cd web/webmail-release && tar -cf - .)`) {
-		t.Fatal("build-release-bundle.sh no longer copies web/webmail-release verbatim — " +
-			"if this is an intentional switch to building web/webmail/src, first fix " +
-			"ComposeModal's Send onClick, reach full mutation parity, and update the " +
-			"provenance comment in this test and in build-release-bundle.sh together")
+	if !strings.Contains(script, "lib-webmail-stage.sh") {
+		t.Fatal("build-release-bundle.sh no longer sources lib-webmail-stage.sh — the " +
+			"release bundle and the committed release/webmail must be produced by the " +
+			"exact same staging function, not two independently-maintained copy steps")
+	}
+	if !strings.Contains(script, "stage_webmail ") {
+		t.Fatal("build-release-bundle.sh no longer calls stage_webmail() for the webmail " +
+			"asset tree")
 	}
 	if strings.Contains(script, "cd web/webmail ") || strings.Contains(script, "cd web/webmail/src") {
 		t.Fatal("build-release-bundle.sh now references web/webmail/src — the release " +
 			"pipeline must not silently start building the unfinished Vite tree; see " +
 			"the provenance comment next to the webmail asset packaging step")
-	}
-	if _, err := os.Stat(filepath.Join(root, "release", "webmail")); err == nil {
-		t.Fatal("repo-root release/webmail/ has reappeared as a tracked source directory — " +
-			"the canonical source is web/webmail-release; release/ must only ever contain " +
-			"generated/packaging content, never a hand-edited source tree")
 	}
 }
 
@@ -95,40 +187,6 @@ func TestWebmailProvenance_ShippedSourceHasCSRFFix(t *testing.T) {
 			"header-attachment fix appears to have been reverted from the canonical " +
 			"deployed source")
 	}
-}
-
-// TestWebmailProvenance_BundleMatchesCanonicalSourceByteForByte actually
-// runs the packaging step of build-release-bundle.sh (just the webmail
-// tar-copy, not a full signed build) and diffs the result against
-// web/webmail-release, proving the generated release/webmail truly is
-// nothing but a verbatim copy of the canonical source — not a stale
-// snapshot that happens to match today.
-func TestWebmailProvenance_BundleMatchesCanonicalSourceByteForByte(t *testing.T) {
-	if _, err := exec.LookPath("tar"); err != nil {
-		t.Skip("tar not available in PATH; skipping byte-for-byte drift check")
-	}
-	root := repoRootFromThisFile(t)
-	canonical := filepath.Join(root, "web", "webmail-release")
-	if _, err := os.Stat(canonical); err != nil {
-		t.Fatalf("canonical source missing: %v", err)
-	}
-
-	dest := t.TempDir()
-	// Mirror exactly what build-release-bundle.sh's packaging line does.
-	pack := exec.Command("sh", "-c", "cd "+shellQuote(canonical)+" && tar -cf - . | (cd "+shellQuote(dest)+" && tar -xf -)")
-	if out, err := pack.CombinedOutput(); err != nil {
-		t.Fatalf("packaging step failed: %v\n%s", err, out)
-	}
-
-	diff := exec.Command("diff", "-rq", canonical, dest)
-	out, err := diff.CombinedOutput()
-	if err != nil {
-		t.Fatalf("built release/webmail diverges from web/webmail-release:\n%s", out)
-	}
-}
-
-func shellQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 func TestWebmailProvenance_ViteComposeSendStillUnwired(t *testing.T) {

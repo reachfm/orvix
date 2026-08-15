@@ -124,6 +124,8 @@ warn() { printf '%bWARN:%b %s\n' "$YELLOW" "$NC" "$*" >&2; }
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=release/scripts/lib-admin-build.sh
 . "$SCRIPT_DIR/lib-admin-build.sh"
+# shellcheck source=release/scripts/lib-webmail-stage.sh
+. "$SCRIPT_DIR/lib-webmail-stage.sh"
 
 # ── 1. Pre-flight ─────────────────────────────────────────────────
 command -v git  >/dev/null 2>&1 || fail "git is required"
@@ -515,13 +517,14 @@ else
     fail "admin SPA packaging failed (see errors above); refusing to ship a bundle with stale or missing admin assets" 2
 fi
 # Asset trees — webmail SPA.
-# web/webmail-release (hand-authored, committed) is the CANONICAL
-# source for the deployed webmail bundle — copied verbatim into the
-# release/webmail/ location every build artifact ships under. It used
-# to live at repo-root release/webmail/ directly; it was moved under
-# web/ so every deployable frontend source (admin, marketing, webmail)
-# has one consistent home, and release/ contains only generated/
-# packaging content, never a directly-edited source tree.
+# web/webmail-release (hand-authored, committed) is the CANONICAL,
+# ONLY-EDITABLE source. release/webmail (also committed, like
+# release/admin's legacy fallback tree) is ALWAYS a generated staging
+# copy of it, produced by the shared stage_webmail() function so
+# there is exactly one place a human ever edits webmail source and
+# exactly one code path that turns it into what ships and what the
+# server-route tests + WebmailUIDir default read directly off disk —
+# see release/scripts/lib-webmail-stage.sh.
 # web/webmail/src is a SEPARATE, EXPERIMENTAL Vite/React rewrite: it IS
 # built and typechecked in CI (postgres-readiness.yml, "Webmail
 # frontend typecheck and build") but is NOT wired into this release
@@ -531,9 +534,10 @@ fi
 # from web/webmail/src until that gap is closed and full mutation
 # parity (drafts/flags/move/delete/archive/settings/push/batch) is
 # verified; see internal/api/handlers/webmail_source_provenance_test.go
-# for the guard (including a byte-for-byte drift check against
-# web/webmail-release) that keeps this decision from drifting silently.
-(cd web/webmail-release && tar -cf - .) | (cd "$BUNDLE_ROOT/release/webmail" && tar -xf -)
+# for the guard (including a byte-for-byte drift check) that keeps
+# this decision from drifting silently.
+stage_webmail "$REPO_ROOT/web/webmail-release" "$BUNDLE_ROOT/release/webmail" || \
+    fail "webmail SPA staging failed (see errors above); refusing to ship a bundle with stale or missing webmail assets" 2
 
 # Marketing SPA. With Node/npm available, the source build is mandatory and
 # any install/build/verification failure aborts the release. The committed
