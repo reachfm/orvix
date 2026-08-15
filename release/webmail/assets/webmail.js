@@ -427,7 +427,23 @@
   var PAGE_SIZE = 50;
   var G_PREFIX_TIMEOUT_MS = 1000;
 
-  function api(method, path, body) {
+  // api() attaches a CSRF header to every non-GET/HEAD request. This
+  // was NOT true before Phase 8 remediation (2026-08-15): the stale
+  // comment below claimed "webmail endpoints (send, drafts, settings,
+  // push) sit on the auth-protected group WITHOUT CSRF" and only
+  // csrfFetch (used for logout/password-change) attached the header.
+  // That assumption is no longer correct — the backend CSRF middleware
+  // (internal/auth/csrf.go) enforces the header uniformly on every
+  // non-API-key mutation, with no per-route exemption, and never has
+  // one configured. The mismatch meant every webmail send/draft/flag/
+  // archive/delete/batch/folder-read/settings/push mutation reached
+  // the server with no X-CSRF-Token header and was rejected 403 "CSRF
+  // token missing in header" — reproduced live, all webmail sends were
+  // failing. Fixed by making api() itself CSRF-aware for every caller,
+  // the same fail-closed, single-source-of-truth pattern csrfFetch
+  // already used for its own routes, rather than requiring every call
+  // site to remember to opt in.
+  function api(method, path, body, _csrfRetried) {
     var opts = {
       method: method,
       credentials: 'include',
@@ -437,37 +453,53 @@
       opts.headers['Content-Type'] = 'application/json';
       opts.body = JSON.stringify(body);
     }
-    return fetch(path, opts).then(function (res) {
-      var ct = res.headers.get('content-type') || '';
-      var p = ct.indexOf('application/json') >= 0
-        ? res.json()
-        : res.text().then(function (t) {
-            return { __raw: t };
-          });
-      return p.then(function (data) {
-        if (!res.ok) {
-          var err = new Error(
-            (data && (data.error || data.message)) || res.statusText || ('HTTP ' + res.status)
-          );
-          err.status = res.status;
-          err.body = data;
-          throw err;
-        }
-        return data;
+    var isMutation = method !== 'GET' && method !== 'HEAD';
+    var ready = isMutation
+      ? getCsrfToken().then(function (tok) { opts.headers['X-CSRF-Token'] = tok; })
+      : Promise.resolve();
+    return ready.then(function () {
+      return fetch(path, opts).then(function (res) {
+        var ct = res.headers.get('content-type') || '';
+        var p = ct.indexOf('application/json') >= 0
+          ? res.json()
+          : res.text().then(function (t) {
+              return { __raw: t };
+            });
+        return p.then(function (data) {
+          if (!res.ok) {
+            // A 403 whose body names a CSRF problem means the request
+            // was rejected by the CSRF check BEFORE the handler ran —
+            // no mutation was attempted server-side, so replaying it
+            // once with a freshly re-fetched token is safe and can
+            // never cause a duplicate send/delivery. Only one retry
+            // ever (the _csrfRetried guard) — never a loop — and only
+            // for this specific, unambiguous failure mode; any other
+            // error (network failure, timeout, 5xx) is surfaced as-is
+            // because whether the mutation actually landed is unknown.
+            var msg = (data && (data.error || data.message)) || '';
+            if (res.status === 403 && isMutation && !_csrfRetried && /csrf/i.test(msg)) {
+              csrfTokenCache = null;
+              return api(method, path, body, true);
+            }
+            var err = new Error(
+              msg || res.statusText || ('HTTP ' + res.status)
+            );
+            err.status = res.status;
+            err.body = data;
+            throw err;
+          }
+          return data;
+        });
       });
     });
   }
 
-  // csrfFetch fetches the CSRF token (cached) and attaches it to a
-  // state-changing request as the X-CSRF-Token header. The backend
-  // enforces CSRF on a small set of high-trust auth routes
-  // (/api/v1/auth/logout, /api/v1/auth/logout-all,
-  // /api/v1/auth/change-password, /api/v1/webmail/logout,
-  // /api/v1/webmail/password/change). Other webmail endpoints
-  // (send, drafts, settings, push) sit on the auth-protected
-  // group WITHOUT CSRF, so the api() helper does not need to
-  // fetch the token on every call. csrfFetch is the single
-  // source of truth for CSRF-aware requests in the SPA.
+  // csrfFetch is kept for callers (logout, logout-all, password
+  // change) that need direct access to the raw fetch Response rather
+  // than api()'s parsed-body contract. It shares the same
+  // getCsrfToken() cache as api() above — one source of truth for the
+  // CSRF token, never two independently-cached copies that could
+  // drift.
   var csrfTokenCache = null;
   function getCsrfToken() {
     if (csrfTokenCache) return Promise.resolve(csrfTokenCache);
@@ -883,22 +915,41 @@
     files.forEach(function (f, i) {
       fd.append('attachment', f.file || f, f.name);
     });
-    return fetch('/api/v1/webmail/send', {
-      method: 'POST',
-      credentials: 'include',
-      headers: { Accept: 'application/json' },
-      body: fd,
-    }).then(function (res) {
-      return res.json().then(function (data) {
-        if (!res.ok) {
-          var err = new Error((data && data.error) || ('HTTP ' + res.status));
-          err.status = res.status;
-          err.body = data;
-          throw err;
-        }
-        return data;
+    // This is a raw fetch (multipart body — api() always
+    // JSON-encodes) so it must attach its own CSRF header via the
+    // same getCsrfToken() cache api() uses, same fix and same reason
+    // as api() above: the backend requires X-CSRF-Token on every
+    // mutation with no route exemption. FormData is safe to send more
+    // than once (it holds Blob/File references, not a consumed
+    // stream), so a single CSRF-retry attempt below can reuse `fd`.
+    function attempt(csrfRetried) {
+      return getCsrfToken().then(function (tok) {
+        return fetch('/api/v1/webmail/send', {
+          method: 'POST',
+          credentials: 'include',
+          headers: { Accept: 'application/json', 'X-CSRF-Token': tok },
+          body: fd,
+        });
+      }).then(function (res) {
+        return res.json().then(function (data) {
+          if (!res.ok) {
+            // Same unambiguous-rejection reasoning as api(): a 403
+            // naming a CSRF problem means the handler never ran, so
+            // one retry with a fresh token cannot duplicate the send.
+            if (res.status === 403 && !csrfRetried && /csrf/i.test((data && data.error) || '')) {
+              csrfTokenCache = null;
+              return attempt(true);
+            }
+            var err = new Error((data && data.error) || ('HTTP ' + res.status));
+            err.status = res.status;
+            err.body = data;
+            throw err;
+          }
+          return data;
+        });
       });
-    }).then(function (res) {
+    }
+    return attempt(false).then(function (res) {
       if (res.status !== 'queued') {
         throw new Error('Send returned status=' + (res.status || 'unknown'));
       }
