@@ -1182,7 +1182,12 @@ async function sendComposeMessage(to, subject, bodyText) {
     document.querySelectorAll('.toast').forEach(t => t.remove());
     const api = window.OrvixWebmail || window.orvixWebmail || null;
     if (api && typeof api.openCompose === 'function') api.openCompose();
-    const deadline1 = Date.now() + 4000;
+    // 8s / 12s rather than the 4s/6s other phases use: this helper runs
+    // up to 4 times back-to-back (phases 11-14) under real CI load
+    // (this workflow runs concurrently with a dozen others sharing
+    // runner capacity), so it gets more slack against transient
+    // slowness rather than a tight budget tuned for an idle machine.
+    const deadline1 = Date.now() + 8000;
     let modal = null;
     while (Date.now() < deadline1) {
         // Pick the LAST match, not the first: if a prior phase's
@@ -1205,7 +1210,7 @@ async function sendComposeMessage(to, subject, bodyText) {
     const sendBtn = modal.querySelector('.modal-footer .btn.primary');
     if (!sendBtn) return { ok: false, reason: 'send button missing' };
     sendBtn.click();
-    const deadline2 = Date.now() + 6000;
+    const deadline2 = Date.now() + 12000;
     let result = null;
     while (Date.now() < deadline2) {
         const toastSuccess = document.querySelector('.toast.success');
