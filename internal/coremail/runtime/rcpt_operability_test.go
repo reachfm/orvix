@@ -154,10 +154,17 @@ func TestCheckRecipientDomainOperability_IgnoresSenderEntirely(t *testing.T) {
 	}
 }
 
-func TestCheckRecipientDomainOperability_NilDBPreservesLegacyBehavior(t *testing.T) {
+// TestCheckRecipientDomainOperability_NilDBFailsClosed proves an
+// unexpected nil-db wiring state is rejected exactly like a
+// repository failure (transient errPolicyUnavailable), never silently
+// accepted.
+func TestCheckRecipientDomainOperability_NilDBFailsClosed(t *testing.T) {
 	m := &Module{}
-	allow, reason, err := m.checkRecipientDomainOperability(t.Context(), "user@anything.example")
-	if err != nil || !allow || reason != "" {
-		t.Fatalf("expected a no-op allow when db is nil, got allow=%v reason=%q err=%v", allow, reason, err)
+	allow, _, err := m.checkRecipientDomainOperability(t.Context(), "user@anything.example")
+	if allow {
+		t.Fatalf("a nil db must never silently accept the recipient")
+	}
+	if err != errPolicyUnavailable {
+		t.Fatalf("a nil db must map to errPolicyUnavailable (SMTP 4.x transient), got %v", err)
 	}
 }

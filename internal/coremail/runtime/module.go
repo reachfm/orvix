@@ -1237,7 +1237,14 @@ func (m *Module) smtpMailAccessPolicy(ctx context.Context, session *smtp.Session
 // never silent acceptance.
 func (m *Module) checkRecipientDomainOperability(ctx context.Context, rcptAddr string) (allow bool, reason string, err error) {
 	if m.db == nil {
-		return true, "", nil
+		// Fail closed: this hook only runs once mailPolicy is wired
+		// (smtpMailAccessPolicy's earlier nil-mailPolicy check already
+		// short-circuits otherwise), which in production implies a db
+		// is present too. A nil db here is an unexpected wiring state,
+		// not "no policy needed" — treat it like a repository failure
+		// so the caller maps it to a transient SMTP rejection instead
+		// of silently accepting the recipient.
+		return false, "", errPolicyUnavailable
 	}
 	at := strings.LastIndex(rcptAddr, "@")
 	if at < 0 || at == len(rcptAddr)-1 {
