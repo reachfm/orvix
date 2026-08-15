@@ -257,8 +257,27 @@ func (r *Receiver) buildRecipientPlan(ctx context.Context, rcptAddrs []string) (
 			presentedByDomain[domain] = dom
 		}
 		if dom == nil || dom.Status != coremail.DomainActive || dom.DeletedAt != nil {
-			// Unknown, soft-deleted, or non-active domain: preserve the
-			// normal external-recipient behavior (anti-enumeration).
+			// No active domain row: this is either a genuinely unknown
+			// external domain (normal external-recipient behavior,
+			// anti-enumeration preserved) OR a known local domain that
+			// is soft-deleted/inoperable. Distinguish the two without
+			// leaking existence: if a mailbox or alias still exists
+			// for this address, the domain IS known — its owning
+			// domain must fail closed (soft-deleted / unavailable
+			// owning domains never accept mail, and alias or
+			// mailbox indirection can never bypass domain
+			// operability).
+			if mbox, mErr := r.Engine.Mailboxes.GetByEmail(ctx, rcpt, nil); mErr == nil && mbox != nil {
+				if _, err := owningDomainOperable(rcpt, mbox); err != nil {
+					return nil, err
+				}
+				return nil, fmt.Errorf("owning domain unavailable for %s", rcpt)
+			}
+			if alias, aErr := r.Engine.Aliases.GetByFromAddr(ctx, rcpt, nil); aErr == nil && alias != nil && alias.Active {
+				return nil, fmt.Errorf("owning domain unavailable for %s", rcpt)
+			}
+			// Genuinely unknown: preserve the normal external-recipient
+			// behavior (anti-enumeration).
 			plan.external = append(plan.external, externalRecipient{
 				Email:  rcpt,
 				Domain: domain,
@@ -320,6 +339,33 @@ func (r *Receiver) buildRecipientPlan(ctx context.Context, rcptAddrs []string) (
 		}
 	}
 	return plan, nil
+}
+
+// recheckCanonicalDomainsOperable is the authoritative pre-acceptance
+// recheck: every canonical domain recorded in the plan (presented
+// domains and resolved target owning domains) is re-read immediately
+// before the first durable write. A domain that has become
+// missing/soft-deleted/non-active since the plan build rejects the
+// whole message (fail closed); a repository failure rejects with an
+// error the server maps to a transient (4.x) failure. Checks are
+// deduplicated by domain name.
+func (r *Receiver) recheckCanonicalDomainsOperable(ctx context.Context, refs []canonicalDomainRef) error {
+	for _, ref := range refs {
+		d, err := r.Engine.Domains.GetByName(ctx, ref.Name, nil)
+		if err != nil {
+			return fmt.Errorf("recheck canonical domain %s: %w", ref.Name, err)
+		}
+		if d == nil || d.DeletedAt != nil {
+			return fmt.Errorf("canonical domain unavailable: %s", ref.Name)
+		}
+		if d.Status != coremail.DomainActive {
+			return fmt.Errorf("canonical domain not active: %s", ref.Name)
+		}
+		if d.ID != ref.DomainID || d.TenantID != ref.TenantID {
+			return fmt.Errorf("canonical domain changed: %s", ref.Name)
+		}
+	}
+	return nil
 }
 
 // AcceptMessage processes a completed DATA transfer.
@@ -748,6 +794,21 @@ func (r *Receiver) AcceptMessage(ctx context.Context, session *Session) error {
 
 	if len(recipients) == 0 && len(plan.external) == 0 {
 		return fmt.Errorf("no valid recipients")
+	}
+
+	// ── Authoritative pre-acceptance domain recheck ──
+	// The final domain-operability recheck runs HERE, immediately
+	// before the first durable write of the acceptance loop: every
+	// canonical domain recorded by the plan (presented domains AND
+	// resolved target owning domains) is re-read from the database
+	// and must still be operable. This closes the window between the
+	// plan build and the first StoreMessage/Enqueue — no recipient
+	// can be durably accepted if a required canonical domain became
+	// inoperable after RCPT (or during the plan build itself). The
+	// recheck is deduplicated by domain name (at most one query per
+	// distinct canonical domain) and performs no network I/O.
+	if err := r.recheckCanonicalDomainsOperable(ctx, plan.domains); err != nil {
+		return err
 	}
 
 	// Store the message at least once even if only external recipients.

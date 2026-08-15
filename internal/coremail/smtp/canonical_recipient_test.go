@@ -335,6 +335,46 @@ func TestCanonicalRecipientPlan_RepositoryFailureIsError(t *testing.T) {
 	}
 }
 
+// TestCanonicalRecipientPlan_SoftDeletedPresentedDomainWithMailboxFailsClosed
+// pins that a soft-deleted presented domain is NOT silently treated as
+// an unknown external domain when the address still has local state: a
+// mailbox row on the soft-deleted domain fails the plan (owning domain
+// unavailable) instead of relaying the message as external.
+func TestCanonicalRecipientPlan_SoftDeletedPresentedDomainWithMailboxFailsClosed(t *testing.T) {
+	db, eng, _, _, rcv := testIntegrationEnvWithDB(t)
+
+	domainID, _ := seedExtraDomainAndMailbox(t, db, "dying.test", "alice@dying.test", "active")
+	if _, err := db.Exec(`UPDATE coremail_domains SET deleted_at = datetime('now') WHERE id = ?`, domainID); err != nil {
+		t.Fatalf("soft-delete domain: %v", err)
+	}
+
+	_, err := planFor(t, eng, rcv, "alice@dying.test")
+	if err == nil {
+		t.Fatal("expected soft-deleted owning domain with existing mailbox to fail the plan")
+	}
+	if !strings.Contains(err.Error(), "owning domain") {
+		t.Errorf("error %q does not reference owning domain", err)
+	}
+}
+
+// TestCanonicalRecipientPlan_SoftDeletedPresentedDomainWithAliasFailsClosed
+// pins the same fail-closed rule for alias state: an alias row on a
+// soft-deleted domain fails the plan instead of relaying externally.
+func TestCanonicalRecipientPlan_SoftDeletedPresentedDomainWithAliasFailsClosed(t *testing.T) {
+	db, eng, _, _, rcv := testIntegrationEnvWithDB(t)
+
+	domainID, _ := seedExtraDomainAndMailbox(t, db, "dying.test", "bob@dying.test", "active")
+	seedAlias(t, db, domainID, "sales@dying.test", "bob@dying.test")
+	if _, err := db.Exec(`UPDATE coremail_domains SET deleted_at = datetime('now') WHERE id = ?`, domainID); err != nil {
+		t.Fatalf("soft-delete domain: %v", err)
+	}
+
+	_, err := planFor(t, eng, rcv, "sales@dying.test")
+	if err == nil {
+		t.Fatal("expected soft-deleted owning domain with existing alias to fail the plan")
+	}
+}
+
 // ── SMTP-level authoritative acceptance tests (real TCP sessions) ──
 
 type canonicalSMTPEnv struct {
