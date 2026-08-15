@@ -36,6 +36,7 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v3"
+	domainpkg "github.com/orvix/orvix/internal/admin/domain"
 	"github.com/orvix/orvix/internal/billing"
 	"github.com/orvix/orvix/internal/coremail"
 	coremailmime "github.com/orvix/orvix/internal/coremail/mime"
@@ -689,6 +690,33 @@ func (h *Handler) WebmailSend(c fiber.Ctx) error {
 		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
 			"error":  "no mailbox",
 			"reason": reason,
+		})
+	}
+
+	// Canonical domain operability guard (Phase 8 C3A), checked FIRST —
+	// before the mail-access policy check, before quota reservation,
+	// before the Sent-folder write, before queue enqueue. The sender's
+	// tenant/domain come from ctx.Mailbox, resolved server-side by
+	// resolveWebmailUserContext's authenticated user_id -> email ->
+	// coremail_mailboxes lookup above; nothing here is browser-
+	// supplied. This send pipeline is a multi-system saga (MailStore
+	// write, billing quota enforcer, queue engine each manage their
+	// own persistence) with no single *sql.Tx spanning all of it, so
+	// this check cannot literally share a transaction with the queue
+	// insert the way a single-table guard integration can — it is
+	// placed as the earliest possible gate instead, before any of the
+	// listed side effects (quota consumption included) has run.
+	if sqlDB, err := h.db.DB(); err == nil {
+		opOut := domainpkg.NewDomainAdminRepo(sqlDB).CheckOperabilityByIDTx(c.Context(), ctx.Mailbox.DomainID, ctx.Mailbox.TenantID, false)
+		if !opOut.Operational() {
+			return domainServiceError(c, opOut.Err)
+		}
+	} else {
+		h.logger.Error("webmail send: database unavailable for domain operability check",
+			zap.String("mailbox", ctx.Mailbox.Email))
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+			"error": "unable to verify domain status",
+			"code":  "INTERNAL_ERROR",
 		})
 	}
 
