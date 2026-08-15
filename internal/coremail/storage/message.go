@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/orvix/orvix/internal/dbdialect"
 )
 
 // Message represents an email message stored in the Orvix MailStore.
@@ -86,11 +88,34 @@ var _ MessageRepository = (*MessageSQLRepo)(nil)
 
 // MessageSQLRepo implements MessageRepository using database/sql.
 type MessageSQLRepo struct {
-	db *sql.DB
+	db      *sql.DB
+	dialect *dbdialect.Info
 }
 
+// NewMessageSQLRepo constructs the repository and detects the SQL
+// dialect EAGERLY. The probe query runs at construction time (always
+// before any transaction), never lazily: a lazy probe inside a
+// transaction would deadlock a single-connection SQLite pool — the
+// acceptance paths call Create with the acceptance *sql.Tx held.
 func NewMessageSQLRepo(db *sql.DB) *MessageSQLRepo {
-	return &MessageSQLRepo{db: db}
+	dialect, err := dbdialect.Detect(db)
+	if err != nil {
+		// Fall back to SQLite placeholders: on an unrecognized
+		// backend every statement fails visibly (fail closed)
+		// rather than executing raw SQLite SQL.
+		dialect = dbdialect.FromDriver("sqlite")
+	}
+	return &MessageSQLRepo{db: db, dialect: dialect}
+}
+
+// getDialect returns the dialect detected at construction time.
+func (r *MessageSQLRepo) getDialect() *dbdialect.Info {
+	return r.dialect
+}
+
+// qf rewrites ? placeholders to $N for PostgreSQL (no-op on SQLite).
+func (r *MessageSQLRepo) qf(sql string) string {
+	return r.getDialect().Rewrite(sql)
 }
 
 func (r *MessageSQLRepo) exec(tx interface{}) interface {
@@ -118,17 +143,35 @@ func (r *MessageSQLRepo) Create(ctx context.Context, m *Message, tx interface{})
 	m.CreatedAt = now
 	m.UpdatedAt = now
 	e := r.exec(tx)
-	res, err := retrySQL(ctx, func() (sql.Result, error) {
-		return e.ExecContext(ctx, `
+	// SQLite stores flag columns as INTEGER 0/1; PostgreSQL as
+	// native BOOLEAN — the args must match the column type.
+	boolVal := func(b bool) interface{} {
+		if r.getDialect().IsPostgres() {
+			return b
+		}
+		return boolToInt(b)
+	}
+	args := []interface{}{
+		m.MessageID, m.TenantID, m.DomainID, m.MailboxID, m.FolderID, m.ThreadID,
+		m.InternetMessageID, m.Subject, m.FromAddress, m.ToAddresses, m.CcAddresses, m.BccAddresses, m.ReplyTo,
+		m.MessageDate, m.ReceivedDate, m.SizeBytes, m.RFC822Path, m.SHA256,
+		boolVal(m.Seen), boolVal(m.Answered), boolVal(m.Flagged), boolVal(m.Draft), boolVal(m.Deleted), boolVal(m.Junk),
+		int(m.Importance), m.RetentionPolicyID,
+		m.CreatedAt, m.UpdatedAt, m.PurgedAt,
+	}
+	insert := `
 		INSERT INTO coremail_messages (`+messageCols+`)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			m.MessageID, m.TenantID, m.DomainID, m.MailboxID, m.FolderID, m.ThreadID,
-			m.InternetMessageID, m.Subject, m.FromAddress, m.ToAddresses, m.CcAddresses, m.BccAddresses, m.ReplyTo,
-			m.MessageDate, m.ReceivedDate, m.SizeBytes, m.RFC822Path, m.SHA256,
-			boolToInt(m.Seen), boolToInt(m.Answered), boolToInt(m.Flagged), boolToInt(m.Draft), boolToInt(m.Deleted), boolToInt(m.Junk),
-			int(m.Importance), m.RetentionPolicyID,
-			m.CreatedAt, m.UpdatedAt, m.PurgedAt,
-		)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	if r.getDialect().IsPostgres() {
+		var id uint
+		if err := e.QueryRowContext(ctx, r.qf(insert)+" RETURNING id", args...).Scan(&id); err != nil {
+			return fmt.Errorf("create message: %w", err)
+		}
+		m.ID = id
+		return nil
+	}
+	res, err := retrySQL(ctx, func() (sql.Result, error) {
+		return e.ExecContext(ctx, insert, args...)
 	})
 	if err != nil {
 		return fmt.Errorf("create message: %w", err)
@@ -144,7 +187,7 @@ func (r *MessageSQLRepo) Create(ctx context.Context, m *Message, tx interface{})
 func (r *MessageSQLRepo) GetByID(ctx context.Context, id uint, tx interface{}) (*Message, error) {
 	e := r.exec(tx)
 	return retrySQL(ctx, func() (*Message, error) {
-		row := e.QueryRowContext(ctx, `SELECT id, `+messageCols+` FROM coremail_messages WHERE id = ? AND purged_at IS NULL`, id)
+		row := e.QueryRowContext(ctx, r.qf(`SELECT id, `+messageCols+` FROM coremail_messages WHERE id = ? AND purged_at IS NULL`), id)
 		return scanMessage(row)
 	})
 }
@@ -152,7 +195,7 @@ func (r *MessageSQLRepo) GetByID(ctx context.Context, id uint, tx interface{}) (
 func (r *MessageSQLRepo) GetByMessageID(ctx context.Context, messageID string, tx interface{}) (*Message, error) {
 	e := r.exec(tx)
 	return retrySQL(ctx, func() (*Message, error) {
-		row := e.QueryRowContext(ctx, `SELECT id, `+messageCols+` FROM coremail_messages WHERE message_id = ? AND purged_at IS NULL`, messageID)
+		row := e.QueryRowContext(ctx, r.qf(`SELECT id, `+messageCols+` FROM coremail_messages WHERE message_id = ? AND purged_at IS NULL`), messageID)
 		return scanMessage(row)
 	})
 }
@@ -263,11 +306,11 @@ func (r *MessageSQLRepo) listOnce(ctx context.Context, filter MessageFilter, tx 
 	clause := strings.Join(where, " AND ")
 
 	var total int64
-	if err := e.QueryRowContext(ctx, "SELECT COUNT(*) FROM coremail_messages WHERE "+clause, args...).Scan(&total); err != nil {
+	if err := e.QueryRowContext(ctx, r.qf("SELECT COUNT(*) FROM coremail_messages WHERE "+clause), args...).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("count messages: %w", err)
 	}
 
-	rows, err := e.QueryContext(ctx, `SELECT id, `+messageCols+` FROM coremail_messages WHERE `+clause+` ORDER BY received_date DESC LIMIT ? OFFSET ?`,
+	rows, err := e.QueryContext(ctx, r.qf(`SELECT id, `+messageCols+` FROM coremail_messages WHERE `+clause+` ORDER BY received_date DESC LIMIT ? OFFSET ?`),
 		append(args, filter.Limit, filter.Offset)...,
 	)
 	if err != nil {
@@ -412,7 +455,7 @@ func (r *MessageSQLRepo) ListByCursor(ctx context.Context, filter MessageFilter,
 
 	// Fetch one extra row to detect HasMore without a COUNT.
 	args = append(args, filter.Limit+1)
-	rows, err := e.QueryContext(ctx, `SELECT id, `+messageCols+` FROM coremail_messages WHERE `+clause+` ORDER BY `+orderBy+` LIMIT ?`, args...)
+	rows, err := e.QueryContext(ctx, r.qf(`SELECT id, `+messageCols+` FROM coremail_messages WHERE `+clause+` ORDER BY `+orderBy+` LIMIT ?`), args...)
 	if err != nil {
 		return MessagesPage{}, fmt.Errorf("list messages by cursor: %w", err)
 	}
@@ -455,10 +498,10 @@ func (r *MessageSQLRepo) ListByCursor(ctx context.Context, filter MessageFilter,
 func (r *MessageSQLRepo) Update(ctx context.Context, m *Message, tx interface{}) error {
 	m.UpdatedAt = nowFn()
 	e := r.exec(tx)
-	_, err := e.ExecContext(ctx, `
+	_, err := e.ExecContext(ctx, r.qf(`
 		UPDATE coremail_messages SET subject=?, from_address=?, to_addresses=?, cc_addresses=?, bcc_addresses=?,
 			seen=?, answered=?, flagged=?, draft=?, deleted=?, junk=?, importance=?, retention_policy_id=?, updated_at=?
-		WHERE id = ? AND purged_at IS NULL`,
+		WHERE id = ? AND purged_at IS NULL`),
 		m.Subject, m.FromAddress, m.ToAddresses, m.CcAddresses, m.BccAddresses,
 		boolToInt(m.Seen), boolToInt(m.Answered), boolToInt(m.Flagged), boolToInt(m.Draft), boolToInt(m.Deleted), boolToInt(m.Junk),
 		int(m.Importance), m.RetentionPolicyID, m.UpdatedAt, m.ID)
@@ -504,7 +547,7 @@ func (r *MessageSQLRepo) UpdateFlags(ctx context.Context, id uint, seen, answere
 		defer writeMu.Unlock()
 	}
 	_, err := retrySQL(ctx, func() (sql.Result, error) {
-		return e.ExecContext(ctx, "UPDATE coremail_messages SET "+strings.Join(sets, ",")+" WHERE id = ? AND purged_at IS NULL", args...)
+		return e.ExecContext(ctx, r.qf("UPDATE coremail_messages SET "+strings.Join(sets, ",")+" WHERE id = ? AND purged_at IS NULL"), args...)
 	})
 	return err
 }
@@ -512,35 +555,35 @@ func (r *MessageSQLRepo) UpdateFlags(ctx context.Context, id uint, seen, answere
 func (r *MessageSQLRepo) Move(ctx context.Context, id uint, newFolderID uint, tx interface{}) error {
 	now := nowFn()
 	e := r.exec(tx)
-	_, err := e.ExecContext(ctx, "UPDATE coremail_messages SET folder_id=?, updated_at=? WHERE id = ? AND purged_at IS NULL", newFolderID, now, id)
+	_, err := e.ExecContext(ctx, r.qf("UPDATE coremail_messages SET folder_id=?, updated_at=? WHERE id = ? AND purged_at IS NULL"), newFolderID, now, id)
 	return err
 }
 
 func (r *MessageSQLRepo) Delete(ctx context.Context, id uint, tx interface{}) error {
 	now := nowFn()
 	e := r.exec(tx)
-	_, err := e.ExecContext(ctx, "UPDATE coremail_messages SET deleted=1, updated_at=? WHERE id = ? AND purged_at IS NULL", now, id)
+	_, err := e.ExecContext(ctx, r.qf("UPDATE coremail_messages SET deleted=1, updated_at=? WHERE id = ? AND purged_at IS NULL"), now, id)
 	return err
 }
 
 func (r *MessageSQLRepo) Purge(ctx context.Context, id uint, tx interface{}) error {
 	now := nowFn()
 	e := r.exec(tx)
-	_, err := e.ExecContext(ctx, "UPDATE coremail_messages SET purged_at=? WHERE id = ? AND purged_at IS NULL", now, id)
+	_, err := e.ExecContext(ctx, r.qf("UPDATE coremail_messages SET purged_at=? WHERE id = ? AND purged_at IS NULL"), now, id)
 	return err
 }
 
 func (r *MessageSQLRepo) Restore(ctx context.Context, id uint, tx interface{}) error {
 	now := nowFn()
 	e := r.exec(tx)
-	_, err := e.ExecContext(ctx, "UPDATE coremail_messages SET deleted=0, updated_at=? WHERE id = ? AND purged_at IS NULL", now, id)
+	_, err := e.ExecContext(ctx, r.qf("UPDATE coremail_messages SET deleted=0, updated_at=? WHERE id = ? AND purged_at IS NULL"), now, id)
 	return err
 }
 
 func (r *MessageSQLRepo) CountByMailbox(ctx context.Context, mailboxID uint, tx interface{}) (int64, error) {
 	e := r.exec(tx)
 	var count int64
-	err := e.QueryRowContext(ctx, "SELECT COUNT(*) FROM coremail_messages WHERE mailbox_id=? AND purged_at IS NULL", mailboxID).Scan(&count)
+	err := e.QueryRowContext(ctx, r.qf("SELECT COUNT(*) FROM coremail_messages WHERE mailbox_id=? AND purged_at IS NULL"), mailboxID).Scan(&count)
 	return count, err
 }
 
@@ -548,7 +591,7 @@ func (r *MessageSQLRepo) CountByFolder(ctx context.Context, folderID uint, tx in
 	e := r.exec(tx)
 	var count int64
 	_, err := retrySQL(ctx, func() (struct{}, error) {
-		return struct{}{}, e.QueryRowContext(ctx, "SELECT COUNT(*) FROM coremail_messages WHERE folder_id=? AND purged_at IS NULL", folderID).Scan(&count)
+		return struct{}{}, e.QueryRowContext(ctx, r.qf("SELECT COUNT(*) FROM coremail_messages WHERE folder_id=? AND purged_at IS NULL"), folderID).Scan(&count)
 	})
 	return count, err
 }
@@ -556,20 +599,23 @@ func (r *MessageSQLRepo) CountByFolder(ctx context.Context, folderID uint, tx in
 func (r *MessageSQLRepo) SumSizeByMailbox(ctx context.Context, mailboxID uint, tx interface{}) (int64, error) {
 	e := r.exec(tx)
 	var total sql.NullInt64
-	err := e.QueryRowContext(ctx, "SELECT SUM(size_bytes) FROM coremail_messages WHERE mailbox_id=? AND purged_at IS NULL", mailboxID).Scan(&total)
+	err := e.QueryRowContext(ctx, r.qf("SELECT SUM(size_bytes) FROM coremail_messages WHERE mailbox_id=? AND purged_at IS NULL"), mailboxID).Scan(&total)
 	if err != nil {
 		return 0, err
 	}
 	return total.Int64, nil
 }
 
+// scanMessage handles both dialects: SQLite stores the flag columns
+// as INTEGER 0/1 while PostgreSQL stores them as BOOLEAN. Scanning
+// through databaseBoolValue makes the same struct work for both.
 func scanMessage(row interface {
 	Scan(dest ...interface{}) error
 }) (*Message, error) {
 	var m Message
 	var threadID, internetMsgID, subject, fromAddr, toAddrs, ccAddrs, bccAddrs, replyTo *string
 	var messageDate, purgedAt *time.Time
-	var seen, answered, flagged, draft, deleted, junk int
+	var seen, answered, flagged, draft, deleted, junk interface{}
 	var importance int
 
 	err := row.Scan(&m.ID,
@@ -617,12 +663,12 @@ func scanMessage(row interface {
 		m.PurgedAt = purgedAt
 	}
 
-	m.Seen = intToBool(seen)
-	m.Answered = intToBool(answered)
-	m.Flagged = intToBool(flagged)
-	m.Draft = intToBool(draft)
-	m.Deleted = intToBool(deleted)
-	m.Junk = intToBool(junk)
+	m.Seen = databaseBoolValue(seen)
+	m.Answered = databaseBoolValue(answered)
+	m.Flagged = databaseBoolValue(flagged)
+	m.Draft = databaseBoolValue(draft)
+	m.Deleted = databaseBoolValue(deleted)
+	m.Junk = databaseBoolValue(junk)
 	m.Importance = Importance(importance)
 	return &m, nil
 }
@@ -639,6 +685,27 @@ func ComputeSHA256(path string) (string, error) {
 		return "", fmt.Errorf("compute sha256: %w", err)
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// databaseBoolValue converts a scanned flag column to bool. SQLite
+// returns INTEGER 0/1; PostgreSQL returns native bool.
+func databaseBoolValue(v interface{}) bool {
+	switch x := v.(type) {
+	case bool:
+		return x
+	case int64:
+		return x != 0
+	case int:
+		return x != 0
+	case []byte:
+		s := strings.ToLower(string(x))
+		return s == "1" || s == "true" || s == "t"
+	case string:
+		s := strings.ToLower(x)
+		return s == "1" || s == "true" || s == "t"
+	default:
+		return false
+	}
 }
 
 func retrySQL[T any](ctx context.Context, fn func() (T, error)) (T, error) {

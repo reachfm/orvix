@@ -6,7 +6,9 @@ import (
 	"database/sql"
 	"fmt"
 	"net"
+	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/orvix/orvix/internal/antivirus"
@@ -18,6 +20,7 @@ import (
 	"github.com/orvix/orvix/internal/coremail/rules"
 	"github.com/orvix/orvix/internal/coremail/spf"
 	"github.com/orvix/orvix/internal/coremail/storage"
+	"github.com/orvix/orvix/internal/dbdialect"
 	"github.com/orvix/orvix/internal/observability"
 	"github.com/orvix/orvix/internal/rulertypes"
 )
@@ -80,6 +83,70 @@ type Receiver struct {
 	// still decides reject / tag / quarantine, but
 	// quarantine rows are not durable).
 	DB *sql.DB
+
+	// dialect is detected lazily but ALWAYS before the acceptance
+	// transaction begins (a detection probe inside the transaction
+	// would deadlock a single-connection SQLite pool). It decides
+	// whether the canonical domain lock uses SELECT ... FOR UPDATE
+	// and how placeholders are rewritten.
+	dialect     *dbdialect.Info
+	dialectInit sync.Once
+
+	// TestHooks are deterministic synchronization and failure
+	// injection seams for the authoritative acceptance transaction.
+	// nil in production; every field must be nil-safe. Tests use
+	// channels and injected errors to force exact interleavings
+	// (no sleeps).
+	TestHooks *ReceiverTestHooks
+}
+
+// ReceiverTestHooks is the test-only synchronization contract of the
+// authoritative acceptance transaction (S-1/S-4). Production code
+// never sets it.
+type ReceiverTestHooks struct {
+	// BeforeDomainLockTx runs at the LAST pre-lock point: after the
+	// recipient plan is built and all file bytes are staged, and
+	// immediately before the acceptance transaction begins and the
+	// canonical domain rows are locked. A concurrent domain-disable
+	// committed here is observed by the lock query that follows.
+	// (The pause must precede BeginTx because on SQLite with
+	// _txlock=immediate BeginTx itself takes the write lock.)
+	BeforeDomainLockTx func()
+	// AfterDomainLockTx runs immediately after the canonical domain
+	// rows are locked AND re-validated under the lock (inside the
+	// transaction). A concurrent disable started here blocks on the
+	// held lock until the acceptance commits.
+	AfterDomainLockTx func()
+	// BeforeMessageInsert runs before the i-th message row insert
+	// (local recipients first, then the shared external row when
+	// one is created). A non-nil error aborts the whole acceptance.
+	BeforeMessageInsert func(recipientIndex int) error
+	// BeforeQueueInsert runs before the i-th queue row insert
+	// (local recipients first, then external recipients). A
+	// non-nil error aborts the whole acceptance.
+	BeforeQueueInsert func(recipientIndex int) error
+	// BeforeCommit runs immediately before tx.Commit with the live
+	// transaction. A test can roll the tx back here (or close the
+	// database on PostgreSQL) to force a deterministic commit
+	// failure.
+	BeforeCommit func(tx *sql.Tx)
+}
+
+// getDialect returns the receiver's cached dialect, detecting it on
+// first use. Callers MUST invoke this before BeginTx when running on
+// a single-connection SQLite pool.
+func (r *Receiver) getDialect() *dbdialect.Info {
+	r.dialectInit.Do(func() {
+		if r.Engine != nil && r.Engine.DB != nil {
+			if d, err := dbdialect.Detect(r.Engine.DB); err == nil {
+				r.dialect = d
+			}
+		}
+		if r.dialect == nil {
+			r.dialect = dbdialect.FromDriver("sqlite")
+		}
+	})
+	return r.dialect
 }
 
 // RuleEvaluator is the minimal interface any rule engine
@@ -341,27 +408,106 @@ func (r *Receiver) buildRecipientPlan(ctx context.Context, rcptAddrs []string) (
 	return plan, nil
 }
 
-// recheckCanonicalDomainsOperable is the authoritative pre-acceptance
-// recheck: every canonical domain recorded in the plan (presented
-// domains and resolved target owning domains) is re-read immediately
-// before the first durable write. A domain that has become
-// missing/soft-deleted/non-active since the plan build rejects the
-// whole message (fail closed); a repository failure rejects with an
-// error the server maps to a transient (4.x) failure. Checks are
-// deduplicated by domain name.
-func (r *Receiver) recheckCanonicalDomainsOperable(ctx context.Context, refs []canonicalDomainRef) error {
+// lockCanonicalDomainsTx is the authoritative pre-acceptance domain
+// lock and recheck: every canonical domain recorded in the plan is
+// locked and re-read INSIDE the acceptance transaction, and validated
+// under the lock (row exists; not soft-deleted; status active;
+// tenant/domain ownership still consistent with the canonical plan).
+//
+// Locking:
+//   - canonical domain IDs are deduplicated and locked in deterministic
+//     SORTED ascending ID order, so concurrent acceptances touching
+//     multiple domains acquire the same order and cannot deadlock;
+//   - on PostgreSQL the lock is SELECT ... FOR UPDATE, which makes the
+//     acceptance serialize against any concurrent domain disable /
+//     delete / re-own transaction: whichever commits first is
+//     authoritative and the loser observes a consistent post-state;
+//   - on SQLite there is no FOR UPDATE; serialization comes from the
+//     acceptance transaction itself (production SQLite opens with
+//     _txlock=immediate, so BeginTx already holds the write lock).
+//
+// Any validation failure returns an error that rejects the whole
+// message with zero durable effects (the caller rolls back); a
+// repository failure returns an error the server maps to a transient
+// (4.x) failure.
+func (r *Receiver) lockCanonicalDomainsTx(ctx context.Context, tx *sql.Tx, refs []canonicalDomainRef) error {
+	if len(refs) == 0 {
+		return nil
+	}
+
+	// Deterministic lock order: sorted unique domain IDs.
+	byID := make(map[uint]canonicalDomainRef, len(refs))
 	for _, ref := range refs {
-		d, err := r.Engine.Domains.GetByName(ctx, ref.Name, nil)
-		if err != nil {
-			return fmt.Errorf("recheck canonical domain %s: %w", ref.Name, err)
+		byID[ref.DomainID] = ref
+	}
+	ids := make([]uint, 0, len(byID))
+	for id := range byID {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+
+	placeholders := make([]string, len(ids))
+	args := make([]interface{}, len(ids))
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	q := "SELECT id, name, tenant_id, status, deleted_at FROM coremail_domains" +
+		" WHERE id IN (" + strings.Join(placeholders, ",") + ") ORDER BY id"
+	if r.getDialect().IsPostgres() {
+		q += " FOR UPDATE"
+	}
+
+	rows, err := tx.QueryContext(ctx, r.getDialect().Rewrite(q), args...)
+	if err != nil {
+		return fmt.Errorf("lock canonical domains: %w", err)
+	}
+	defer rows.Close()
+
+	locked := make(map[uint]struct {
+		name     string
+		tenantID uint
+		status   string
+		deleted  bool
+	}, len(ids))
+	for rows.Next() {
+		var id uint
+		var name string
+		var tenantID uint
+		var status string
+		var deletedAt sql.NullTime
+		if err := rows.Scan(&id, &name, &tenantID, &status, &deletedAt); err != nil {
+			return fmt.Errorf("scan locked canonical domain: %w", err)
 		}
-		if d == nil || d.DeletedAt != nil {
+		locked[id] = struct {
+			name     string
+			tenantID uint
+			status   string
+			deleted  bool
+		}{name: name, tenantID: tenantID, status: status, deleted: deletedAt.Valid}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate locked canonical domains: %w", err)
+	}
+
+	// Re-validate every canonical domain under its lock. Any
+	// mismatch fails closed with zero durable effects.
+	for _, id := range ids {
+		ref := byID[id]
+		got, ok := locked[id]
+		if !ok {
 			return fmt.Errorf("canonical domain unavailable: %s", ref.Name)
 		}
-		if d.Status != coremail.DomainActive {
+		if got.deleted {
+			return fmt.Errorf("canonical domain unavailable: %s", ref.Name)
+		}
+		if got.status != string(coremail.DomainActive) {
 			return fmt.Errorf("canonical domain not active: %s", ref.Name)
 		}
-		if d.ID != ref.DomainID || d.TenantID != ref.TenantID {
+		if got.tenantID != ref.TenantID {
+			return fmt.Errorf("canonical domain changed: %s", ref.Name)
+		}
+		if !strings.EqualFold(got.name, ref.Name) {
 			return fmt.Errorf("canonical domain changed: %s", ref.Name)
 		}
 	}
@@ -796,31 +942,45 @@ func (r *Receiver) AcceptMessage(ctx context.Context, session *Session) error {
 		return fmt.Errorf("no valid recipients")
 	}
 
-	// ── Authoritative pre-acceptance domain recheck ──
-	// The final domain-operability recheck runs HERE, immediately
-	// before the first durable write of the acceptance loop: every
-	// canonical domain recorded by the plan (presented domains AND
-	// resolved target owning domains) is re-read from the database
-	// and must still be operable. This closes the window between the
-	// plan build and the first StoreMessage/Enqueue — no recipient
-	// can be durably accepted if a required canonical domain became
-	// inoperable after RCPT (or during the plan build itself). The
-	// recheck is deduplicated by domain name (at most one query per
-	// distinct canonical domain) and performs no network I/O.
-	if err := r.recheckCanonicalDomainsOperable(ctx, plan.domains); err != nil {
-		return err
+	// ── Authoritative acceptance transaction (S-1) ──────────
+	// The complete acceptance — canonical domain locking, every
+	// message metadata insert, every recipient queue insert — now
+	// commits inside ONE database transaction, with the canonical
+	// domain rows locked (SELECT ... FOR UPDATE on PostgreSQL) for
+	// the duration. This replaces the historical per-recipient
+	// StoreMessage/Enqueue sequence, which could durably accept a
+	// message row without its queue rows, partially accept across
+	// multiple recipients, or accept after a canonical domain became
+	// inoperable.
+	//
+	// Order of operations:
+	//  1. File bytes are STAGED (written + fsynced + hashed) BEFORE
+	//     the transaction begins, so no long filesystem write or
+	//     hashing ever happens under a domain lock (S-2).
+	//  2. BeginTx on the shared database.
+	//  3. Lock every canonical domain in deterministic sorted ID
+	//     order and re-validate operability under the lock.
+	//  4. Insert every message row and every queue row on the SAME
+	//     *sql.Tx.
+	//  5. Publish staged files into their final paths (bounded
+	//     same-filesystem renames) — rows never reference missing
+	//     files.
+	//  6. Commit exactly once. Any failure rolls back the entire
+	//     acceptance and removes staged/published bytes.
+	//
+	// The rules runner runs ONLY AFTER the commit: no forwarding /
+	// vacation / copy side effect can ever land ahead of a failed
+	// or partial local accept.
+	if r.Engine == nil || r.Engine.DB == nil {
+		return fmt.Errorf("receiver engine unavailable")
 	}
+	// Dialect detection MUST run before BeginTx on a single-
+	// connection SQLite pool; it is cached by getDialect.
+	r.getDialect()
 
-	// Store the message at least once even if only external recipients.
-	var firstMessageID string
-	var senderTenantID uint
-	var senderDomainID uint
-	if session.AuthIdentity != nil {
-		senderTenantID = session.AuthIdentity.TenantID
-		senderDomainID = session.AuthIdentity.DomainID
-	}
-
-	// Store message in each local recipient's mailbox.
+	// Read-only pre-transaction lookups: INBOX folders and the
+	// sender attribution. No durable writes, no locks.
+	inboxByMailbox := make(map[uint]*storage.Folder, len(recipients))
 	for _, rcpt := range recipients {
 		inbox, err := r.MailStore.Folders.GetByPath(ctx, rcpt.MailboxID, "INBOX", nil)
 		if err != nil {
@@ -829,113 +989,213 @@ func (r *Receiver) AcceptMessage(ctx context.Context, session *Session) error {
 		if inbox == nil {
 			return fmt.Errorf("inbox not found for mailbox %d", rcpt.MailboxID)
 		}
+		inboxByMailbox[rcpt.MailboxID] = inbox
+	}
 
-		msg := &storage.Message{
+	var senderTenantID uint
+	var senderDomainID uint
+	if session.AuthIdentity != nil {
+		senderTenantID = session.AuthIdentity.TenantID
+		senderDomainID = session.AuthIdentity.DomainID
+	}
+
+	// Build the complete immutable message set: one row per local
+	// recipient; when there are no local recipients, one shared row
+	// for the external recipients (historical behavior: external
+	// queue entries reference the first local message row when one
+	// exists).
+	type acceptedMessage struct {
+		msg   *storage.Message
+		label string // recipient target for error context
+	}
+	var msgs []acceptedMessage
+	for _, rcpt := range recipients {
+		msgs = append(msgs, acceptedMessage{
+			label: rcpt.Target,
+			msg: &storage.Message{
+				MessageID:    storage.GenerateMessageID(),
+				TenantID:     rcpt.TenantID,
+				DomainID:     rcpt.DomainID,
+				MailboxID:    rcpt.MailboxID,
+				FolderID:     inboxByMailbox[rcpt.MailboxID].ID,
+				FromAddress:  session.MailFrom,
+				ToAddresses:  strings.Join(session.Recipients, ","),
+				Subject:      extractSubject(rfc822Data),
+				ReceivedDate: time.Now().UTC(),
+			},
+		})
+	}
+	var firstMessageID string
+	if len(msgs) > 0 {
+		firstMessageID = msgs[0].msg.MessageID
+	}
+	if len(msgs) == 0 && len(plan.external) > 0 {
+		extMsg := &storage.Message{
 			MessageID:    storage.GenerateMessageID(),
-			TenantID:     rcpt.TenantID,
-			DomainID:     rcpt.DomainID,
-			MailboxID:    rcpt.MailboxID,
-			FolderID:     inbox.ID,
+			TenantID:     senderTenantID,
+			DomainID:     senderDomainID,
 			FromAddress:  session.MailFrom,
-			ToAddresses:  strings.Join(session.Recipients, ","),
+			ToAddresses:  plan.external[0].Email,
 			Subject:      extractSubject(rfc822Data),
 			ReceivedDate: time.Now().UTC(),
 		}
-
-		if err := r.MailStore.StoreMessage(ctx, msg, rfc822Data, nil); err != nil {
-			return fmt.Errorf("store message for %s: %w", rcpt.Target, err)
+		if session.AuthIdentity != nil && session.AuthIdentity.MailboxID > 0 {
+			extMsg.MailboxID = session.AuthIdentity.MailboxID
 		}
-		if firstMessageID == "" {
-			firstMessageID = msg.MessageID
-		}
+		msgs = append(msgs, acceptedMessage{label: plan.external[0].Email, msg: extMsg})
+		firstMessageID = extMsg.MessageID
+	}
 
-		// Enqueue the LOCAL delivery BEFORE running the rules
-		// runner. The runner may emit forwarding / vacation
-		// side effects (queue entries of its own); those are
-		// allowed to land only once the original local copy
-		// is durably on the queue. If this local enqueue
-		// fails we MUST purge the stored row and return the
-		// error WITHOUT invoking the runner — otherwise a
-		// transient queue outage could leave the recipient
-		// with no local copy while auto-forwarded / vacation
-		// replies already went out to third parties.
-		qEntry := &queue.QueueEntry{
-			TenantID:        rcpt.TenantID,
-			DomainID:        rcpt.DomainID,
-			MailboxID:       &rcpt.MailboxID,
-			MessageID:       msg.MessageID,
-			FromAddress:     session.MailFrom,
-			ToAddress:       rcpt.Target,
-			RecipientDomain: rcpt.Domain,
-			Direction:       queue.DirectionInbound,
-			DeliveryMode:    queue.DeliveryLocal,
-			Status:          queue.StatusPending,
-		}
+	// Build every queue entry (local first, external after) against
+	// the message rows above.
+	type acceptedQueueEntry struct {
+		entry *queue.QueueEntry
+		label string
+	}
+	var queueEntries []acceptedQueueEntry
+	for i, rcpt := range recipients {
+		queueEntries = append(queueEntries, acceptedQueueEntry{
+			label: rcpt.Target,
+			entry: &queue.QueueEntry{
+				TenantID:        rcpt.TenantID,
+				DomainID:        rcpt.DomainID,
+				MailboxID:       &rcpt.MailboxID,
+				MessageID:       msgs[i].msg.MessageID,
+				FromAddress:     session.MailFrom,
+				ToAddress:       rcpt.Target,
+				RecipientDomain: rcpt.Domain,
+				Direction:       queue.DirectionInbound,
+				DeliveryMode:    queue.DeliveryLocal,
+				Status:          queue.StatusPending,
+			},
+		})
+	}
+	for _, ext := range plan.external {
+		queueEntries = append(queueEntries, acceptedQueueEntry{
+			label: ext.Email,
+			entry: &queue.QueueEntry{
+				TenantID:        senderTenantID,
+				DomainID:        senderDomainID,
+				MessageID:       firstMessageID,
+				FromAddress:     session.MailFrom,
+				ToAddress:       ext.Email,
+				RecipientDomain: ext.Domain,
+				Direction:       queue.DirectionOutbound,
+				DeliveryMode:    queue.DeliveryRemoteSMTP,
+				Status:          queue.StatusPending,
+			},
+		})
+	}
 
-		if err := r.QueueEngine.Enqueue(ctx, qEntry); err != nil {
-			// Local delivery failed. Purge the stored row
-			// so we do not leak an orphan message, then
-			// return the error WITHOUT invoking the rules
-			// runner — no forward / vacation / copy can
-			// leak ahead of a failed local accept.
-			purgeErr := r.MailStore.PurgeMessage(ctx, msg.ID, nil)
-			if purgeErr != nil {
-				return fmt.Errorf("enqueue for %s: %w (and purge failed: %v)", rcpt.Target, err, purgeErr)
+	// ── Staging (S-2): write + fsync + hash every message file
+	// BEFORE the transaction begins. The staged files are published
+	// into their final paths inside the transaction by bounded
+	// same-filesystem renames.
+	//
+	// The staging attempt key is a fresh crypto-random UUID per
+	// ACCEPTANCE (never the session id, which is time-derived and
+	// could collide between concurrent sessions on the same server,
+	// making one acceptance's cleanup delete another's staged files).
+	attemptKey := storage.GenerateMessageID()
+	staged := make([]*storage.StagedFile, 0, len(msgs))
+	for _, am := range msgs {
+		sf, err := r.MailStore.StageRFC822(attemptKey, am.msg, rfc822Data)
+		if err != nil {
+			r.MailStore.AbortStaged(attemptKey, nil)
+			return fmt.Errorf("stage message for %s: %w", am.label, err)
+		}
+		staged = append(staged, sf)
+	}
+
+	// Last pre-lock pause point (test hooks only; nil in production).
+	if h := r.TestHooks; h != nil && h.BeforeDomainLockTx != nil {
+		h.BeforeDomainLockTx()
+	}
+
+	tx, err := r.Engine.DB.BeginTx(ctx, nil)
+	if err != nil {
+		r.MailStore.AbortStaged(attemptKey, nil)
+		return fmt.Errorf("begin acceptance tx: %w", err)
+	}
+	var published []string
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+			r.MailStore.AbortStaged(attemptKey, published)
+		}
+	}()
+
+	// Authoritative domain lock + recheck under the lock.
+	if err := r.lockCanonicalDomainsTx(ctx, tx, plan.domains); err != nil {
+		return err
+	}
+
+	if h := r.TestHooks; h != nil && h.AfterDomainLockTx != nil {
+		h.AfterDomainLockTx()
+	}
+
+	// Every message metadata insert on the SAME tx.
+	for i, am := range msgs {
+		if h := r.TestHooks; h != nil && h.BeforeMessageInsert != nil {
+			if err := h.BeforeMessageInsert(i); err != nil {
+				return err
 			}
-			return fmt.Errorf("enqueue for %s: %w", rcpt.Target, err)
 		}
-
-		// Local delivery is now durably enqueued. Apply
-		// the rules runner for forwarding / vacation /
-		// move / copy / flag. The runner is best-effort:
-		// a panic / DB error inside the runner must not
-		// abort the SMTP accept because the original is
-		// already on the queue (and therefore the local
-		// inbox will be populated by the queue worker).
-		// applyRulesRunner's own defer-recover ensures
-		// that contract.
-		if r.RulesRunner != nil {
-			r.applyRulesRunner(ctx, rcpt, msg, rfc822Data)
+		if err := r.MailStore.Messages.Create(ctx, am.msg, tx); err != nil {
+			return fmt.Errorf("store message for %s: %w", am.label, err)
 		}
 	}
 
-	// ── External recipients (outbound relay) ────────────────
-	for _, ext := range plan.external {
-		msgID := firstMessageID
-		if msgID == "" {
-			msgID = storage.GenerateMessageID()
-			firstMessageID = msgID
-			extMsg := &storage.Message{
-				MessageID:    msgID,
-				TenantID:     senderTenantID,
-				DomainID:     senderDomainID,
-				FromAddress:  session.MailFrom,
-				ToAddresses:  ext.Email,
-				Subject:      extractSubject(rfc822Data),
-				ReceivedDate: time.Now().UTC(),
-			}
-			if session.AuthIdentity != nil && session.AuthIdentity.MailboxID > 0 {
-				extMsg.MailboxID = session.AuthIdentity.MailboxID
-			}
-			if err := r.MailStore.StoreMessage(ctx, extMsg, rfc822Data, nil); err != nil {
-				return fmt.Errorf("store message for external %s: %w", ext.Email, err)
+	// Every recipient queue insert on the SAME tx. If any recipient
+	// fails, the whole acceptance rolls back — no recipient can
+	// survive as a partial success.
+	for i, qe := range queueEntries {
+		if h := r.TestHooks; h != nil && h.BeforeQueueInsert != nil {
+			if err := h.BeforeQueueInsert(i); err != nil {
+				return err
 			}
 		}
-
-		qEntry := &queue.QueueEntry{
-			TenantID:        senderTenantID,
-			DomainID:        senderDomainID,
-			MessageID:       msgID,
-			FromAddress:     session.MailFrom,
-			ToAddress:       ext.Email,
-			RecipientDomain: ext.Domain,
-			Direction:       queue.DirectionOutbound,
-			DeliveryMode:    queue.DeliveryRemoteSMTP,
-			Status:          queue.StatusPending,
+		if err := r.QueueEngine.Repo.Enqueue(ctx, qe.entry, tx); err != nil {
+			return fmt.Errorf("enqueue for %s: %w", qe.label, err)
 		}
+	}
 
-		if err := r.QueueEngine.Enqueue(ctx, qEntry); err != nil {
-			return fmt.Errorf("enqueue external %s: %w", ext.Email, err)
+	// Publish staged files (bounded same-filesystem renames) BEFORE
+	// commit: at commit time every row references an existing file.
+	published, err = r.MailStore.PublishStaged(staged)
+	if err != nil {
+		return fmt.Errorf("publish staged message files: %w", err)
+	}
+
+	if h := r.TestHooks; h != nil && h.BeforeCommit != nil {
+		h.BeforeCommit(tx)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit acceptance tx: %w", err)
+	}
+	committed = true
+	// Staging directory is now empty (every file was renamed away);
+	// remove it so no empty attempt dirs accumulate.
+	r.MailStore.AbortStaged(attemptKey, nil)
+
+	// ── Post-commit side effects (never under the lock) ────────
+	// Best-effort attachment extraction, exactly as the historical
+	// path ran it after the durable StoreMessage commit.
+	for _, am := range msgs {
+		r.MailStore.ExtractAndStoreAttachments(ctx, am.msg.ID, rfc822Data)
+	}
+
+	// Rules runner: runs only now that the original local delivery
+	// is durably accepted (message rows + queue rows committed
+	// atomically). The runner is best-effort: a panic / DB error
+	// inside the runner must not abort the SMTP accept because the
+	// original is already on the queue. applyRulesRunner's own
+	// defer-recover ensures that contract.
+	for i, rcpt := range recipients {
+		if r.RulesRunner != nil {
+			r.applyRulesRunner(ctx, rcpt, msgs[i].msg, rfc822Data)
 		}
 	}
 

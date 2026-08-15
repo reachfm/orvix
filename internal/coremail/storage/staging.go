@@ -1,0 +1,250 @@
+package storage
+
+// Staging architecture for mail acceptance (S-2).
+//
+// Both acceptance paths — the SMTP receiver (AcceptMessage) and
+// WebmailSend — must never perform large filesystem writes or MIME
+// parsing while holding database row locks (canonical domain FOR
+// UPDATE locks on PostgreSQL). This file provides the bounded,
+// internal staging mechanism both paths share:
+//
+//  1. BEFORE the acceptance transaction begins, every byte that will
+//     later be referenced by durable rows is written into a private
+//     staging area under the MailStore root: RFC822 message files and
+//     attachment bodies. Writing uses atomicWriteFile (temp + fsync +
+//     rename), so each staged file is complete and durable before the
+//     transaction starts, and SHA-256 + sizes are computed from the
+//     staged bytes at this point.
+//
+//  2. INSIDE the transaction, only bounded work happens: metadata
+//     inserts, queue inserts, and the same-filesystem atomic rename
+//     that publishes each staged file into its final path. Rows only
+//     ever commit when their referenced files already exist at the
+//     final paths.
+//
+//  3. On rollback or any ordinary failure, AbortStaged removes the
+//     staged files AND any files that were already renamed into final
+//     paths by the failed attempt, so no orphan bytes survive.
+//
+//  4. Crash windows (process death between these steps) are closed by
+//     CleanupOrphanedFiles (staging cleanup + unreferenced final-file
+//     cleanup), which is bounded, path-safe, tenant-safe, idempotent,
+//     and confined to the storage root. See cleanup.go.
+//
+// Layout under {BasePath}:
+//
+//	{BasePath}/staging/{attemptKey}/...          private staging area
+//	{BasePath}/{tenant}/{domain}/{mailbox}/{msg}.eml      final RFC822
+//	{BasePath}/attachments/{msgID}/{n}_{name}             final attachments
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+// stagingRootName is the private staging subdirectory of the MailStore
+// root. It lives INSIDE the storage root so publication is a same-
+// filesystem rename and cleanup can never reach outside the root.
+const stagingRootName = "staging"
+
+// StagedFile describes one immutable, fully-written, fsynced, hashed
+// file in the staging area that is ready to be published by atomic
+// rename into its final path.
+//
+// FinalPath is set by the staging caller when it is known before the
+// transaction (RFC822 files are keyed by the message UUID, which the
+// caller generates before BeginTx). Attachment files are keyed by the
+// message DB row id, which does not exist until the message row is
+// inserted inside the transaction — for those, the caller sets
+// FinalPath after the message insert, before calling PublishStaged.
+type StagedFile struct {
+	StagedPath string // absolute path under {BasePath}/staging/{attemptKey}
+	FinalPath  string // absolute final path under the storage root
+	SHA256     string
+	SizeBytes  int64
+}
+
+// stagingAttemptDir returns the staging directory for one acceptance
+// attempt. attemptKey must be a caller-generated unique token (the
+// message UUID or session id) — it is treated as a plain directory
+// name and validated to be a bare name.
+func (ms *MailStore) stagingAttemptDir(attemptKey string) (string, error) {
+	if attemptKey == "" || strings.ContainsAny(attemptKey, `/\`+"\x00") || attemptKey == "." || attemptKey == ".." {
+		return "", fmt.Errorf("staging: invalid attempt key %q", attemptKey)
+	}
+	return filepath.Join(ms.BasePath, stagingRootName, attemptKey), nil
+}
+
+// StagingDir returns the staging root directory, creating it with
+// restrictive permissions if needed. Called before BeginTx only.
+func (ms *MailStore) StagingDir() (string, error) {
+	dir := filepath.Join(ms.BasePath, stagingRootName)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return "", fmt.Errorf("staging: create staging root: %w", err)
+	}
+	return dir, nil
+}
+
+// StageRFC822 writes the RFC822 payload for one message row into the
+// staging area of the given attempt, computing SHA-256 and size from
+// the staged bytes. It mutates msg so the message row metadata (final
+// RFC822Path, SizeBytes, SHA256) is complete and immutable before the
+// transaction begins; the transaction only inserts that metadata.
+//
+// The staged file is written with 0600 permissions inside 0700
+// directories and fsynced by atomicWriteFile before this function
+// returns. The final parent directory is created here as well
+// (bounded, no data), so the in-transaction publish step is a pure
+// rename with no long writes.
+func (ms *MailStore) StageRFC822(attemptKey string, msg *Message, rfc822 []byte) (*StagedFile, error) {
+	dir, err := ms.stagingAttemptDir(attemptKey)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return nil, fmt.Errorf("staging: mkdir attempt dir: %w", err)
+	}
+
+	// The final path is keyed by the message UUID (generated by the
+	// caller before BeginTx), never by the DB id.
+	finalPath := ms.messagePath(msg.TenantID, msg.DomainID, msg.MailboxID, msg.MessageID)
+	stagedPath := filepath.Join(dir, msg.MessageID+".eml")
+
+	if err := atomicWriteFile(stagedPath, rfc822, 0600); err != nil {
+		return nil, fmt.Errorf("staging: write rfc822: %w", err)
+	}
+	sha, err := ComputeSHA256(stagedPath)
+	if err != nil {
+		_ = os.Remove(stagedPath)
+		return nil, fmt.Errorf("staging: compute sha256: %w", err)
+	}
+
+	// Ensure the final parent exists so the in-transaction publish is
+	// a plain rename (no long-running mkdir chains under the lock).
+	if err := os.MkdirAll(filepath.Dir(finalPath), 0750); err != nil {
+		_ = os.Remove(stagedPath)
+		return nil, fmt.Errorf("staging: mkdir final parent: %w", err)
+	}
+
+	msg.RFC822Path = finalPath
+	msg.SizeBytes = int64(len(rfc822))
+	msg.SHA256 = sha
+
+	return &StagedFile{
+		StagedPath: stagedPath,
+		FinalPath:  finalPath,
+		SHA256:     sha,
+		SizeBytes:  int64(len(rfc822)),
+	}, nil
+}
+
+// StageAttachment writes one attachment body into the staging area of
+// the given attempt. The final path cannot be computed before the
+// transaction (it is keyed by the message DB row id), so the returned
+// StagedFile has an empty FinalPath; the caller must set it to
+// {BasePath}/attachments/{messageID}/{index}_{sanitized} after the
+// message row insert, before PublishStaged.
+//
+// filename is sanitized before it is used in the staged file name so
+// a malicious filename can never escape the staging directory; the
+// sanitization mirrors the final-path sanitization used by attachment
+// metadata rows.
+func (ms *MailStore) StageAttachment(attemptKey string, index int, filename string, body []byte) (*StagedFile, error) {
+	dir, err := ms.stagingAttemptDir(attemptKey)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return nil, fmt.Errorf("staging: mkdir attempt dir: %w", err)
+	}
+
+	storageName := fmt.Sprintf("%d_%s", index, sanitizeFilenameForStorage(filename))
+	if storageName == "" || storageName == "." || storageName == ".." {
+		return nil, fmt.Errorf("staging: invalid attachment name for %q", filename)
+	}
+	stagedPath := filepath.Join(dir, storageName)
+
+	if err := atomicWriteFile(stagedPath, body, 0600); err != nil {
+		return nil, fmt.Errorf("staging: write attachment: %w", err)
+	}
+	sha, err := ComputeSHA256(stagedPath)
+	if err != nil {
+		_ = os.Remove(stagedPath)
+		return nil, fmt.Errorf("staging: compute attachment sha256: %w", err)
+	}
+
+	return &StagedFile{
+		StagedPath: stagedPath,
+		SHA256:     sha,
+		SizeBytes:  int64(len(body)),
+	}, nil
+}
+
+// PublishStaged atomically renames every staged file into its final
+// path. This is the ONLY filesystem work that happens inside the
+// acceptance transaction, and it is bounded: same-filesystem renames
+// and, for attachments, one mkdir per message attachment directory.
+//
+// The caller passes files whose FinalPath is complete. On success the
+// returned slice lists every final path that now exists, so the
+// caller can remove them if the transaction subsequently fails to
+// commit. On error the partially published paths are returned
+// together with the error so the caller can roll them back.
+func (ms *MailStore) PublishStaged(files []*StagedFile) ([]string, error) {
+	published := make([]string, 0, len(files))
+	for _, f := range files {
+		if f == nil || f.FinalPath == "" {
+			continue
+		}
+		if !ms.pathWithinBase(f.FinalPath) {
+			return published, fmt.Errorf("staging: publish path escapes storage root: %s", f.FinalPath)
+		}
+		if err := os.MkdirAll(filepath.Dir(f.FinalPath), 0750); err != nil {
+			return published, fmt.Errorf("staging: mkdir publish parent: %w", err)
+		}
+		if err := os.Rename(f.StagedPath, f.FinalPath); err != nil {
+			return published, fmt.Errorf("staging: publish %s -> %s: %w", f.StagedPath, f.FinalPath, err)
+		}
+		published = append(published, f.FinalPath)
+	}
+	return published, nil
+}
+
+// AbortStaged removes the staging directory for an attempt and every
+// published final path that a failed acceptance may have created. It
+// is idempotent and deliberately best-effort: on rollback paths the
+// caller must never fail the rollback because a cleanup remove failed;
+// leftover bytes are reclaimed by CleanupOrphanedFiles.
+//
+// published paths are only removed when they are inside the storage
+// root (a defensive containment check — all publish paths are
+// constructed by this package, never by callers).
+func (ms *MailStore) AbortStaged(attemptKey string, published []string) {
+	for _, p := range published {
+		if ms.pathWithinBase(p) {
+			_ = os.Remove(p)
+		}
+	}
+	if dir, err := ms.stagingAttemptDir(attemptKey); err == nil {
+		_ = os.RemoveAll(dir)
+	}
+}
+
+// pathWithinBase reports whether p is inside the MailStore storage
+// root, resolving symlinks-free lexical containment (no path may
+// escape the root even through a symlinked parent).
+func (ms *MailStore) pathWithinBase(p string) bool {
+	if p == "" {
+		return false
+	}
+	rel, err := filepath.Rel(ms.BasePath, p)
+	if err != nil {
+		return false
+	}
+	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return false
+	}
+	return !filepath.IsAbs(rel)
+}

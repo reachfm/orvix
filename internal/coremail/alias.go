@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/orvix/orvix/internal/dbdialect"
 )
 
 // Alias represents an email alias that forwards to one or more destinations.
@@ -46,11 +48,39 @@ var _ AliasRepository = (*AliasSQLRepo)(nil)
 
 // AliasSQLRepo implements AliasRepository using database/sql.
 type AliasSQLRepo struct {
-	db *sql.DB
+	db      *sql.DB
+	dialect *dbdialect.Info
 }
 
+// NewAliasSQLRepo constructs the repository and detects the SQL
+// dialect EAGERLY — never lazily inside a transaction (a probe on a
+// single-connection SQLite pool would deadlock). NewEngine always
+// runs before any transaction.
 func NewAliasSQLRepo(db *sql.DB) *AliasSQLRepo {
-	return &AliasSQLRepo{db: db}
+	dialect, err := dbdialect.Detect(db)
+	if err != nil {
+		dialect = dbdialect.FromDriver("sqlite")
+	}
+	return &AliasSQLRepo{db: db, dialect: dialect}
+}
+
+// getDialect returns the dialect detected at construction time.
+func (r *AliasSQLRepo) getDialect() *dbdialect.Info {
+	return r.dialect
+}
+
+// qf rewrites ? placeholders to $N for PostgreSQL (no-op on SQLite).
+func (r *AliasSQLRepo) qf(sql string) string {
+	return r.getDialect().Rewrite(sql)
+}
+
+// boolValue converts a bool into the dialect's column literal:
+// INTEGER 0/1 on SQLite, native bool on PostgreSQL.
+func (r *AliasSQLRepo) boolValue(b bool) interface{} {
+	if r.getDialect().IsPostgres() {
+		return b
+	}
+	return boolToInt(b)
 }
 
 func (r *AliasSQLRepo) execer(tx interface{}) interface {
@@ -71,11 +101,21 @@ func (r *AliasSQLRepo) Create(ctx context.Context, a *Alias, tx interface{}) err
 	a.CreatedAt = now
 	a.UpdatedAt = now
 	e := r.execer(tx)
-	res, err := e.ExecContext(ctx, `
+	insert := `
 		INSERT INTO coremail_aliases (domain_id, tenant_id, from_addr, to_addr, active, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		a.DomainID, a.TenantID, a.FromAddr, a.ToAddr, boolToInt(a.Active), a.CreatedAt, a.UpdatedAt,
-	)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`
+	args := []interface{}{
+		a.DomainID, a.TenantID, a.FromAddr, a.ToAddr, r.boolValue(a.Active), a.CreatedAt, a.UpdatedAt,
+	}
+	if r.getDialect().IsPostgres() {
+		var id uint
+		if err := e.QueryRowContext(ctx, r.qf(insert)+" RETURNING id", args...).Scan(&id); err != nil {
+			return fmt.Errorf("create alias: %w", err)
+		}
+		a.ID = id
+		return nil
+	}
+	res, err := e.ExecContext(ctx, insert, args...)
 	if err != nil {
 		return fmt.Errorf("create alias: %w", err)
 	}
@@ -89,19 +129,23 @@ func (r *AliasSQLRepo) Create(ctx context.Context, a *Alias, tx interface{}) err
 
 func (r *AliasSQLRepo) GetByID(ctx context.Context, id uint, tx interface{}) (*Alias, error) {
 	e := r.execer(tx)
-	row := e.QueryRowContext(ctx, `SELECT id, domain_id, tenant_id, from_addr, to_addr, active, created_at, updated_at, deleted_at FROM coremail_aliases WHERE id=? AND deleted_at IS NULL`, id)
+	row := e.QueryRowContext(ctx, r.qf(`SELECT id, domain_id, tenant_id, from_addr, to_addr, active, created_at, updated_at, deleted_at FROM coremail_aliases WHERE id=? AND deleted_at IS NULL`), id)
 	return scanAlias(row)
 }
 
 func (r *AliasSQLRepo) GetByFromAddr(ctx context.Context, fromAddr string, tx interface{}) (*Alias, error) {
 	e := r.execer(tx)
-	row := e.QueryRowContext(ctx, `SELECT id, domain_id, tenant_id, from_addr, to_addr, active, created_at, updated_at, deleted_at FROM coremail_aliases WHERE from_addr=? AND active=1 AND deleted_at IS NULL`, fromAddr)
+	q := `SELECT id, domain_id, tenant_id, from_addr, to_addr, active, created_at, updated_at, deleted_at FROM coremail_aliases WHERE from_addr=? AND active=1 AND deleted_at IS NULL`
+	if r.getDialect().IsPostgres() {
+		q = `SELECT id, domain_id, tenant_id, from_addr, to_addr, active, created_at, updated_at, deleted_at FROM coremail_aliases WHERE from_addr=? AND active=TRUE AND deleted_at IS NULL`
+	}
+	row := e.QueryRowContext(ctx, r.qf(q), fromAddr)
 	return scanAlias(row)
 }
 
 func (r *AliasSQLRepo) ListByDomain(ctx context.Context, domainID uint, tx interface{}) ([]Alias, error) {
 	e := r.execer(tx)
-	rows, err := e.QueryContext(ctx, `SELECT id, domain_id, tenant_id, from_addr, to_addr, active, created_at, updated_at, deleted_at FROM coremail_aliases WHERE domain_id=? AND deleted_at IS NULL ORDER BY from_addr`, domainID)
+	rows, err := e.QueryContext(ctx, r.qf(`SELECT id, domain_id, tenant_id, from_addr, to_addr, active, created_at, updated_at, deleted_at FROM coremail_aliases WHERE domain_id=? AND deleted_at IS NULL ORDER BY from_addr`), domainID)
 	if err != nil {
 		return nil, err
 	}
@@ -139,9 +183,9 @@ func (r *AliasSQLRepo) List(ctx context.Context, filter AliasFilter, tx interfac
 	clause := strings.Join(where, " AND ")
 
 	var total int64
-	e.QueryRowContext(ctx, "SELECT COUNT(*) FROM coremail_aliases WHERE "+clause, args...).Scan(&total)
+	e.QueryRowContext(ctx, r.qf("SELECT COUNT(*) FROM coremail_aliases WHERE "+clause), args...).Scan(&total)
 
-	rows, err := e.QueryContext(ctx, `SELECT id, domain_id, tenant_id, from_addr, to_addr, active, created_at, updated_at, deleted_at FROM coremail_aliases WHERE `+clause+` ORDER BY from_addr LIMIT ? OFFSET ?`,
+	rows, err := e.QueryContext(ctx, r.qf(`SELECT id, domain_id, tenant_id, from_addr, to_addr, active, created_at, updated_at, deleted_at FROM coremail_aliases WHERE `+clause+` ORDER BY from_addr LIMIT ? OFFSET ?`),
 		append(args, filter.Pagination.Limit, filter.Pagination.Offset)...,
 	)
 	if err != nil {
@@ -162,37 +206,39 @@ func (r *AliasSQLRepo) List(ctx context.Context, filter AliasFilter, tx interfac
 func (r *AliasSQLRepo) Update(ctx context.Context, a *Alias, tx interface{}) error {
 	a.UpdatedAt = time.Now().UTC()
 	e := r.execer(tx)
-	_, err := e.ExecContext(ctx, `UPDATE coremail_aliases SET to_addr=?, active=?, updated_at=? WHERE id=? AND deleted_at IS NULL`,
-		a.ToAddr, boolToInt(a.Active), a.UpdatedAt, a.ID)
+	_, err := e.ExecContext(ctx, r.qf(`UPDATE coremail_aliases SET to_addr=?, active=?, updated_at=? WHERE id=? AND deleted_at IS NULL`),
+		a.ToAddr, r.boolValue(a.Active), a.UpdatedAt, a.ID)
 	return err
 }
 
 func (r *AliasSQLRepo) Delete(ctx context.Context, id uint, tx interface{}) error {
 	now := time.Now().UTC()
 	e := r.execer(tx)
-	_, err := e.ExecContext(ctx, "UPDATE coremail_aliases SET deleted_at=? WHERE id=?", now, id)
+	_, err := e.ExecContext(ctx, r.qf("UPDATE coremail_aliases SET deleted_at=? WHERE id=?"), now, id)
 	return err
 }
 
 func (r *AliasSQLRepo) Exists(ctx context.Context, fromAddr string, tx interface{}) (bool, error) {
 	e := r.execer(tx)
 	var count int64
-	err := e.QueryRowContext(ctx, "SELECT COUNT(*) FROM coremail_aliases WHERE from_addr=? AND deleted_at IS NULL", fromAddr).Scan(&count)
+	err := e.QueryRowContext(ctx, r.qf("SELECT COUNT(*) FROM coremail_aliases WHERE from_addr=? AND deleted_at IS NULL"), fromAddr).Scan(&count)
 	return count > 0, err
 }
 
 func (r *AliasSQLRepo) CountByDomain(ctx context.Context, domainID uint, tx interface{}) (int64, error) {
 	e := r.execer(tx)
 	var count int64
-	err := e.QueryRowContext(ctx, "SELECT COUNT(*) FROM coremail_aliases WHERE domain_id=? AND deleted_at IS NULL", domainID).Scan(&count)
+	err := e.QueryRowContext(ctx, r.qf("SELECT COUNT(*) FROM coremail_aliases WHERE domain_id=? AND deleted_at IS NULL"), domainID).Scan(&count)
 	return count, err
 }
 
+// scanAlias handles both dialects: SQLite stores the active column as
+// INTEGER 0/1, PostgreSQL as BOOLEAN — databaseBoolValue covers both.
 func scanAlias(row interface {
 	Scan(dest ...interface{}) error
 }) (*Alias, error) {
 	var a Alias
-	var active int
+	var active interface{}
 	err := row.Scan(&a.ID, &a.DomainID, &a.TenantID, &a.FromAddr, &a.ToAddr, &active, &a.CreatedAt, &a.UpdatedAt, &a.DeletedAt)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -200,6 +246,6 @@ func scanAlias(row interface {
 		}
 		return nil, fmt.Errorf("scan alias: %w", err)
 	}
-	a.Active = intToBool(active)
+	a.Active = databaseBoolValue(active)
 	return &a, nil
 }
