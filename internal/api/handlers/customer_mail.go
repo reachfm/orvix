@@ -79,6 +79,16 @@ func (h *Handler) CreateAlias(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "database unavailable"})
 	}
+	// NewDomainAdminRepo runs its own dialect-detection query against
+	// db directly — it MUST be constructed before the transaction
+	// below opens. This repo's underlying test pool caps at a single
+	// SQLite connection (matching _txlock=immediate); calling
+	// NewDomainAdminRepo(db) AFTER BeginTx would try to acquire a
+	// second connection while the open tx holds the only one,
+	// deadlocking forever (confirmed empirically — a request never
+	// completed until t.Fatal'd on the test timeout).
+	domainRepo := domain.NewDomainAdminRepo(db)
+
 	// The domain resolution, the alias-cap check and the insert run inside ONE
 	// transaction so the cap cannot be overshot by concurrent requests. The
 	// domain lookup is tenant-scoped, which also closes the pre-existing gap
@@ -90,14 +100,24 @@ func (h *Handler) CreateAlias(c fiber.Ctx) error {
 	}
 	defer tx.Rollback()
 
+	// Canonical domain operability guard (Phase 8 C2), run inside this
+	// same transaction with a FOR UPDATE lock on Postgres — the same
+	// pattern mailbox creation already used before C1 extracted it into
+	// internal/admin/domain/operability.go. This closes a pre-existing
+	// gap: alias creation checked deleted_at but never
+	// coremail_domains.status at all, so a disabled/suspended/locked
+	// domain could accept new aliases indefinitely.
+	opOut := domainRepo.WithTx(tx).CheckOperabilityByIDTx(c.Context(), req.DomainID, tenantID, true)
+	if !opOut.Operational() {
+		// A repository failure is a real, non-typed error here — that
+		// still routes through domainServiceError's default case
+		// (INTERNAL_ERROR), never silently treated as "not found" or
+		// "operational".
+		return domainServiceError(c, opOut.Err)
+	}
+
 	domainQuery := "SELECT max_aliases FROM coremail_domains WHERE id=" + h.dialect.Placeholder(1) +
 		" AND tenant_id=" + h.dialect.Placeholder(2) + " AND deleted_at IS NULL"
-	if h.dialect.IsPostgres() {
-		// Serializes concurrent alias creations on the same domain so two
-		// callers cannot both read the same pre-insert count. SQLite
-		// serializes writers at the transaction level and rejects the clause.
-		domainQuery += " FOR UPDATE"
-	}
 	var domainMaxAliases int
 	if err := tx.QueryRowContext(c.Context(), domainQuery, req.DomainID, tenantID).Scan(&domainMaxAliases); err != nil {
 		if err == sql.ErrNoRows {
