@@ -160,7 +160,7 @@ func (r *MessageSQLRepo) Create(ctx context.Context, m *Message, tx interface{})
 		m.CreatedAt, m.UpdatedAt, m.PurgedAt,
 	}
 	insert := `
-		INSERT INTO coremail_messages (`+messageCols+`)
+		INSERT INTO coremail_messages (` + messageCols + `)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	if r.getDialect().IsPostgres() {
 		var id uint

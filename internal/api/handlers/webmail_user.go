@@ -973,7 +973,7 @@ func (h *Handler) WebmailSend(c fiber.Ctx) error {
 		})
 	}
 
-	// ── Authoritative send-acceptance transaction ──
+	// ── Authoritative send-acceptance transaction (S-1/S-2) ──
 	// The domain operability recheck, the quota reservation, the
 	// durable Sent-folder message write, AND every recipient's queue
 	// row now commit inside ONE SQL transaction, with the domain row
@@ -984,19 +984,27 @@ func (h *Handler) WebmailSend(c fiber.Ctx) error {
 	//      this lock, so whichever commits first is authoritative and
 	//      the loser observes a consistent post-state;
 	//   2. between message/quota acceptance and queue enqueue — since
-	//      both durable Enqueue and StoreMessage(tx) now use the same
-	//      *sql.Tx, it is no longer possible for quota to be consumed
-	//      and a Sent-folder row to exist while zero queue rows exist
-	//      for any recipient (or vice versa). One recipient's enqueue
-	//      failure now rolls back the whole send atomically instead
-	//      of silently reporting partial success — a request either
-	//      fully succeeds (message + quota + every recipient's queue
-	//      row) or fully fails with zero durable effects.
+	//      both durable Enqueue and the message insert now use the
+	//      same *sql.Tx, it is no longer possible for quota to be
+	//      consumed and a Sent-folder row to exist while zero queue
+	//      rows exist for any recipient (or vice versa). One
+	//      recipient's enqueue failure now rolls back the whole send
+	//      atomically instead of silently reporting partial success —
+	//      a request either fully succeeds (message + quota + every
+	//      recipient's queue row) or fully fails with zero durable
+	//      effects.
 	//
-	// Attachment extraction, and any future outbound network I/O,
-	// deliberately still runs AFTER this transaction commits — see
-	// the tx-provided branch of StoreMessage for the deadlock reason
-	// attachments can't run inside it.
+	// S-2: ALL filesystem bytes (the RFC822 payload and every
+	// attachment body) are staged BEFORE this transaction begins —
+	// MIME parsing, size/count limit enforcement, hashing, and the
+	// large writes happen with NO database lock held. Inside the
+	// transaction only bounded work runs: the domain lock + recheck,
+	// quota reservation/finalization, metadata inserts (message,
+	// attachments, queue rows), and the same-filesystem atomic
+	// renames that publish the staged files into their final paths.
+	// The transaction never performs long writes or hashing, and at
+	// commit time every row references an existing file. Any failure
+	// rolls back the whole send and removes staged/published bytes.
 	sqlDB, dbErr := h.db.DB()
 	if dbErr != nil {
 		h.logger.Error("webmail send: database unavailable for acceptance transaction",
@@ -1012,8 +1020,81 @@ func (h *Handler) WebmailSend(c fiber.Ctx) error {
 	// uncommitted transaction is already holding the only connection.
 	domainRepo := domainpkg.NewDomainAdminRepo(sqlDB)
 
+	// ── Staging (S-2): parse MIME, enforce limits, write + fsync +
+	// hash every byte BEFORE the transaction begins. The staged
+	// files are published into their final paths inside the
+	// transaction by bounded same-filesystem renames.
+	attemptKey := messageID
+	var staged []*storage.StagedFile
+	stageRFC822, stageErr := ctx.MailboxStore.StageRFC822(attemptKey, msg, rfc822)
+	if stageErr != nil {
+		h.logger.Error("webmail send: staging rfc822 failed",
+			zap.String("message_id", messageID), zap.Error(stageErr))
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "unable to stage message",
+			"code":  "INTERNAL_ERROR",
+		})
+	}
+	staged = append(staged, stageRFC822)
+
+	// Attachment staging mirrors the historical extraction rules
+	// exactly: at most MaxAttachmentsPerMessage parts (default 20),
+	// parts larger than MaxAttachmentSizeMB are skipped (default
+	// 25 MB), filenames sanitized, content type taken from the
+	// server-side parser.
+	maxAttSize := int64(h.cfg.CoreMail.MaxAttachmentSizeMB) * 1024 * 1024
+	if maxAttSize <= 0 {
+		maxAttSize = 25 * 1024 * 1024
+	}
+	maxAttCount := h.cfg.CoreMail.MaxAttachmentsPerMessage
+	if maxAttCount <= 0 {
+		maxAttCount = 20
+	}
+	type stagedAttachment struct {
+		part   *coremailmime.Part
+		staged *storage.StagedFile
+	}
+	var stagedAttachments []stagedAttachment
+	if mimeParts, mErr := coremailmime.ExtractParts(rfc822); mErr == nil {
+		var attachParts []*coremailmime.Part
+		for _, p := range mimeParts {
+			if p.IsAttachment {
+				attachParts = append(attachParts, p)
+			}
+		}
+		if len(attachParts) > maxAttCount {
+			attachParts = attachParts[:maxAttCount]
+		}
+		for i, p := range attachParts {
+			if int64(p.Size) > maxAttSize {
+				continue
+			}
+			filename := p.Filename
+			if filename == "" {
+				filename = fmt.Sprintf("attachment_%d", i+1)
+			}
+			sf, sErr := ctx.MailboxStore.StageAttachment(attemptKey, i, filename, p.Body)
+			if sErr != nil {
+				ctx.MailboxStore.AbortStaged(attemptKey, nil)
+				h.logger.Error("webmail send: staging attachment failed",
+					zap.String("message_id", messageID), zap.Error(sErr))
+				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+					"error": "unable to stage attachment",
+					"code":  "INTERNAL_ERROR",
+				})
+			}
+			staged = append(staged, sf)
+			stagedAttachments = append(stagedAttachments, stagedAttachment{part: p, staged: sf})
+		}
+	}
+
+	if h.webmailSendHooks != nil && h.webmailSendHooks.AfterStage != nil {
+		h.webmailSendHooks.AfterStage(len(staged))
+	}
+
 	tx, err := sqlDB.BeginTx(c.Context(), nil)
 	if err != nil {
+		ctx.MailboxStore.AbortStaged(attemptKey, nil)
 		h.logger.Error("webmail send: begin acceptance transaction failed",
 			zap.String("message_id", messageID), zap.Error(err))
 		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
@@ -1021,10 +1102,12 @@ func (h *Handler) WebmailSend(c fiber.Ctx) error {
 			"code":  "INTERNAL_ERROR",
 		})
 	}
+	var published []string
 	committed := false
 	defer func() {
 		if !committed {
 			_ = tx.Rollback()
+			ctx.MailboxStore.AbortStaged(attemptKey, published)
 		}
 	}()
 
@@ -1047,31 +1130,57 @@ func (h *Handler) WebmailSend(c fiber.Ctx) error {
 		})
 	}
 
-	if err := ctx.MailboxStore.StoreMessage(c.Context(), msg, rfc822, tx); err != nil {
+	// Metadata-only message insert: the RFC822 bytes were already
+	// staged and hashed BEFORE the transaction; this insert only
+	// persists the metadata, and the file is published by rename
+	// before commit. No file I/O happens under the domain lock.
+	if err := ctx.MailboxStore.CreateMessageTx(c.Context(), msg, tx); err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": fmt.Sprintf("store message: %v", err),
 		})
 	}
 
-	// Attachment metadata is part of the SAME acceptance transaction as
-	// the Sent-message row and the recipient queue rows. The RFC822
-	// payload already contains the attachment bytes in memory, so this
-	// is a pure metadata/reference operation on the shared *sql.Tx — no
-	// separate staging subsystem. If extraction fails the whole send is
-	// rolled back: zero attachment metadata rows survive, and no
-	// committed message can ever exist with missing or inconsistent
-	// attachment references. (The tx-scoped method is used precisely
-	// because the post-commit best-effort path could leave a committed
-	// Sent message whose attachment metadata is missing or partial.)
-	if len(rfc822) > 0 {
-		if err := ctx.MailboxStore.ExtractAndStoreAttachmentsTx(c.Context(), msg.ID, rfc822, tx); err != nil {
-			h.logger.Error("webmail send: attachment metadata extraction failed, rolling back whole send",
-				zap.String("message_id", messageID),
-				zap.Error(err))
+	// Attachment metadata is part of the SAME acceptance transaction
+	// as the Sent-message row and the recipient queue rows. The
+	// bytes were staged pre-transaction; here only the metadata rows
+	// are inserted (final paths computed from the now-known message
+	// row id), and the staged files are published by rename before
+	// commit. If any insert fails the whole send rolls back: zero
+	// attachment metadata rows survive, and no committed message can
+	// ever exist with missing or inconsistent attachment references.
+	if len(stagedAttachments) > 0 {
+		existing, countErr := ctx.MailboxStore.Attachments.CountByMessage(c.Context(), msg.ID, tx)
+		if countErr != nil {
+			h.logger.Error("webmail send: attachment idempotency check failed",
+				zap.String("message_id", messageID), zap.Error(countErr))
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-				"error": "failed to store attachment metadata",
+				"error": "failed to verify attachment metadata",
 				"code":  "INTERNAL_ERROR",
 			})
+		}
+		if existing == 0 {
+			for i, sa := range stagedAttachments {
+				finalPath := ctx.MailboxStore.AttachmentFinalPath(msg.ID, i, sa.part.Filename)
+				sa.staged.FinalPath = finalPath
+				att := &storage.Attachment{
+					MessageID:   msg.ID,
+					Filename:    sa.part.Filename,
+					ContentType: sa.part.ContentType,
+					SizeBytes:   int64(sa.part.Size),
+					SHA256:      sa.staged.SHA256,
+					StoragePath: finalPath,
+					CID:         sa.part.ContentID,
+				}
+				if err := ctx.MailboxStore.Attachments.Create(c.Context(), att, tx); err != nil {
+					h.logger.Error("webmail send: attachment metadata insert failed, rolling back whole send",
+						zap.String("message_id", messageID),
+						zap.Error(err))
+					return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+						"error": "failed to store attachment metadata",
+						"code":  "INTERNAL_ERROR",
+					})
+				}
+			}
 		}
 	}
 
@@ -1097,6 +1206,22 @@ func (h *Handler) WebmailSend(c fiber.Ctx) error {
 		})
 	}
 
+	// Publish staged files (bounded same-filesystem renames) BEFORE
+	// commit: at commit time every row references an existing file.
+	published, err = ctx.MailboxStore.PublishStaged(staged)
+	if err != nil {
+		h.logger.Error("webmail send: publish staged files failed, rolling back whole send",
+			zap.String("message_id", messageID), zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "failed to publish message files",
+			"code":  "INTERNAL_ERROR",
+		})
+	}
+
+	if h.webmailSendHooks != nil && h.webmailSendHooks.BeforeCommit != nil {
+		h.webmailSendHooks.BeforeCommit(tx)
+	}
+
 	if err := tx.Commit(); err != nil {
 		h.logger.Error("webmail send: commit acceptance transaction failed",
 			zap.String("message_id", messageID), zap.Error(err))
@@ -1106,6 +1231,9 @@ func (h *Handler) WebmailSend(c fiber.Ctx) error {
 		})
 	}
 	committed = true
+	// The staging directory is empty now (every file was renamed
+	// away); remove it so no empty attempt dirs accumulate.
+	ctx.MailboxStore.AbortStaged(attemptKey, nil)
 
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{
 		"id":               msg.ID,
@@ -1116,6 +1244,20 @@ func (h *Handler) WebmailSend(c fiber.Ctx) error {
 		"remote_count":     len(entries) - len(deliveredLocal),
 		"local_recipients": deliveredLocal,
 	})
+}
+
+// webmailSendTestHooks are deterministic test-only synchronization
+// seams for WebmailSend's staged acceptance (S-2). nil in production.
+type webmailSendTestHooks struct {
+	// AfterStage runs after every byte is staged (RFC822 + all
+	// attachment bodies) and immediately before BeginTx. Tests use
+	// it to prove staging completed before the domain lock and to
+	// assert no rows exist yet.
+	AfterStage func(stagedFileCount int)
+	// BeforeCommit runs immediately before tx.Commit with the live
+	// transaction. A test can roll the tx back here to force a
+	// deterministic commit failure.
+	BeforeCommit func(tx *sql.Tx)
 }
 
 // webmailParseMultipartSend parses a multipart/form-data request

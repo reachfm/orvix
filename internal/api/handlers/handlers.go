@@ -111,6 +111,11 @@ type Handler struct {
 	// (Milestone 8), set via SetAttemptHistoryRepo.
 	historyRepo delivery.AttemptHistoryRepository
 
+	// webmailSendHooks are deterministic test-only synchronization
+	// seams for the WebmailSend staged acceptance (S-2). nil in
+	// production; every field must be nil-safe.
+	webmailSendHooks *webmailSendTestHooks
+
 	// incidentSvc is lazily initialized by h.incidentService().
 	incidentSvc *incident.Service
 	// supportAccessSvc is lazily initialized by h.supportAccessService().

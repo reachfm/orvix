@@ -187,6 +187,42 @@ func (m *Module) initCore(cfg *config.Config, sqlDB *sql.DB) error {
 	m.queue = queueEngine
 	m.obs = observability.NewObservability(1000, 5000)
 
+	// ── Mail acceptance orphan recovery (S-2) ──────────────────
+	// A process crash between the staging of mail bytes and the
+	// acceptance commit can leave unreferenced files inside the
+	// storage root (abandoned staging attempts and renamed-but-
+	// uncommitted final files). CleanupOrphanedFiles is bounded,
+	// path-safe, tenant-safe, and idempotent; it only removes files
+	// with no committed row reference and older than the grace
+	// period. At startup no acceptance transaction of this process
+	// is in flight, so the grace only needs to cover other processes
+	// sharing the storage root; 24h is deliberately conservative —
+	// orphan reclaim latency is far less important than never
+	// deleting a live message file.
+	if m.logger != nil {
+		m.logger.Info("coremail mailstore: running orphan file cleanup",
+			zap.String("path", cfg.CoreMail.MailStorePath))
+	}
+	cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	stats, cleanupErr := m.store.CleanupOrphanedFiles(cleanupCtx, time.Now().UTC().Add(-24*time.Hour))
+	cleanupCancel()
+	if cleanupErr != nil {
+		// Cleanup failure must NOT block startup: the acceptance
+		// paths are still safe (staging is per-attempt and bounded),
+		// and the operator can run the cleanup again at the next
+		// restart. Log it so the failure is observable.
+		if m.logger != nil {
+			m.logger.Warn("coremail mailstore: orphan file cleanup failed (startup continues)",
+				zap.Error(cleanupErr))
+		}
+	} else if m.logger != nil {
+		m.logger.Info("coremail mailstore: orphan file cleanup complete",
+			zap.Int("staging_entries", stats.StagingEntries),
+			zap.Int("orphan_files", stats.OrphanFiles),
+			zap.Int("orphan_dirs", stats.OrphanDirs),
+			zap.Int("referenced_files", stats.ReferencedFiles))
+	}
+
 	// Initialize licensing service (retained for SaaS quota enforcement).
 	// Local product-license files are retired; no license file is loaded.
 	m.licenseSvc = licensing.NewService("")

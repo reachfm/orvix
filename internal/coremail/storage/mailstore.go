@@ -177,6 +177,34 @@ func (ms *MailStore) StoreMessage(ctx context.Context, msg *Message, rfc822Data 
 	return nil
 }
 
+// CreateMessageTx inserts a message metadata row on the caller's
+// transaction WITHOUT touching the filesystem. It is the metadata-
+// only counterpart of StoreMessage for the staged acceptance flow
+// (S-2): the caller has already staged the RFC822 bytes via
+// StageRFC822 (which fills msg.RFC822Path / SizeBytes / SHA256) and
+// will publish them by rename before committing. No file is written
+// or hashed while the caller's transaction and domain locks are held.
+func (ms *MailStore) CreateMessageTx(ctx context.Context, msg *Message, tx *sql.Tx) error {
+	if msg == nil || tx == nil {
+		return fmt.Errorf("create message tx: nil message or tx")
+	}
+	if msg.RFC822Path == "" || msg.SHA256 == "" {
+		return fmt.Errorf("create message tx: staged metadata incomplete (path/sha256)")
+	}
+	return ms.Messages.Create(ctx, msg, tx)
+}
+
+// AttachmentFinalPath returns the final storage path for one
+// attachment of a message whose DB row id is known. The layout
+// matches the historical extraction path so existing attachments and
+// the purge logic stay compatible:
+// {BasePath}/attachments/{messageID}/{index}_{sanitized}.
+func (ms *MailStore) AttachmentFinalPath(messageID uint, index int, filename string) string {
+	return filepath.Join(ms.BasePath, "attachments",
+		fmt.Sprintf("%d", messageID),
+		fmt.Sprintf("%d_%s", index, sanitizeFilenameForStorage(filename)))
+}
+
 // LoadMessage reads a message's RFC822 content from disk.
 func (ms *MailStore) LoadMessage(ctx context.Context, id uint, tx interface{}) (*Message, []byte, error) {
 	msg, err := ms.Messages.GetByID(ctx, id, tx)
