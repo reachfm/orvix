@@ -250,6 +250,8 @@ are RBAC-permissioned, audited, and tenant-scoped in SQL.
 | `POST /platform/domains/:tenant_id` | platformMW | `CreatePlatformDomain` | transactional domain provisioning for an explicit tenant (canonical admin service; plan/limit enforcement, optional DKIM, DNS requirements via dnsops, outbox evidence; Idempotency-Key required) | Platform | `internal/platform/mailcontrol/service_test.go`, `internal/api/handlers/platform_provisioning.go` | MISSING_UI |
 | `POST /platform/domains/:tenant_id/:id/status` | platformMW | `SetPlatformDomainStatus` | allowed lifecycle transition, tenant-scoped, audited | Platform | `internal/platform/mailcontrol/service_test.go` | MISSING_UI |
 | `POST /platform/domains/:tenant_id/:id/mail-access-mode` | platformMW | `SetPlatformDomainMailAccessMode` | set canonical SMTP mail-access mode (`internal_only`/`internal_external`), audited | Platform | `internal/platform/mailcontrol/service_test.go` | MISSING_UI |
+| `POST /platform/domains/:tenant_id/:id/deactivate` | platformMW | `DeactivatePlatformDomain` | canonical domain deactivation/soft-delete lifecycle (`PermPlatformDomainsDeactivate`; typed confirmation, optimistic concurrency, dependency checks against active mailboxes/aliases/queued mail, never touches `deleted_at` or DKIM evidence; Idempotency-Key required) | Platform | `internal/api/handlers/platform_domain_lifecycle_acceptance_test.go` | MISSING_UI |
+| `POST /platform/users/:id/deactivate` | platformMW | `DeactivatePlatformUser` | canonical, audited deactivation of another platform-scoped user account (`PermPlatformUsersWrite`; blocks self-targeting, revokes sessions/API keys/MFA recovery codes/MFA challenges, bumps `token_version`; Idempotency-Key required) | Platform | `internal/api/handlers/platform_user_lifecycle_acceptance_test.go` | MISSING_UI |
 | `GET /platform/mailboxes/:tenant_id` | platformMW | `ListPlatformMailboxes` | paginated platform mailbox list for an explicit tenant/domain | Platform | `internal/platform/mailcontrol/service_test.go` | MISSING_UI |
 | `GET /platform/mailboxes/:tenant_id/:id` | platformMW | `GetPlatformMailbox` | mailbox detail with configured + effective mail-access mode, tenant-scoped | Platform | `internal/platform/mailcontrol/service_test.go` | MISSING_UI |
 | `POST /platform/mailboxes/:tenant_id` | platformMW | `CreatePlatformMailbox` | secure mailbox provisioning (REQUIRED explicit `mail_access_mode`, Argon2id via canonical hasher, in-transaction folder provisioning, audit/outbox; password never returned; Cache-Control: no-store; Idempotency-Key required) | Platform | `internal/platform/mailcontrol/service_test.go`, `internal/api/handlers/platform_provisioning.go` | MISSING_UI |
@@ -357,7 +359,7 @@ above (not carried over from an earlier draft) and is enforced equal
 to the router's actual route set by
 `internal/api/capability_matrix_test.go`, which parses
 `platformMW[0], platformMW[1]` registrations straight out of
-`router.go` — currently 210 — and parses every `` `METHOD /path` ``
+`router.go` — currently 212 — and parses every `` `METHOD /path` ``
 occurrence and its row's disposition straight out of this document.
 
 | Disposition | Routes |
@@ -367,9 +369,9 @@ occurrence and its row's disposition straight out of this document.
 | MACHINE_ONLY | 3 |
 | DEPRECATED | 12 |
 | DUPLICATE_SUPERSEDED_ROUTE | 18 |
-| MISSING_UI | 113 |
+| MISSING_UI | 115 |
 | MISSING_BACKEND | 0 (the one MISSING_BACKEND case — platform-initiated organization creation — is a non-route documented under Organizations, not counted here) |
-| **Total** | **210** |
+| **Total** | **212** |
 
 Three pre-existing MISSING_UI gaps were documented rather than
 silently omitted: `GET /admin/backups/:id` (single-backup fetch; the
