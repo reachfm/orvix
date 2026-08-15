@@ -886,27 +886,102 @@ func (h *Handler) WebmailSend(c fiber.Ctx) error {
 		Seen:              true,
 	}
 
-	// ── Authoritative send-acceptance transaction (Phase 8 C3A #2) ──
-	// The domain operability recheck, the quota reservation, and the
-	// durable Sent-folder message write all happen inside ONE SQL
-	// transaction, with the domain row locked (FOR UPDATE on
-	// PostgreSQL) for the duration. This closes the TOCTOU window
-	// between the early domain check above and this point: if a
-	// concurrent domain-disable transaction commits first, it holds
-	// the row lock until its own commit, and this recheck then sees
-	// the disabled status and rolls back with zero durable effects
-	// (no quota consumed, no Sent-folder row, no message on disk row
-	// committed). If this transaction's lock acquisition/recheck wins
-	// the race instead, the disable is forced to wait and then simply
-	// observes an already-active-turned-sent state consistently.
+	// The queue engine is a hard dependency, checked before the
+	// transaction starts: if it's unavailable we must not accept
+	// quota/Sent-message state with no way to ever enqueue delivery.
+	qe, ok := h.queueEngineForUser()
+	if !ok {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+			"error": "queue engine not available",
+			"code":  "QUEUE_ENGINE_UNAVAILABLE",
+		})
+	}
+
+	// Classify every recipient across To/Cc/Bcc and build its
+	// QueueEntry BEFORE the transaction — classification is a
+	// read-only lookup (same Domain + Mailbox lookups the SMTP
+	// receiver uses for inbound; there is no parallel "is-local"
+	// path) with no durable side effect, so it doesn't need to run
+	// under the domain lock. Delivery mode:
+	//   - Local recipient (configured local domain AND active
+	//     mailbox): DeliveryMode=local, the delivery worker copies
+	//     the message from the sender's Sent folder into the
+	//     recipient's INBOX. No MX lookup, no SMTP connection.
+	//   - Remote recipient: DeliveryMode=remote_smtp, the delivery
+	//     worker does MX + SMTP delivery with the existing
+	//     STARTTLS-aware transport.
+	mailboxID := ctx.Mailbox.ID
+	entries := make([]*queue.QueueEntry, 0, len(allRecipients))
+	deliveredLocal := make([]string, 0, len(allRecipients))
+	for _, addr := range allRecipients {
+		bare := addr.Address
+		domain := extractRecipientDomain(bare)
+
+		local, localMboxID, err := h.classifyLocalRecipient(
+			c.Context(),
+			ctx.Mailbox.TenantID,
+			bare,
+			domain,
+		)
+		if err != nil {
+			h.logger.Warn("webmail send: classify recipient failed, falling back to remote_smtp",
+				zap.String("to", bare),
+				zap.String("domain", domain),
+				zap.Error(err))
+			local = false
+		}
+
+		var deliveryMode queue.DeliveryMode
+		var entryMailboxID *uint
+		if local {
+			deliveryMode = queue.DeliveryLocal
+			idCopy := localMboxID
+			entryMailboxID = &idCopy
+			deliveredLocal = append(deliveredLocal, bare)
+		} else {
+			deliveryMode = queue.DeliveryRemoteSMTP
+			entryMailboxID = &mailboxID
+		}
+
+		entries = append(entries, &queue.QueueEntry{
+			TenantID:        ctx.Mailbox.TenantID,
+			DomainID:        ctx.Mailbox.DomainID,
+			MailboxID:       entryMailboxID,
+			MessageID:       messageID,
+			FromAddress:     ctx.Mailbox.Email,
+			ToAddress:       bare,
+			RecipientDomain: domain,
+			Direction:       queue.DirectionOutbound,
+			DeliveryMode:    deliveryMode,
+			Status:          queue.StatusPending,
+			Priority:        0,
+		})
+	}
+
+	// ── Authoritative send-acceptance transaction ──
+	// The domain operability recheck, the quota reservation, the
+	// durable Sent-folder message write, AND every recipient's queue
+	// row now commit inside ONE SQL transaction, with the domain row
+	// locked (FOR UPDATE on PostgreSQL) for the duration. This closes
+	// two TOCTOU/partial-state windows at once:
+	//   1. between the early domain check above and this point — a
+	//      concurrent domain-disable transaction serializes against
+	//      this lock, so whichever commits first is authoritative and
+	//      the loser observes a consistent post-state;
+	//   2. between message/quota acceptance and queue enqueue — since
+	//      both durable Enqueue and StoreMessage(tx) now use the same
+	//      *sql.Tx, it is no longer possible for quota to be consumed
+	//      and a Sent-folder row to exist while zero queue rows exist
+	//      for any recipient (or vice versa). One recipient's enqueue
+	//      failure now rolls back the whole send atomically instead
+	//      of silently reporting partial success — a request either
+	//      fully succeeds (message + quota + every recipient's queue
+	//      row) or fully fails with zero durable effects.
 	//
-	// Network I/O (queue enqueue, which may trigger local delivery
-	// but never blocks on remote SMTP here) deliberately happens
-	// AFTER this transaction commits, not inside it — enqueue is a
-	// separate durable step whose own pre-existing best-effort
-	// per-recipient semantics (partial enqueue failure is reported,
-	// not fatal to the whole send) are preserved unchanged.
-	var reservedSend *billing.SendReservationResult
+	// Attachment extraction, and any future outbound network I/O,
+	// deliberately still runs AFTER this transaction commits — see
+	// the tx-provided branch of StoreMessage for the deadlock reason
+	// attachments can't run inside it.
 	sqlDB, dbErr := h.db.DB()
 	if dbErr != nil {
 		h.logger.Error("webmail send: database unavailable for acceptance transaction",
@@ -956,11 +1031,32 @@ func (h *Handler) WebmailSend(c fiber.Ctx) error {
 			"error": "send rejected: " + result.Reason, "limit": result.Limit, "remaining": result.Remaining,
 		})
 	}
-	reservedSend = result
 
 	if err := ctx.MailboxStore.StoreMessage(c.Context(), msg, rfc822, tx); err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": fmt.Sprintf("store message: %v", err),
+		})
+	}
+
+	for _, entry := range entries {
+		if err := qe.Repo.Enqueue(c.Context(), entry, tx); err != nil {
+			h.logger.Error("webmail send: enqueue failed inside acceptance transaction, rolling back whole send",
+				zap.String("message_id", messageID),
+				zap.String("to", entry.ToAddress),
+				zap.Error(err))
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"error": "failed to accept send",
+				"code":  "INTERNAL_ERROR",
+			})
+		}
+	}
+
+	if err := h.sendEnforcer.FinalizeSendReservationTx(c.Context(), tx, id, messageID, len(entries)); err != nil {
+		h.logger.Error("webmail send quota reservation finalize failed",
+			zap.String("message_id", messageID), zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "failed to finalize send accounting",
+			"code":  "INTERNAL_ERROR",
 		})
 	}
 
@@ -981,153 +1077,13 @@ func (h *Handler) WebmailSend(c fiber.Ctx) error {
 		ctx.MailboxStore.ExtractAndStoreAttachments(c.Context(), msg.ID, rfc822)
 	}
 
-	// From here on the message is durable in the Sent
-	// folder. We must enqueue at least one recipient for
-	// the request to be considered successful — but if
-	// the queue engine is not available we surface the
-	// error to the operator instead of silently dropping
-	// the user's mail.
-	qe, ok := h.queueEngineForUser()
-	if !ok {
-		if reservedSend != nil {
-			id := billing.SendIdentity{TenantID: ctx.Mailbox.TenantID, MailboxID: ctx.Mailbox.ID}
-			if err := h.sendEnforcer.CancelSendReservation(c.Context(), id, messageID); err != nil {
-				h.logger.Error("webmail send quota reservation release failed",
-					zap.String("message_id", messageID),
-					zap.Error(err))
-			}
-		}
-		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
-			"error":      "queue engine not available",
-			"message_id": msg.MessageID,
-			"folder":     sentFolder.Path,
-			"status":     "stored",
-		})
-	}
-
-	// Collect every recipient across To/Cc/Bcc. Each one
-	// gets its own QueueEntry — same message_id, same
-	// FromAddress (the authenticated mailbox). The
-	// delivery mode is decided per-recipient:
-	//   - Local recipient (configured local domain AND
-	//     active mailbox): DeliveryMode=local, the
-	//     delivery worker copies the message from the
-	//     sender's Sent folder into the recipient's
-	//     INBOX. No MX lookup, no SMTP connection.
-	//   - Remote recipient: DeliveryMode=remote_smtp,
-	//     the delivery worker does MX + SMTP delivery
-	//     with the existing STARTTLS-aware transport.
-	// The classification runs on the same Domain +
-	// Mailbox lookups the SMTP receiver uses for
-	// inbound — there is no parallel "is-local" path.
-	mailboxID := ctx.Mailbox.ID
-	enqueueErrors := make([]string, 0, len(allRecipients))
-	queuedCount := 0
-	deliveredLocal := make([]string, 0, len(allRecipients))
-	for _, addr := range allRecipients {
-		bare := addr.Address
-		domain := extractRecipientDomain(bare)
-
-		local, localMboxID, err := h.classifyLocalRecipient(
-			c.Context(),
-			ctx.Mailbox.TenantID,
-			bare,
-			domain,
-		)
-		if err != nil {
-			h.logger.Warn("webmail send: classify recipient failed, falling back to remote_smtp",
-				zap.String("to", bare),
-				zap.String("domain", domain),
-				zap.Error(err))
-			local = false
-		}
-
-		var deliveryMode queue.DeliveryMode
-		var entryMailboxID *uint
-		if local {
-			deliveryMode = queue.DeliveryLocal
-			idCopy := localMboxID
-			entryMailboxID = &idCopy
-		} else {
-			deliveryMode = queue.DeliveryRemoteSMTP
-			entryMailboxID = &mailboxID
-		}
-
-		entry := &queue.QueueEntry{
-			TenantID:        ctx.Mailbox.TenantID,
-			DomainID:        ctx.Mailbox.DomainID,
-			MailboxID:       entryMailboxID,
-			MessageID:       messageID,
-			FromAddress:     ctx.Mailbox.Email,
-			ToAddress:       bare,
-			RecipientDomain: domain,
-			Direction:       queue.DirectionOutbound,
-			DeliveryMode:    deliveryMode,
-			Status:          queue.StatusPending,
-			Priority:        0,
-		}
-		if err := qe.Enqueue(c.Context(), entry); err != nil {
-			h.logger.Error("webmail send enqueue failed",
-				zap.String("message_id", messageID),
-				zap.String("to", bare),
-				zap.Error(err),
-			)
-			enqueueErrors = append(enqueueErrors, fmt.Sprintf("%s: %v", bare, err))
-			continue
-		}
-		queuedCount++
-		if local {
-			deliveredLocal = append(deliveredLocal, bare)
-		}
-	}
-
-	// Unified send event: records billing usage, abuse counters, metrics atomically.
-	// Must run even on partial enqueue to account for successfully enqueued recipients.
-	if h.sendEnforcer != nil && queuedCount > 0 {
-		id := billing.SendIdentity{TenantID: ctx.Mailbox.TenantID, MailboxID: ctx.Mailbox.ID}
-		if reservedSend != nil {
-			if err := h.sendEnforcer.FinalizeSendReservation(c.Context(), id, msg.MessageID, queuedCount); err != nil {
-				h.logger.Error("webmail send quota reservation finalize failed",
-					zap.String("message_id", msg.MessageID),
-					zap.Int("queued_count", queuedCount),
-					zap.Error(err))
-				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-					"error":      "failed to finalize send accounting",
-					"id":         msg.ID,
-					"message_id": msg.MessageID,
-					"folder":     sentFolder.Path,
-					"status":     "stored",
-				})
-			}
-		} else {
-			h.sendEnforcer.RecordSend(c.Context(), id, msg.MessageID, queuedCount)
-		}
-	} else if h.sendEnforcer != nil && reservedSend != nil {
-		id := billing.SendIdentity{TenantID: ctx.Mailbox.TenantID, MailboxID: ctx.Mailbox.ID}
-		if err := h.sendEnforcer.CancelSendReservation(c.Context(), id, msg.MessageID); err != nil {
-			h.logger.Error("webmail send empty quota reservation release failed",
-				zap.String("message_id", msg.MessageID),
-				zap.Error(err))
-		}
-	}
-
-	if len(enqueueErrors) > 0 {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error":      "failed to enqueue some recipients: " + strings.Join(enqueueErrors, "; "),
-			"id":         msg.ID,
-			"message_id": msg.MessageID,
-			"folder":     sentFolder.Path,
-			"status":     "stored",
-		})
-	}
-
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{
 		"id":               msg.ID,
 		"message_id":       msg.MessageID,
 		"status":           "queued",
-		"queued_count":     queuedCount,
+		"queued_count":     len(entries),
 		"local_count":      len(deliveredLocal),
-		"remote_count":     queuedCount - len(deliveredLocal),
+		"remote_count":     len(entries) - len(deliveredLocal),
 		"local_recipients": deliveredLocal,
 	})
 }
