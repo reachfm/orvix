@@ -1209,6 +1209,7 @@ async function sendComposeMessage(to, subject, bodyText) {
     setVal(bodyInput, ${JSON.stringify(bodyText)});
     const sendBtn = modal.querySelector('.modal-footer .btn.primary');
     if (!sendBtn) return { ok: false, reason: 'send button missing' };
+    const preClickDisabled = sendBtn.disabled;
     sendBtn.click();
     const deadline2 = Date.now() + 12000;
     let result = null;
@@ -1219,7 +1220,29 @@ async function sendComposeMessage(to, subject, bodyText) {
         if (toastError) { result = { ok: true, outcome: 'error', text: toastError.textContent }; break; }
         await new Promise(r => setTimeout(r, 100));
     }
-    if (!result) result = { ok: false, reason: 'no toast within 6s' };
+    if (!result) {
+        // Diagnostics: is the button still stuck in the "Sending..."
+        // disabled state (the async chain is stuck somewhere) or back
+        // to normal (the click never actually started anything)? Any
+        // toast at all, even one without the expected class? What did
+        // the mock actually receive for /send, if anything?
+        let mockState = null;
+        try { mockState = await fetch('/__test__/state').then(r => r.json()); } catch (e) { mockState = { fetchError: String(e) }; }
+        const anyToasts = Array.from(document.querySelectorAll('.toast')).map(t => ({ className: t.className, text: t.textContent }));
+        result = {
+            ok: false,
+            reason: 'no toast within 12s',
+            diagnostics: {
+                preClickDisabled,
+                postWaitDisabled: sendBtn.disabled,
+                sendBtnHTML: sendBtn.outerHTML.slice(0, 200),
+                anyToasts,
+                sendRequestsSeen: (mockState && mockState.requests || []).filter(r => r.path === '/api/v1/webmail/send'),
+                csrfRequestsSeen: (mockState && mockState.requests || []).filter(r => r.path === '/api/v1/csrf-token'),
+                totalRequestsLogged: (mockState && mockState.requests || []).length,
+            },
+        };
+    }
     // Close the modal (if a send succeeded it already removed itself;
     // on failure it stays open, so force it closed for the next phase).
     const dialog = document.querySelector('.modal[role="dialog"][aria-label="Compose message"]');
