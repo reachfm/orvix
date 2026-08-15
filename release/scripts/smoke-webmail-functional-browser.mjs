@@ -826,11 +826,19 @@ if (!compose || !compose.ok) {
 console.log(`PASS  phase 4 — compose modal opened (via ${compose.openedBy})`);
 
 // Close the compose modal so it does not cover the Settings panel
-// for the rest of the smoke.
+// for the rest of the smoke. The modal's own class is just "modal"
+// (there is no ".compose-modal" class anywhere in webmail.js) — the
+// previous selector here was always a no-op, silently leaving this
+// modal open in the DOM for the rest of the run. Scope to the
+// Compose dialog specifically via its aria-label, matching the real
+// close button (aria-label="Close", inside .modal-header).
 await evalExpr(`
 (function () {
-    const close = document.querySelector('.compose-modal [aria-label*="close" i], .compose-modal button.icon-btn');
+    const dialog = document.querySelector('.modal[role="dialog"][aria-label="Compose message"]');
+    const close = dialog && dialog.querySelector('button[aria-label="Close"]');
     if (close) close.click();
+    const backdrop = dialog && dialog.closest('.modal-backdrop');
+    if (backdrop) backdrop.remove();
 })()
 `, false);
 await sleep(300);
@@ -1168,12 +1176,20 @@ await sleep(100);
 async function sendComposeMessage(to, subject, bodyText) {
     return evalExpr(`
 (async () => {
+    // Clear any leftover toast from a prior phase first so a stale
+    // .toast.success/.error can never be mistaken for this action's
+    // result.
+    document.querySelectorAll('.toast').forEach(t => t.remove());
     const api = window.OrvixWebmail || window.orvixWebmail || null;
     if (api && typeof api.openCompose === 'function') api.openCompose();
     const deadline1 = Date.now() + 4000;
     let modal = null;
     while (Date.now() < deadline1) {
-        modal = document.querySelector('.modal[role="dialog"][aria-label="Compose message"]') || document.querySelector('.modal-footer .btn.primary')?.closest('.modal');
+        // Pick the LAST match, not the first: if a prior phase's
+        // compose modal somehow failed to close, this favors the
+        // freshly-opened one rather than a stale duplicate.
+        const dialogs = document.querySelectorAll('.modal[role="dialog"][aria-label="Compose message"]');
+        modal = dialogs.length ? dialogs[dialogs.length - 1] : null;
         if (modal) break;
         await new Promise(r => setTimeout(r, 100));
     }
@@ -1190,14 +1206,21 @@ async function sendComposeMessage(to, subject, bodyText) {
     if (!sendBtn) return { ok: false, reason: 'send button missing' };
     sendBtn.click();
     const deadline2 = Date.now() + 6000;
+    let result = null;
     while (Date.now() < deadline2) {
         const toastSuccess = document.querySelector('.toast.success');
         const toastError = document.querySelector('.toast.error');
-        if (toastSuccess) return { ok: true, outcome: 'success', text: toastSuccess.textContent };
-        if (toastError) return { ok: true, outcome: 'error', text: toastError.textContent };
+        if (toastSuccess) { result = { ok: true, outcome: 'success', text: toastSuccess.textContent }; break; }
+        if (toastError) { result = { ok: true, outcome: 'error', text: toastError.textContent }; break; }
         await new Promise(r => setTimeout(r, 100));
     }
-    return { ok: false, reason: 'no toast within 6s' };
+    if (!result) result = { ok: false, reason: 'no toast within 6s' };
+    // Close the modal (if a send succeeded it already removed itself;
+    // on failure it stays open, so force it closed for the next phase).
+    const dialog = document.querySelector('.modal[role="dialog"][aria-label="Compose message"]');
+    const backdrop = dialog && dialog.closest('.modal-backdrop');
+    if (backdrop) backdrop.remove();
+    return result;
 })()
 `, true);
 }
