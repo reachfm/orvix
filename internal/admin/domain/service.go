@@ -341,6 +341,16 @@ type Service struct {
 	dkimHistory *dkimSelectorHistoryRepo
 	tlsSvc      tlsStatusSource
 	webhooks    webhookPublisher
+	// dkimKeyGen is the injectable key-generation dependency (Phase 8
+	// C2 Part 1). Defaults to the real cryptographic generator
+	// (dkim.GenerateKeyPair) in NewService; SetDKIMKeyGenerator lets a
+	// test substitute a counting/failing stand-in to prove the domain
+	// operability guard refuses BEFORE any key material is generated
+	// — not merely that the call returns an error. No environment
+	// variable or build tag controls this; production always gets the
+	// real generator unless a caller explicitly overrides it, and only
+	// test code in this package ever does.
+	dkimKeyGen func(selector, domainName string) (privateKeyPEM string, dnsRecord string, err error)
 }
 
 type webhookPublisher interface {
@@ -353,13 +363,21 @@ func NewService(repo *DomainAdminRepo, dkimRepo dkim.Repository, auditStore *aud
 		hist = newDKIMSelectorHistoryRepo(repo.root)
 		_ = hist.ensureSchema(context.Background())
 	}
-	return &Service{repo: repo, dkimRepo: dkimRepo, auditStore: auditStore, rbac: rbac, dkimHistory: hist}
+	return &Service{repo: repo, dkimRepo: dkimRepo, auditStore: auditStore, rbac: rbac, dkimHistory: hist, dkimKeyGen: dkim.GenerateKeyPair}
 }
 
 // SetWebhookPublisher wires the transactional webhook event adapter. It is
 // optional for isolated service consumers, but production wiring supplies it
 // so supported mutations publish from the same transaction as their audit.
 func (s *Service) SetWebhookPublisher(p webhookPublisher) { s.webhooks = p }
+
+// SetDKIMKeyGenerator overrides the key-generation dependency. Test-only
+// in practice (only this package's tests ever call it); production
+// callers never need to, since NewService already wires the real
+// dkim.GenerateKeyPair.
+func (s *Service) SetDKIMKeyGenerator(gen func(selector, domainName string) (string, string, error)) {
+	s.dkimKeyGen = gen
+}
 
 // recordDKIMHistory is best-effort: a history-write failure must never
 // roll back or block the DKIM key operation that already committed —
@@ -724,7 +742,7 @@ func (s *Service) generateDKIMTx(ctx context.Context, tx *sql.Tx, repo *DomainAd
 		return nil, ErrDKIMAlreadyConfigured
 	}
 
-	privPEM, dnsValue, err := dkim.GenerateKeyPair(selector, domainName)
+	privPEM, dnsValue, err := s.dkimKeyGen(selector, domainName)
 	if err != nil {
 		return nil, fmt.Errorf("dkim keygen: %w", err)
 	}
@@ -799,7 +817,7 @@ func (s *Service) RotateDKIM(ctx context.Context, id, tenantID uint, selector st
 		return nil, ErrDKIMNotConfigured
 	}
 
-	privPEM, dnsValue, err := dkim.GenerateKeyPair(selector, d.Name)
+	privPEM, dnsValue, err := s.dkimKeyGen(selector, d.Name)
 	if err != nil {
 		return nil, fmt.Errorf("dkim keygen: %w", err)
 	}
@@ -932,7 +950,7 @@ func (s *Service) PlatformDKIM(ctx context.Context, domainName, selector, confir
 		return nil, ErrDKIMAlreadyConfigured
 	}
 
-	privPEM, dnsValue, err := dkim.GenerateKeyPair(selector, d.Name)
+	privPEM, dnsValue, err := s.dkimKeyGen(selector, d.Name)
 	if err != nil {
 		return nil, fmt.Errorf("dkim keygen: %w", err)
 	}
