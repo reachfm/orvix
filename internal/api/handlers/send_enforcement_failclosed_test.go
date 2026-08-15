@@ -25,10 +25,12 @@ import (
 
 // buildSendEnforcementHarness builds a real Handler wired with a MailStore,
 // QueueEngine and webmail service, provisioned with an admin user + mailbox,
-// and returns it plus the DB handles. The caller decides whether to wire a
+// and returns it plus the DB handles and the raw sqlite DSN (so tests can
+// open a wrapper connection over the same database file, e.g. to inject
+// deterministic query failures). The caller decides whether to wire a
 // send enforcer so both the fail-closed and normal paths can be exercised
 // through the real WebmailSend HTTP handler.
-func buildSendEnforcementHarness(t *testing.T, wireEnforcer bool) (*Handler, *gorm.DB, *sql.DB) {
+func buildSendEnforcementHarness(t *testing.T, wireEnforcer bool) (*Handler, *gorm.DB, *sql.DB, string) {
 	t.Helper()
 	logger := zap.NewNop()
 	scratchDir := t.TempDir()
@@ -42,7 +44,8 @@ func buildSendEnforcementHarness(t *testing.T, wireEnforcer bool) (*Handler, *go
 
 	cfg := config.Defaults()
 	cfg.Database.Driver = "sqlite"
-	cfg.Database.DSN = scratchDir + "/orvix.db?_loc=auto&_busy_timeout=5000&_txlock=immediate"
+	dsn := scratchDir + "/orvix.db?_loc=auto&_busy_timeout=5000&_txlock=immediate"
+	cfg.Database.DSN = dsn
 	cfg.Server.AdminUIDir = adminDir
 	cfg.CoreMail.MailStorePath = filepath.Join(scratchDir, "mailstore")
 	db, err := config.NewDatabase(&cfg.Database, logger)
@@ -116,7 +119,7 @@ func buildSendEnforcementHarness(t *testing.T, wireEnforcer bool) (*Handler, *go
 		t.Fatal(err)
 	}
 
-	return h, db, sqlDB
+	return h, db, sqlDB, dsn
 }
 
 func provisionSendAdmin(t *testing.T, sqlDB *sql.DB) {
@@ -159,7 +162,7 @@ func currentTimeForTest() time.Time { return time.Now().UTC() }
 // SEND_ENFORCEMENT_UNAVAILABLE and does NOT enqueue anything. This is the
 // fail-closed guarantee: outbound send must never bypass quota enforcement.
 func TestWebmailSendFailsClosedWhenEnforcerUnavailable(t *testing.T) {
-	h, db, sqlDB := buildSendEnforcementHarness(t, false)
+	h, db, sqlDB, _ := buildSendEnforcementHarness(t, false)
 	t.Cleanup(func() {
 		sqlDB.Close()
 		if s, err := db.DB(); err == nil {
@@ -203,7 +206,7 @@ func TestWebmailSendFailsClosedWhenEnforcerUnavailable(t *testing.T) {
 // enforcer the same request succeeds (201 queued), so the fail-closed path
 // is not blocking the normal path.
 func TestWebmailSendSucceedsWhenEnforcerWired(t *testing.T) {
-	h, db, sqlDB := buildSendEnforcementHarness(t, true)
+	h, db, sqlDB, _ := buildSendEnforcementHarness(t, true)
 	t.Cleanup(func() {
 		sqlDB.Close()
 		if s, err := db.DB(); err == nil {

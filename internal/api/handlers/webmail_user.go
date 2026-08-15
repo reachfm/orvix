@@ -924,11 +924,26 @@ func (h *Handler) WebmailSend(c fiber.Ctx) error {
 			domain,
 		)
 		if err != nil {
-			h.logger.Warn("webmail send: classify recipient failed, falling back to remote_smtp",
+			// FAIL CLOSED: a recipient-classification lookup failure
+			// (database/repository failure) aborts the whole send.
+			// An unknown recipient is NEVER silently classified as a
+			// remote SMTP recipient on infrastructure failure: that
+			// could misroute a local/tenant-scoped recipient through
+			// MX/SMTP, bypass tenant isolation, or queue a message
+			// that can never be delivered. Classification is a
+			// read-only pre-transaction lookup, so aborting here
+			// leaves zero durable side effects (no queue rows, no
+			// Sent message, no quota usage, no send events, no
+			// attachment metadata). The HTTP response exposes only a
+			// generic error — never the internal lookup detail.
+			h.logger.Error("webmail send: recipient classification failed, aborting send",
 				zap.String("to", bare),
 				zap.String("domain", domain),
 				zap.Error(err))
-			local = false
+			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+				"error": "unable to classify recipient",
+				"code":  "INTERNAL_ERROR",
+			})
 		}
 
 		var deliveryMode queue.DeliveryMode
