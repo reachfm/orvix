@@ -2047,6 +2047,10 @@ func (r *Router) setupRoutes() {
 	protected.Post("/platform/domains/:tenant_id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermDomainsWrite), r.h.CreatePlatformDomain)
 	protected.Post("/platform/domains/:tenant_id/:id/status", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermDomainsWrite), r.h.SetPlatformDomainStatus)
 	protected.Post("/platform/domains/:tenant_id/:id/mail-access-mode", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermDomainsWrite), r.h.SetPlatformDomainMailAccessMode)
+	// Platform domain lifecycle (Phase 8 production-acceptance
+	// remediation): canonical, audited deactivation/soft-delete. See
+	// platform_domain_lifecycle.go for the full contract.
+	protected.Post("/platform/domains/:tenant_id/:id/deactivate", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermPlatformDomainsDeactivate), r.h.DeactivatePlatformDomain)
 
 	// Platform user lifecycle (Phase 8 production-acceptance remediation):
 	// canonical, audited, non-self deactivation of another platform-scoped

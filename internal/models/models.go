@@ -1206,6 +1206,9 @@ func MigrateAllRaw(db *gorm.DB) error {
 	if err := migrateInvoicesSchema(ctx, sqlDB); err != nil {
 		return err
 	}
+	if err := migrateDomainsLifecycleSchema(ctx, sqlDB); err != nil {
+		return err
+	}
 
 	// Create indexes
 	indexes := []string{
@@ -1496,6 +1499,42 @@ func migrateSessionsJTI(ctx context.Context, db *sql.DB) error {
 	if _, err := db.ExecContext(ctx, "ALTER TABLE sessions ADD COLUMN jti TEXT NOT NULL DEFAULT ''"); err != nil {
 		return fmt.Errorf("add sessions.jti: %w", err)
 	}
+	return nil
+}
+
+// migrateDomainsLifecycleSchema adds the columns the platform domain
+// deactivation/soft-delete lifecycle needs: version (optimistic
+// concurrency — every guarded update increments it, a stale
+// expected_version is a conflict, mirroring the existing mailbox
+// mail_access_mode convention) and deactivated_at/deactivation_reason
+// (a distinct, non-destructive "administratively deactivated" state
+// separate from deleted_at — deactivation never touches deleted_at,
+// so a deactivated domain's full row, DKIM config, and history remain
+// exactly as queryable as an active one).
+func migrateDomainsLifecycleSchema(ctx context.Context, db *sql.DB) error {
+	columns, err := sqliteColumns(ctx, db, "coremail_domains")
+	if err != nil {
+		return fmt.Errorf("inspect coremail_domains schema: %w", err)
+	}
+
+	additions := []struct {
+		name string
+		sql  string
+	}{
+		{"version", "ALTER TABLE coremail_domains ADD COLUMN version INTEGER NOT NULL DEFAULT 1"},
+		{"deactivated_at", "ALTER TABLE coremail_domains ADD COLUMN deactivated_at DATETIME"},
+		{"deactivation_reason", "ALTER TABLE coremail_domains ADD COLUMN deactivation_reason TEXT NOT NULL DEFAULT ''"},
+	}
+	for _, addition := range additions {
+		if columns[addition.name] {
+			continue
+		}
+		if _, err := db.ExecContext(ctx, addition.sql); err != nil {
+			return fmt.Errorf("add coremail_domains.%s: %w", addition.name, err)
+		}
+		columns[addition.name] = true
+	}
+
 	return nil
 }
 

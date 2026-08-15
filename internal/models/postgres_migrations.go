@@ -613,6 +613,12 @@ func postgresTables() []string {
 			updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
 			deleted_at TIMESTAMP
 		)`,
+		// version/deactivated_at/deactivation_reason: platform domain
+		// deactivation lifecycle. See migrateDomainsLifecycleSchema in
+		// models.go for the full rationale.
+		`ALTER TABLE coremail_domains ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1`,
+		`ALTER TABLE coremail_domains ADD COLUMN IF NOT EXISTS deactivated_at TIMESTAMP`,
+		`ALTER TABLE coremail_domains ADD COLUMN IF NOT EXISTS deactivation_reason TEXT NOT NULL DEFAULT ''`,
 
 		// CoreMail aliases
 		`CREATE TABLE IF NOT EXISTS coremail_aliases (

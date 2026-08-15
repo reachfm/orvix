@@ -129,6 +129,13 @@ const (
 	// tenant-scoped PermUsersWrite, which never applies to
 	// platform_super_admin rows (tenant_id IS NULL).
 	PermPlatformUsersWrite Permission = "platform.users.write"
+	// PermPlatformDomainsDeactivate governs the domain deactivation/
+	// soft-delete lifecycle action specifically — distinct from the
+	// general PermDomainsWrite (create/update) that platform domain
+	// create/update routes already reuse from the tenant surface,
+	// because deactivation is destructive and warrants its own
+	// authority, same reasoning as PermPlatformUsersWrite above.
+	PermPlatformDomainsDeactivate Permission = "platform.domains.deactivate"
 
 	// Platform mail control (cross-tenant, platform_super_admin only).
 	// These gate the /platform/relays, /platform/suppressions, and
@@ -193,6 +200,7 @@ var AllPermissions = []Permission{
 	PermPlatformSecurityRead,
 	PermPlatformSessionsRevoke,
 	PermPlatformUsersWrite,
+	PermPlatformDomainsDeactivate,
 	PermRelaysRead,
 	PermRelaysWrite,
 	PermRelaysTest,
@@ -254,8 +262,9 @@ var rolePermissions = map[auth.Role]map[Permission]bool{
 		// account). Deliberately NOT granted to any tenant role, support
 		// operator, or ordinary platform operator role — see the
 		// PermPlatformUsersWrite doc comment above.
-		PermPlatformUsersWrite: true,
-		PermJobsRead:           true, PermJobsWrite: true,
+		PermPlatformUsersWrite:        true,
+		PermPlatformDomainsDeactivate: true,
+		PermJobsRead:                  true, PermJobsWrite: true,
 		// Platform imports (the /platform/imports surface is platform-scope).
 		PermImportsRead: true, PermImportsWrite: true, PermImportsExecute: true, PermImportsAdmin: true,
 		// Platform mail control: relay administration, suppression
@@ -367,10 +376,11 @@ var rolePermissions = map[auth.Role]map[Permission]bool{
 		PermAPIKeysRead:       true, PermAPIKeysWrite: true,
 		PermBillingRead: true, PermBillingWrite: true,
 		PermPlatformOrganizationsRead: true, PermPlatformOrganizationsWrite: true,
-		PermPlatformSecurityRead:   true,
-		PermPlatformSessionsRevoke: true,
-		PermPlatformUsersWrite:     true,
-		PermJobsRead:               true, PermJobsWrite: true,
+		PermPlatformSecurityRead:      true,
+		PermPlatformSessionsRevoke:    true,
+		PermPlatformUsersWrite:        true,
+		PermPlatformDomainsDeactivate: true,
+		PermJobsRead:                  true, PermJobsWrite: true,
 		PermImportsRead: true, PermImportsWrite: true, PermImportsExecute: true, PermImportsAdmin: true,
 		// Platform mail control (legacy super-admin mirrors the PSA).
 		PermRelaysRead: true, PermRelaysWrite: true, PermRelaysTest: true,
