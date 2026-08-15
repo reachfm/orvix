@@ -497,6 +497,19 @@ if ADMIN_SOURCE="$(package_admin_spa "$REPO_ROOT" "$BUNDLE_ROOT/release/admin")"
 else
     fail "admin SPA packaging failed (see errors above); refusing to ship a bundle with stale or missing admin assets" 2
 fi
+# Asset trees — webmail SPA.
+# release/webmail (hand-authored, committed) is the CANONICAL, deployed
+# webmail source — copied verbatim, matching every prior release.
+# web/webmail/src is a parallel Vite/React rewrite: it IS built and
+# typechecked in CI (postgres-readiness.yml, "Webmail frontend
+# typecheck and build") but is NOT wired into this release pipeline
+# and is NOT yet functionally complete — its ComposeModal Send control
+# has no onClick handler, so it cannot send mail. Do not switch this
+# packaging step to build from web/webmail/src until that gap is
+# closed and full mutation parity (drafts/flags/move/delete/archive/
+# settings/push/batch) is verified; see
+# internal/api/handlers/webmail_source_provenance_test.go for the
+# guard that keeps this decision from drifting silently.
 (cd release/webmail && tar -cf - .) | (cd "$BUNDLE_ROOT/release/webmail" && tar -xf -)
 
 # Marketing SPA. With Node/npm available, the source build is mandatory and
