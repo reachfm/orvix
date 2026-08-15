@@ -114,17 +114,212 @@ func NewReceiver(eng *coremail.Engine, ms *storage.MailStore, qe *queue.QueueEng
 	}
 }
 
-type resolvedRecipient struct {
-	Email     string
+// canonicalRecipient is one final LOCAL delivery target of the
+// canonical recipient plan. Presented identifies the address the
+// remote client sent; Target is the mailbox the message will actually
+// be delivered to (identical to Presented for a direct mailbox).
+// TenantID/DomainID/Domain are taken from the TARGET mailbox's OWNING
+// domain row — never from the presented address — so alias / catchall /
+// forwarder indirection cannot smuggle a message into a different
+// tenant's mailbox or mis-attribute the message.
+type canonicalRecipient struct {
+	Presented string
+	Target    string
+	Kind      recipientKind
 	MailboxID uint
-	DomainID  uint
 	TenantID  uint
+	DomainID  uint
 	Domain    string
+}
+
+// recipientKind records how a presented address resolved.
+type recipientKind int
+
+const (
+	// recipientDirect: the presented address IS an active mailbox
+	// (possibly a forwarder mailbox whose targets were resolved).
+	recipientDirect recipientKind = iota
+	// recipientAlias: resolved through a coremail_aliases row.
+	recipientAlias
+	// recipientCatchall: resolved through the domain catchall.
+	recipientCatchall
+)
+
+// canonicalDomainRef records every local domain whose operability
+// affects acceptance of this message — the presented domains AND the
+// owning domains of every resolved target. The plan deduplicates by
+// domain name, so a message with many recipients on one domain issues
+// one operability check, not one per recipient.
+type canonicalDomainRef struct {
+	Name     string
+	DomainID uint
+	TenantID uint
+}
+
+// recipientPlan is the side-effect-free canonical recipient plan built
+// from the presented RCPT TO addresses. Building it performs only
+// read-only lookups (domains, mailboxes, aliases) and never touches
+// spool, queue, or any durable state; all canonical domain operability
+// enforcement happens during the build, before the first message row
+// or queue entry can exist.
+type recipientPlan struct {
+	local    []canonicalRecipient
+	external []externalRecipient
+	domains  []canonicalDomainRef
+}
+
+func (p *recipientPlan) addDomain(name string, id, tenantID uint) {
+	for _, ref := range p.domains {
+		if ref.Name == name {
+			return
+		}
+	}
+	p.domains = append(p.domains, canonicalDomainRef{Name: name, DomainID: id, TenantID: tenantID})
 }
 
 type externalRecipient struct {
 	Email  string
 	Domain string
+}
+
+// buildRecipientPlan is the canonical recipient resolution used by
+// AcceptMessage. For every presented recipient it:
+//
+//  1. resolves the presented domain (unknown / non-active domains keep
+//     the normal external-recipient behavior);
+//  2. expands mailbox / forwarder / alias / catchall indirection
+//     through the SAME AuthService.ResolveAddress path the rest of the
+//     platform uses;
+//  3. for every resolved target mailbox, enforces the canonical domain
+//     guard on the mailbox's OWNING domain — alias or catchall
+//     indirection can never bypass domain operability, a
+//     disabled/suspended/locked/soft-deleted owning domain fails
+//     closed, and a cross-tenant target (mailbox tenant != owning
+//     domain tenant, or target tenant != presented-domain tenant)
+//     fails closed;
+//  4. attributes the message to the target mailbox's OWNING domain and
+//     tenant, never to the presented address's domain;
+//  5. records every local domain whose operability affects acceptance,
+//     deduplicated by name.
+//
+// The build is side-effect-free: only read-only lookups, no network
+// delivery, no locks held across I/O. Any infrastructure failure
+// returns an error so the server surfaces a transient SMTP failure
+// (4.x) instead of accepting the message.
+func (r *Receiver) buildRecipientPlan(ctx context.Context, rcptAddrs []string) (*recipientPlan, error) {
+	plan := &recipientPlan{}
+	// Lookup caches keep the build at one query per distinct presented
+	// domain and one per distinct owning domain, regardless of how
+	// many recipients share them.
+	presentedByDomain := map[string]*coremail.Domain{}
+	owningByID := map[uint]*coremail.Domain{}
+
+	// owningDomainOperable resolves and validates the owning domain of
+	// a resolved target mailbox. It fails closed when the domain row
+	// is missing, soft-deleted, not active, or inconsistent with the
+	// mailbox's tenant — alias/forwarder/catchall indirection must not
+	// bypass domain operability or cross tenant boundaries.
+	owningDomainOperable := func(target string, mbox *coremail.Mailbox) (*coremail.Domain, error) {
+		d, ok := owningByID[mbox.DomainID]
+		if !ok {
+			var err error
+			d, err = r.Engine.Domains.GetByID(ctx, mbox.DomainID, nil)
+			if err != nil {
+				return nil, fmt.Errorf("lookup owning domain %d for %s: %w", mbox.DomainID, target, err)
+			}
+			owningByID[mbox.DomainID] = d
+		}
+		if d == nil || d.DeletedAt != nil {
+			return nil, fmt.Errorf("owning domain unavailable for %s", target)
+		}
+		if d.Status != coremail.DomainActive {
+			return nil, fmt.Errorf("owning domain not active for %s", target)
+		}
+		if d.TenantID != mbox.TenantID {
+			return nil, fmt.Errorf("owning domain tenant mismatch for %s", target)
+		}
+		return d, nil
+	}
+
+	for _, rcpt := range rcptAddrs {
+		domain := strings.ToLower(ExtractDomain(rcpt))
+		if domain == "" {
+			return nil, fmt.Errorf("invalid recipient: %s", rcpt)
+		}
+
+		dom, ok := presentedByDomain[domain]
+		if !ok {
+			var err error
+			dom, err = r.Engine.Domains.GetByName(ctx, domain, nil)
+			if err != nil {
+				return nil, fmt.Errorf("lookup domain %s: %w", domain, err)
+			}
+			presentedByDomain[domain] = dom
+		}
+		if dom == nil || dom.Status != coremail.DomainActive || dom.DeletedAt != nil {
+			// Unknown, soft-deleted, or non-active domain: preserve the
+			// normal external-recipient behavior (anti-enumeration).
+			plan.external = append(plan.external, externalRecipient{
+				Email:  rcpt,
+				Domain: domain,
+			})
+			continue
+		}
+		plan.addDomain(dom.Name, dom.ID, dom.TenantID)
+
+		targets, err := r.Engine.Auth.ResolveAddress(ctx, rcpt)
+		if err != nil {
+			return nil, fmt.Errorf("resolve %s: %w", rcpt, err)
+		}
+
+		// Classify the resolution kind (informational, for the plan):
+		// direct mailbox (possibly a forwarder), alias, or catchall.
+		kind := recipientDirect
+		if len(targets) == 1 && strings.EqualFold(targets[0], rcpt) {
+			kind = recipientDirect
+		} else if mbox, mErr := r.Engine.Mailboxes.GetByEmail(ctx, rcpt, nil); mErr == nil && mbox != nil && mbox.Status == coremail.MailboxActive {
+			kind = recipientDirect // forwarder mailbox: mailbox exists but targets were redirected
+		} else if alias, aErr := r.Engine.Aliases.GetByFromAddr(ctx, rcpt, nil); aErr == nil && alias != nil && alias.Active {
+			kind = recipientAlias
+		} else {
+			kind = recipientCatchall
+		}
+
+		for _, target := range targets {
+			mbox, err := r.Engine.Mailboxes.GetByEmail(ctx, target, nil)
+			if err != nil {
+				return nil, fmt.Errorf("lookup mailbox %s: %w", target, err)
+			}
+			if mbox == nil || mbox.Status != coremail.MailboxActive {
+				return nil, fmt.Errorf("mailbox not active: %s", target)
+			}
+
+			// Canonical domain enforcement on the RESOLVED target:
+			// the owning domain of the target mailbox must be active
+			// and consistent, and the target must stay inside the
+			// presented domain's tenant (cross-tenant indirection
+			// fails closed).
+			mboxDomain, err := owningDomainOperable(target, mbox)
+			if err != nil {
+				return nil, err
+			}
+			if mboxDomain.TenantID != dom.TenantID {
+				return nil, fmt.Errorf("cross-tenant resolved target: %s", target)
+			}
+			plan.addDomain(mboxDomain.Name, mboxDomain.ID, mboxDomain.TenantID)
+
+			plan.local = append(plan.local, canonicalRecipient{
+				Presented: rcpt,
+				Target:    target,
+				Kind:      kind,
+				MailboxID: mbox.ID,
+				TenantID:  mboxDomain.TenantID,
+				DomainID:  mboxDomain.ID,
+				Domain:    strings.ToLower(mboxDomain.Name),
+			})
+		}
+	}
+	return plan, nil
 }
 
 // AcceptMessage processes a completed DATA transfer.
@@ -532,56 +727,26 @@ func (r *Receiver) AcceptMessage(ctx context.Context, session *Session) error {
 		}
 	}
 
-	// ── Recipient resolution ───────────────────────────────
-	var recipients []resolvedRecipient
-	var externalRecipients []externalRecipient
-	for _, rcpt := range session.Recipients {
-		domain := ExtractDomain(rcpt)
-		if domain == "" {
-			return fmt.Errorf("invalid recipient: %s", rcpt)
-		}
-
-		dom, err := r.Engine.Domains.GetByName(ctx, domain, nil)
-		if err != nil {
-			return fmt.Errorf("lookup domain %s: %w", domain, err)
-		}
-		if dom == nil || dom.Status != coremail.DomainActive {
-			externalRecipients = append(externalRecipients, externalRecipient{
-				Email:  rcpt,
-				Domain: domain,
-			})
-			continue
-		}
-
-		targets, err := r.Engine.Auth.ResolveAddress(ctx, rcpt)
-		if err != nil {
-			return fmt.Errorf("resolve %s: %w", rcpt, err)
-		}
-
-		for _, target := range targets {
-			mbox, err := r.Engine.Mailboxes.GetByEmail(ctx, target, nil)
-			if err != nil {
-				return fmt.Errorf("lookup mailbox %s: %w", target, err)
-			}
-			if mbox == nil || mbox.Status != coremail.MailboxActive {
-				return fmt.Errorf("mailbox not active: %s", target)
-			}
-			recipients = append(recipients, resolvedRecipient{
-				Email:     target,
-				MailboxID: mbox.ID,
-				DomainID:  dom.ID,
-				TenantID:  dom.TenantID,
-				Domain:    domain,
-			})
-		}
+	// ── Canonical recipient plan ───────────────────────────
+	// Build the side-effect-free canonical recipient plan: presented
+	// domains, alias/forwarder/catchall expansion, and canonical
+	// owning-domain enforcement for every resolved target all happen
+	// HERE, before the first message row or queue entry can exist. A
+	// rejection at this point persists nothing — zero spool, zero
+	// queue, zero delivery records. Infrastructure failures during the
+	// build surface as transient (4.x) SMTP failures, never as
+	// acceptance.
+	plan, err := r.buildRecipientPlan(ctx, session.Recipients)
+	if err != nil {
+		return err
 	}
 
 	// Deduplicate local recipients by MailboxID. If the same address appears
 	// in multiple RCPT TO commands, or an alias resolves to the same mailbox,
 	// deliver exactly one copy.
-	recipients = dedupRecipients(recipients)
+	recipients := dedupRecipients(plan.local)
 
-	if len(recipients) == 0 && len(externalRecipients) == 0 {
+	if len(recipients) == 0 && len(plan.external) == 0 {
 		return fmt.Errorf("no valid recipients")
 	}
 
@@ -617,7 +782,7 @@ func (r *Receiver) AcceptMessage(ctx context.Context, session *Session) error {
 		}
 
 		if err := r.MailStore.StoreMessage(ctx, msg, rfc822Data, nil); err != nil {
-			return fmt.Errorf("store message for %s: %w", rcpt.Email, err)
+			return fmt.Errorf("store message for %s: %w", rcpt.Target, err)
 		}
 		if firstMessageID == "" {
 			firstMessageID = msg.MessageID
@@ -639,7 +804,7 @@ func (r *Receiver) AcceptMessage(ctx context.Context, session *Session) error {
 			MailboxID:       &rcpt.MailboxID,
 			MessageID:       msg.MessageID,
 			FromAddress:     session.MailFrom,
-			ToAddress:       rcpt.Email,
+			ToAddress:       rcpt.Target,
 			RecipientDomain: rcpt.Domain,
 			Direction:       queue.DirectionInbound,
 			DeliveryMode:    queue.DeliveryLocal,
@@ -654,9 +819,9 @@ func (r *Receiver) AcceptMessage(ctx context.Context, session *Session) error {
 			// leak ahead of a failed local accept.
 			purgeErr := r.MailStore.PurgeMessage(ctx, msg.ID, nil)
 			if purgeErr != nil {
-				return fmt.Errorf("enqueue for %s: %w (and purge failed: %v)", rcpt.Email, err, purgeErr)
+				return fmt.Errorf("enqueue for %s: %w (and purge failed: %v)", rcpt.Target, err, purgeErr)
 			}
-			return fmt.Errorf("enqueue for %s: %w", rcpt.Email, err)
+			return fmt.Errorf("enqueue for %s: %w", rcpt.Target, err)
 		}
 
 		// Local delivery is now durably enqueued. Apply
@@ -674,7 +839,7 @@ func (r *Receiver) AcceptMessage(ctx context.Context, session *Session) error {
 	}
 
 	// ── External recipients (outbound relay) ────────────────
-	for _, ext := range externalRecipients {
+	for _, ext := range plan.external {
 		msgID := firstMessageID
 		if msgID == "" {
 			msgID = storage.GenerateMessageID()
@@ -833,9 +998,9 @@ func extractRemoteIP(addr string) net.IP {
 	return net.ParseIP(host)
 }
 
-func dedupRecipients(recipients []resolvedRecipient) []resolvedRecipient {
+func dedupRecipients(recipients []canonicalRecipient) []canonicalRecipient {
 	seen := make(map[uint]bool)
-	result := make([]resolvedRecipient, 0, len(recipients))
+	result := make([]canonicalRecipient, 0, len(recipients))
 	for _, r := range recipients {
 		if seen[r.MailboxID] {
 			continue
