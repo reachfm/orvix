@@ -7,6 +7,7 @@ package handlers_test
 
 import (
 	"net/http"
+	"sync"
 	"testing"
 )
 
@@ -111,6 +112,93 @@ func TestWebmailSend_LockedDomainRejected(t *testing.T) {
 // (nonexistent) domain, a disabled sender domain still rejects the
 // send — there is no way to smuggle an operational-looking domain in
 // through the recipient field.
+// TestWebmailSend_ConcurrentDisableVsSendHasSingleConsistentOutcome is the
+// decisive concurrency test for Phase 8 C3A #2: it launches the send
+// request and a concurrent domain-disable UPDATE at the same instant
+// (via a WaitGroup start barrier — no sleeps), relying on the
+// acceptance transaction's row lock (CheckOperabilityByIDTx with
+// lock=true) to serialize the two writers deterministically. Exactly
+// one of two mutually exclusive outcomes must hold afterward: either
+// the send committed first (one durable message, domain ends up
+// disabled afterward) or the disable committed first (send rejected,
+// zero durable send effects). A flaky/partial outcome — e.g. a
+// message stored without its queue row, or a domain check that
+// missed the concurrent write — would fail every assertion below.
+func TestWebmailSend_ConcurrentDisableVsSendHasSingleConsistentOutcome(t *testing.T) {
+	for i := 0; i < 20; i++ {
+		t.Run("", func(t *testing.T) {
+			e := buildWebmailTestEnv(t)
+			mailboxID := mailboxIDForEmail(t, e.mailbox, e.email)
+			if err := e.mailbox.Folders.EnsureSystemFolders(t.Context(), mailboxID, nil); err != nil {
+				t.Fatalf("ensure folders: %v", err)
+			}
+			tok := e.loginAdmin(t)
+
+			var start sync.WaitGroup
+			start.Add(1)
+			var wg sync.WaitGroup
+			wg.Add(2)
+
+			var sendStatus int
+			go func() {
+				defer wg.Done()
+				start.Wait()
+				sendStatus, _ = e.webmailRequest(t, "POST", "/api/v1/webmail/send", tok, map[string]string{
+					"to": "external@example.com", "subject": "race", "body": "body",
+				})
+			}()
+
+			var disableErr error
+			go func() {
+				defer wg.Done()
+				start.Wait()
+				_, disableErr = e.mailbox.DB.Exec(`UPDATE coremail_domains SET status = 'disabled' WHERE name = 'orvix.email'`)
+			}()
+
+			start.Done()
+			wg.Wait()
+
+			if disableErr != nil {
+				t.Fatalf("concurrent disable failed: %v", disableErr)
+			}
+
+			var msgCount int
+			if err := e.mailbox.DB.QueryRow(`SELECT COUNT(*) FROM coremail_messages WHERE mailbox_id = ?`, mailboxID).Scan(&msgCount); err != nil {
+				t.Fatalf("count messages: %v", err)
+			}
+			var queueCount int
+			if err := e.mailbox.DB.QueryRow(`SELECT COUNT(*) FROM coremail_queue WHERE message_id != ''`).Scan(&queueCount); err != nil {
+				t.Fatalf("count queue rows: %v", err)
+			}
+
+			switch sendStatus {
+			case http.StatusCreated:
+				// Send won the race (or ran before the disable's write
+				// lock acquisition): exactly one durable message and
+				// at least one queue row must exist — never a partial
+				// commit — regardless of what the disable did after.
+				if msgCount != 1 {
+					t.Fatalf("send reported success but message count = %d, want 1", msgCount)
+				}
+				if queueCount < 1 {
+					t.Fatalf("send reported success but zero queue rows were created")
+				}
+			case http.StatusConflict:
+				// Disable won the race: the send must have produced
+				// zero durable effects.
+				if msgCount != 0 {
+					t.Fatalf("send was rejected but a message was still persisted: count = %d", msgCount)
+				}
+				if queueCount != 0 {
+					t.Fatalf("send was rejected but %d queue rows were still created", queueCount)
+				}
+			default:
+				t.Fatalf("unexpected send status %d (expected 201 or 409)", sendStatus)
+			}
+		})
+	}
+}
+
 func TestWebmailSend_ForgedRecipientDomainCannotBypass(t *testing.T) {
 	e := buildWebmailTestEnv(t)
 	mailboxID := mailboxIDForEmail(t, e.mailbox, e.email)

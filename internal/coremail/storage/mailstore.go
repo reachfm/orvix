@@ -120,15 +120,19 @@ func (ms *MailStore) StoreMessage(ctx context.Context, msg *Message, rfc822Data 
 	msg.SHA256 = sha
 
 	// Step 3: Insert database record inside a transaction.
-	// If a tx is already provided, use it directly (caller manages locking).
+	// If a tx is already provided, use it directly (caller manages
+	// locking). Attachment extraction is deliberately NOT run here in
+	// that case: it does its own ms.Attachments.Create(ctx, att, nil)
+	// calls against the raw *sql.DB, which would try to acquire a
+	// second connection while the caller's tx still holds the only
+	// one on a single-connection pool (sqlite) — a guaranteed
+	// deadlock. The caller is responsible for calling
+	// ExtractAndStoreAttachments itself, after its transaction
+	// commits.
 	if tx != nil {
 		if err := ms.Messages.Create(ctx, msg, tx); err != nil {
 			os.Remove(msg.RFC822Path)
 			return err
-		}
-		// Extract attachments from RFC822 data (best-effort).
-		if len(rfc822Data) > 0 {
-			ms.extractAndStoreAttachments(ctx, msg.ID, rfc822Data)
 		}
 		return nil
 	}
@@ -216,6 +220,15 @@ func (ms *MailStore) DeleteMessage(ctx context.Context, id uint, tx interface{})
 		return err
 	}
 	return nil
+}
+
+// ExtractAndStoreAttachments is the exported entry point for callers that
+// passed a non-nil tx to StoreMessage (which deliberately skips attachment
+// extraction in that path — see the comment there). Call this AFTER your
+// own transaction has committed; it opens its own connection(s) exactly
+// like the nil-tx path already did internally.
+func (ms *MailStore) ExtractAndStoreAttachments(ctx context.Context, msgID uint, rfc822Data []byte) {
+	ms.extractAndStoreAttachments(ctx, msgID, rfc822Data)
 }
 
 // extractAndStoreAttachments parses RFC822 data and stores extracted attachments

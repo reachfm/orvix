@@ -96,6 +96,33 @@ func (e *SendEnforcer) AllowSend(ctx context.Context, id SendIdentity, count int
 }
 
 func (e *SendEnforcer) ReserveSend(ctx context.Context, id SendIdentity, eventID string, count int) (*SendReservationResult, error) {
+	tx, err := e.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	result, err := e.ReserveSendTx(ctx, tx, id, eventID, count)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// ReserveSendTx is the transaction-scoped core of ReserveSend (Phase 8
+// C3A #2): it performs the exact same subscription-status check,
+// quota accounting, and reservation-event insert, but against a
+// caller-supplied *sql.Tx instead of opening (and committing) its
+// own. This lets a caller — e.g. webmail send — fold quota
+// reservation into the same authoritative transaction as the domain
+// operability recheck and the durable message write, closing the
+// check-then-act window between "domain confirmed active" and
+// "message durably accepted." The caller owns commit/rollback; this
+// method never commits or rolls back tx itself.
+func (e *SendEnforcer) ReserveSendTx(ctx context.Context, tx *sql.Tx, id SendIdentity, eventID string, count int) (*SendReservationResult, error) {
 	if id.TenantID == 0 {
 		return &SendReservationResult{SendEnforcementResult: SendEnforcementResult{Allowed: false, Reason: "invalid tenant"}}, nil
 	}
@@ -106,22 +133,13 @@ func (e *SendEnforcer) ReserveSend(ctx context.Context, id SendIdentity, eventID
 		return &SendReservationResult{SendEnforcementResult: SendEnforcementResult{Allowed: false, Reason: "invalid recipient count"}}, nil
 	}
 
-	tx, err := e.db.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback()
-
 	var existingType string
 	var existingCount int
-	err = tx.QueryRowContext(ctx,
+	err := tx.QueryRowContext(ctx,
 		"SELECT event_type, recipient_count FROM send_events WHERE tenant_id = "+e.dialect.Placeholder(1)+" AND event_id = "+e.dialect.Placeholder(2),
 		id.TenantID, eventID).Scan(&existingType, &existingCount)
 	if err == nil {
 		if existingType == "send" || existingType == "reservation" {
-			if err := tx.Commit(); err != nil {
-				return nil, err
-			}
 			return &SendReservationResult{
 				SendEnforcementResult: SendEnforcementResult{Allowed: true},
 				EventID:               eventID,
@@ -192,9 +210,6 @@ func (e *SendEnforcer) ReserveSend(ctx context.Context, id SendIdentity, eventID
 			return nil, err
 		}
 		if existingType == "send" || existingType == "reservation" {
-			if err := tx.Commit(); err != nil {
-				return nil, err
-			}
 			return &SendReservationResult{
 				SendEnforcementResult: SendEnforcementResult{Allowed: true},
 				EventID:               eventID,
@@ -202,9 +217,6 @@ func (e *SendEnforcer) ReserveSend(ctx context.Context, id SendIdentity, eventID
 				Existing:              true,
 			}, nil
 		}
-	}
-	if err := tx.Commit(); err != nil {
-		return nil, err
 	}
 	return &SendReservationResult{
 		SendEnforcementResult: SendEnforcementResult{Allowed: true, Limit: limit, Used: used, Remaining: remaining},

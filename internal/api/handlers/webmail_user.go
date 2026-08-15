@@ -844,12 +844,9 @@ func (h *Handler) WebmailSend(c fiber.Ctx) error {
 		}
 	}
 
-	// Real quota gate: number of unique, valid recipients.
-	// This reserves quota atomically before storage/queue side
-	// effects, then reconciles the reservation to the actual
-	// successful enqueue count below. The enforcer is a hard
-	// dependency for outbound send: if it is not wired the
-	// request fails closed rather than bypassing quotas.
+	// Real quota gate: number of unique, valid recipients. The
+	// enforcer is a hard dependency for outbound send: if it is not
+	// wired the request fails closed rather than bypassing quotas.
 	if h.sendEnforcer == nil {
 		h.logger.Error("webmail send rejected: send enforcer unavailable",
 			zap.String("mailbox", ctx.Mailbox.Email),
@@ -860,37 +857,12 @@ func (h *Handler) WebmailSend(c fiber.Ctx) error {
 		})
 	}
 	intendedRecipientCount := len(allRecipients)
-	var reservedSend *billing.SendReservationResult
-	{
-		id := billing.SendIdentity{TenantID: ctx.Mailbox.TenantID, MailboxID: ctx.Mailbox.ID}
-		result, err := h.sendEnforcer.ReserveSend(c.Context(), id, messageID, intendedRecipientCount)
-		if err != nil {
-			h.logger.Error("webmail send quota reservation failed",
-				zap.String("message_id", messageID),
-				zap.Error(err))
-			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "cannot determine quota"})
-		}
-		if !result.Allowed {
-			return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{
-				"error": "send rejected: " + result.Reason, "limit": result.Limit, "remaining": result.Remaining,
-			})
-		}
-		reservedSend = result
-	}
-	cancelReservation := func() {
-		if reservedSend != nil {
-			id := billing.SendIdentity{TenantID: ctx.Mailbox.TenantID, MailboxID: ctx.Mailbox.ID}
-			if err := h.sendEnforcer.CancelSendReservation(c.Context(), id, messageID); err != nil {
-				h.logger.Error("webmail send quota reservation release failed",
-					zap.String("message_id", messageID),
-					zap.Error(err))
-			}
-		}
-	}
 
+	// Sent folder resolution is a read-only lookup with no durable
+	// side effect, so it does not need to run inside the acceptance
+	// transaction below.
 	sentFolder, err := resolveFolderCaseInsensitive(c.Context(), ctx.MailboxStore, ctx.Mailbox.ID, "Sent")
 	if err != nil || sentFolder == nil {
-		cancelReservation()
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": "Sent folder not found for mailbox; ensure system folders are provisioned",
 		})
@@ -914,11 +886,99 @@ func (h *Handler) WebmailSend(c fiber.Ctx) error {
 		Seen:              true,
 	}
 
-	if err := ctx.MailboxStore.StoreMessage(c.Context(), msg, rfc822, nil); err != nil {
-		cancelReservation()
+	// ── Authoritative send-acceptance transaction (Phase 8 C3A #2) ──
+	// The domain operability recheck, the quota reservation, and the
+	// durable Sent-folder message write all happen inside ONE SQL
+	// transaction, with the domain row locked (FOR UPDATE on
+	// PostgreSQL) for the duration. This closes the TOCTOU window
+	// between the early domain check above and this point: if a
+	// concurrent domain-disable transaction commits first, it holds
+	// the row lock until its own commit, and this recheck then sees
+	// the disabled status and rolls back with zero durable effects
+	// (no quota consumed, no Sent-folder row, no message on disk row
+	// committed). If this transaction's lock acquisition/recheck wins
+	// the race instead, the disable is forced to wait and then simply
+	// observes an already-active-turned-sent state consistently.
+	//
+	// Network I/O (queue enqueue, which may trigger local delivery
+	// but never blocks on remote SMTP here) deliberately happens
+	// AFTER this transaction commits, not inside it — enqueue is a
+	// separate durable step whose own pre-existing best-effort
+	// per-recipient semantics (partial enqueue failure is reported,
+	// not fatal to the whole send) are preserved unchanged.
+	var reservedSend *billing.SendReservationResult
+	sqlDB, dbErr := h.db.DB()
+	if dbErr != nil {
+		h.logger.Error("webmail send: database unavailable for acceptance transaction",
+			zap.String("mailbox", ctx.Mailbox.Email))
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+			"error": "unable to accept send",
+			"code":  "INTERNAL_ERROR",
+		})
+	}
+	// domainRepo must be constructed BEFORE BeginTx: NewDomainAdminRepo
+	// runs its own dialect-detection query against the raw *sql.DB, and
+	// on a single-connection pool (sqlite) that deadlocks forever if an
+	// uncommitted transaction is already holding the only connection.
+	domainRepo := domainpkg.NewDomainAdminRepo(sqlDB)
+
+	tx, err := sqlDB.BeginTx(c.Context(), nil)
+	if err != nil {
+		h.logger.Error("webmail send: begin acceptance transaction failed",
+			zap.String("message_id", messageID), zap.Error(err))
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+			"error": "unable to accept send",
+			"code":  "INTERNAL_ERROR",
+		})
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	opOut := domainRepo.WithTx(tx).CheckOperabilityByIDTx(c.Context(), ctx.Mailbox.DomainID, ctx.Mailbox.TenantID, true)
+	if !opOut.Operational() {
+		return domainServiceError(c, opOut.Err)
+	}
+
+	id := billing.SendIdentity{TenantID: ctx.Mailbox.TenantID, MailboxID: ctx.Mailbox.ID}
+	result, err := h.sendEnforcer.ReserveSendTx(c.Context(), tx, id, messageID, intendedRecipientCount)
+	if err != nil {
+		h.logger.Error("webmail send quota reservation failed",
+			zap.String("message_id", messageID),
+			zap.Error(err))
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "cannot determine quota"})
+	}
+	if !result.Allowed {
+		return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{
+			"error": "send rejected: " + result.Reason, "limit": result.Limit, "remaining": result.Remaining,
+		})
+	}
+	reservedSend = result
+
+	if err := ctx.MailboxStore.StoreMessage(c.Context(), msg, rfc822, tx); err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": fmt.Sprintf("store message: %v", err),
 		})
+	}
+
+	if err := tx.Commit(); err != nil {
+		h.logger.Error("webmail send: commit acceptance transaction failed",
+			zap.String("message_id", messageID), zap.Error(err))
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+			"error": "unable to accept send",
+			"code":  "INTERNAL_ERROR",
+		})
+	}
+	committed = true
+
+	// Attachment extraction deliberately runs after commit, not inside
+	// the acceptance transaction — see the tx-provided branch of
+	// StoreMessage for why (single-connection deadlock risk).
+	if len(rfc822) > 0 {
+		ctx.MailboxStore.ExtractAndStoreAttachments(c.Context(), msg.ID, rfc822)
 	}
 
 	// From here on the message is durable in the Sent
@@ -929,7 +989,14 @@ func (h *Handler) WebmailSend(c fiber.Ctx) error {
 	// the user's mail.
 	qe, ok := h.queueEngineForUser()
 	if !ok {
-		cancelReservation()
+		if reservedSend != nil {
+			id := billing.SendIdentity{TenantID: ctx.Mailbox.TenantID, MailboxID: ctx.Mailbox.ID}
+			if err := h.sendEnforcer.CancelSendReservation(c.Context(), id, messageID); err != nil {
+				h.logger.Error("webmail send quota reservation release failed",
+					zap.String("message_id", messageID),
+					zap.Error(err))
+			}
+		}
 		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
 			"error":      "queue engine not available",
 			"message_id": msg.MessageID,
