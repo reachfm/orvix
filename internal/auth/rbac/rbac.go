@@ -122,6 +122,13 @@ const (
 	PermPlatformOrganizationsWrite Permission = "platform.organizations.write"
 	PermPlatformSecurityRead       Permission = "platform.security.read"
 	PermPlatformSessionsRevoke     Permission = "platform.sessions.revoke"
+	// PermPlatformUsersWrite governs lifecycle actions (deactivation)
+	// against platform-scoped user accounts. Distinct from
+	// PermPlatformSessionsRevoke — revoking a session is not the same
+	// authority as disabling the identity itself. Distinct from the
+	// tenant-scoped PermUsersWrite, which never applies to
+	// platform_super_admin rows (tenant_id IS NULL).
+	PermPlatformUsersWrite Permission = "platform.users.write"
 
 	// Platform mail control (cross-tenant, platform_super_admin only).
 	// These gate the /platform/relays, /platform/suppressions, and
@@ -185,6 +192,7 @@ var AllPermissions = []Permission{
 	PermPlatformOrganizationsWrite,
 	PermPlatformSecurityRead,
 	PermPlatformSessionsRevoke,
+	PermPlatformUsersWrite,
 	PermRelaysRead,
 	PermRelaysWrite,
 	PermRelaysTest,
@@ -242,7 +250,12 @@ var rolePermissions = map[auth.Role]map[Permission]bool{
 		// Cross-tenant security controls (session revocation, security ops).
 		PermPlatformSecurityRead:   true,
 		PermPlatformSessionsRevoke: true,
-		PermJobsRead:               true, PermJobsWrite: true,
+		// Platform user lifecycle (deactivation of another platform
+		// account). Deliberately NOT granted to any tenant role, support
+		// operator, or ordinary platform operator role — see the
+		// PermPlatformUsersWrite doc comment above.
+		PermPlatformUsersWrite: true,
+		PermJobsRead:           true, PermJobsWrite: true,
 		// Platform imports (the /platform/imports surface is platform-scope).
 		PermImportsRead: true, PermImportsWrite: true, PermImportsExecute: true, PermImportsAdmin: true,
 		// Platform mail control: relay administration, suppression
@@ -356,6 +369,7 @@ var rolePermissions = map[auth.Role]map[Permission]bool{
 		PermPlatformOrganizationsRead: true, PermPlatformOrganizationsWrite: true,
 		PermPlatformSecurityRead:   true,
 		PermPlatformSessionsRevoke: true,
+		PermPlatformUsersWrite:     true,
 		PermJobsRead:               true, PermJobsWrite: true,
 		PermImportsRead: true, PermImportsWrite: true, PermImportsExecute: true, PermImportsAdmin: true,
 		// Platform mail control (legacy super-admin mirrors the PSA).

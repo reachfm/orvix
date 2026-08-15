@@ -2051,7 +2051,7 @@ func (r *Router) setupRoutes() {
 	// Platform user lifecycle (Phase 8 production-acceptance remediation):
 	// canonical, audited, non-self deactivation of another platform-scoped
 	// user account. See platform_user_lifecycle.go for the full contract.
-	protected.Post("/platform/users/:id/deactivate", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermPlatformSessionsRevoke), r.h.DeactivatePlatformUser)
+	protected.Post("/platform/users/:id/deactivate", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermPlatformUsersWrite), r.h.DeactivatePlatformUser)
 
 	// NOTE: GET /platform/mailboxes/bulk/template MUST be registered
 	// before GET /platform/mailboxes/:tenant_id/:id below. Fiber v3
