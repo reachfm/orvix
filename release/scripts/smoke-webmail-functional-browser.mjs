@@ -544,7 +544,7 @@ const server = http.createServer(async (req, res) => {
     try {
         const url = new URL(req.url, 'http://127.0.0.1');
         const p = url.pathname;
-        if (p.startsWith('/api/v1/webmail/') || p === '/api/v1/me' || p === '/api/v1/csrf-token') {
+        if (p.startsWith('/api/v1/webmail/') || p === '/api/v1/me' || p === '/api/v1/csrf-token' || p.startsWith('/__test__/')) {
             const body = await readBody(req);
             const m = mockFor(req.method, p, body, req);
             jsonResponse(res, m.status, m.body, m.headers);
