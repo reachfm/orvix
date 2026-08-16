@@ -107,7 +107,13 @@ test.describe("Platform Mailbox provisioning", () => {
     await page.getByRole("button", { name: "Mailboxes", exact: true }).click();
     await applyTenantScope(page);
     await page.getByRole("button", { name: /Create mailbox/i }).click();
-    await page.getByLabel("Email *").fill("new@acme.example");
+    // The domain selector is filtered to the currently-selected
+    // tenant's active domains — wait for the real option to load
+    // before choosing it, then compose the address from local
+    // part + domain (there is no free-text "Email" field: the
+    // domain must be a real one, not hand-typed).
+    await page.getByLabel("Domain *").selectOption({ label: "acme.example" });
+    await page.getByLabel("Local part *").fill("new");
     const passwordField = page.getByLabel("Password *");
     await passwordField.fill("tempSecret!2026");
     await expect(passwordField).toHaveAttribute("type", "password");

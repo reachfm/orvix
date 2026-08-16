@@ -34,17 +34,31 @@ test.describe("Platform Super Admin Mail Control", () => {
     await expect(page.getByRole("cell", { name: "beta.example", exact: true })).toBeVisible();
   });
 
-  test("domain detail shows DKIM, DMARC and mail-access policy from the real contract", async ({ page }) => {
+  test("domain detail shows DKIM and DMARC from the real contract, and does not present a domain-level mail-access-mode control", async ({ page }) => {
+    // PRODUCT DECISION: mail_access_mode is a MAILBOX-level policy in
+    // this frontend, set only from the mailbox create/detail views —
+    // see DomainDetailDrawer.tsx's header comment. The domain detail
+    // drawer (Overview tab, active by default) shows DKIM/DMARC state
+    // from the real read contract instead.
     await mockMailControlAPI(page, { portal: "platform" });
     await openPlatformShell(page);
     await page.getByRole("button", { name: "Domains", exact: true }).click();
     await applyTenantScope(page, "Acme");
     await page.getByRole("cell", { name: "acme.example", exact: true }).click();
     const drawer = page.getByLabel("acme.example");
-    await expect(drawer.getByText("Mail access policy")).toBeVisible();
-    await expect(drawer.getByText(/enabled · selector mail/)).toBeVisible();
-    await expect(drawer.getByText("Internal + external")).toBeVisible();
-    await expect(drawer.getByText(/local-to-local delivery remains permitted/i)).toBeVisible();
+    await expect(drawer.getByText(/Enabled · selector mail/)).toBeVisible();
+    await expect(drawer.getByText("Enabled", { exact: true })).toBeVisible(); // DMARC
+
+    await expect(drawer.getByText("Mail access policy")).not.toBeVisible();
+    await expect(drawer.getByText("Internal + external")).not.toBeVisible();
+    await expect(drawer.getByText(/local-to-local delivery remains permitted/i)).not.toBeVisible();
+
+    // DKIM tab: configured state + selector come from the real
+    // domain fields even without a creation-time DNS/DKIM cache (this
+    // domain was opened from the list, not just created).
+    await drawer.getByRole("tab", { name: "DKIM" }).click();
+    await expect(drawer.getByText("Configured")).toBeVisible();
+    await expect(drawer.getByText("Selector: mail")).toBeVisible();
   });
 
   test("mailbox inventory and detail load via the platform route", async ({ page }) => {
