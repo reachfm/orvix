@@ -51,6 +51,47 @@
   var API_LOGIN = '/api/v1/webmail/login';
   var GATE_ID = 'orvix-auth-gate';
 
+  // REQUEST_TIMEOUT_MS bounds every gate fetch. Without
+  // this, a backend that accepts the TCP connection but
+  // never answers (e.g. a stuck DB transaction starving
+  // the connection pool — see the 2026-08 production
+  // incident where this exact gate hung forever on
+  // "Checking your session…" with no visible error)
+  // leaves the user staring at a permanent spinner with
+  // no way to know anything is wrong. AbortController
+  // turns that silent hang into a visible error state
+  // after a bounded wait.
+  var REQUEST_TIMEOUT_MS = 15000;
+
+  function fetchWithTimeout(url, opts) {
+    opts = opts || {};
+    if (typeof AbortController !== 'function') {
+      // Ancient browser: no way to bound the fetch, fall
+      // back to the plain (unbounded) request rather than
+      // throwing.
+      return fetch(url, opts);
+    }
+    var controller = new AbortController();
+    var timedOut = false;
+    var timer = setTimeout(function () {
+      timedOut = true;
+      controller.abort();
+    }, REQUEST_TIMEOUT_MS);
+    opts.signal = controller.signal;
+    return fetch(url, opts).then(function (resp) {
+      clearTimeout(timer);
+      return resp;
+    }, function (err) {
+      clearTimeout(timer);
+      if (timedOut) {
+        var timeoutErr = new Error('Request timed out');
+        timeoutErr.isTimeout = true;
+        throw timeoutErr;
+      }
+      throw err;
+    });
+  }
+
   function $(id) { return document.getElementById(id); }
 
   function ensureGate() {
@@ -210,8 +251,10 @@
     var card = el('div', { className: 'orvix-gate-card' });
     card.appendChild(brandMark());
     card.appendChild(el('h1', { className: 'orvix-gate-title' }, 'Webmail unavailable'));
-    var msg = 'The webmail service returned an unexpected response (HTTP ' +
-      (status || 'unknown') + '). Please try again in a moment.';
+    var msg = (status === 'timeout')
+      ? 'The webmail service took too long to respond. It may be temporarily overloaded. Please try again in a moment.'
+      : 'The webmail service returned an unexpected response (HTTP ' +
+        (status || 'unknown') + '). Please try again in a moment.';
     card.appendChild(el('p', { className: 'orvix-gate-text orvix-gate-error' }, msg));
     var retry = el('button', { className: 'orvix-gate-button', type: 'button' }, 'Retry');
     retry.addEventListener('click', function () { location.reload(); });
@@ -296,7 +339,7 @@
     if (submit) submit.disabled = true;
     if (submit) submit.textContent = 'Signing in…';
 
-    fetch(API_LOGIN, {
+    fetchWithTimeout(API_LOGIN, {
       method: 'POST',
       credentials: 'include',
       headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
@@ -322,8 +365,10 @@
           submit.textContent = 'Sign in';
         }
       });
-    }).catch(function () {
-      errEl.textContent = 'Network error. Please check your connection and try again.';
+    }).catch(function (err) {
+      errEl.textContent = (err && err.isTimeout)
+        ? 'The server took too long to respond. Please try again.'
+        : 'Network error. Please check your connection and try again.';
       errEl.style.display = '';
       errEl.setAttribute('aria-hidden', 'false');
       if (submit) {
@@ -358,7 +403,7 @@
     return;
   }
 
-  fetch(API_SESSION, {
+  fetchWithTimeout(API_SESSION, {
     credentials: 'include',
     headers: { 'Accept': 'application/json' }
   }).then(function (resp) {
@@ -382,7 +427,12 @@
     } else {
       showError(resp ? resp.status : 0);
     }
-  }).catch(function () {
-    showError(0);
+  }).catch(function (err) {
+    // A timed-out probe means the backend is unreachable
+    // or wedged (e.g. its DB connection pool is
+    // starved). Surface that distinctly rather than the
+    // generic "unknown" error card so it's clear this is
+    // not a 4xx/5xx from the server.
+    showError(err && err.isTimeout ? 'timeout' : 0);
   });
 })();

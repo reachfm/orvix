@@ -1,7 +1,35 @@
 const BASE = "/api/v1";
 
+// REQUEST_TIMEOUT_MS bounds every request this client makes. Without it, a
+// backend that accepts the connection but never answers (e.g. a stuck DB
+// transaction starving the connection pool — the 2026-08 production
+// incident where admin login hung forever on "Signing in...") leaves the
+// UI in a silent spinner state with no way for the user to know anything
+// is wrong. AbortController turns that into a visible, retriable error
+// after a bounded wait.
+const REQUEST_TIMEOUT_MS = 15000;
+
 let csrfTokenValue = "";
 let csrfTokenPromise: Promise<string> | null = null;
+
+async function fetchWithTimeout(input: string, init?: RequestInit): Promise<Response> {
+  const controller = new AbortController();
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, REQUEST_TIMEOUT_MS);
+  try {
+    return await fetch(input, { ...init, signal: controller.signal });
+  } catch (err) {
+    if (timedOut) {
+      throw new ApiError("REQUEST_TIMEOUT", "The server took too long to respond. Please try again.", 0);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 /**
  * ApiError carries the stable machine-readable `code` from the typed backend
@@ -97,7 +125,7 @@ export async function initCSRF(): Promise<void> {
     return;
   }
   csrfTokenPromise = (async () => {
-    const res = await fetch(`${BASE}/csrf-token`, { credentials: "include" });
+    const res = await fetchWithTimeout(`${BASE}/csrf-token`, { credentials: "include" });
     if (!res.ok) {
       csrfTokenPromise = null;
       throw new Error(`CSRF token fetch failed: ${res.status}`);
@@ -162,7 +190,7 @@ export async function request<T>(path: string, options?: RequestOptions): Promis
     headers["X-CSRF-Token"] = csrfTokenValue;
   }
 
-  const res = await fetch(`${BASE}${path}`, {
+  const res = await fetchWithTimeout(`${BASE}${path}`, {
     ...options,
     credentials: "include",
     headers,

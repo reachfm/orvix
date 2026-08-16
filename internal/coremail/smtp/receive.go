@@ -1410,10 +1410,20 @@ func deliveryDedupKey(internetMessageID string) string {
 // recipient's delivery already happened, skip it" rather than as a
 // failure.
 func (r *Receiver) claimDeliveryDedup(ctx context.Context, tx *sql.Tx, mailboxID uint, key, messageID string) (claimed bool, err error) {
-	dialect, derr := dbdialect.Detect(r.DB)
-	if derr != nil || dialect == nil {
-		dialect = dbdialect.FromDriver("sqlite")
-	}
+	// MUST use the cached dialect (warmed by getDialect() before
+	// BeginTx — see the comment at AcceptMessage's "Dialect detection
+	// MUST run before BeginTx" line) rather than calling
+	// dbdialect.Detect against the pool here. This function runs
+	// INSIDE the acceptance transaction; on a single-connection
+	// SQLite pool the open transaction already holds the only
+	// connection, so a fresh Detect() call — which itself queries the
+	// pool — would deadlock forever waiting for a second connection
+	// that can never be granted. This exact bug reached production
+	// (every inbound message with a Message-ID header hung the
+	// acceptance transaction, starving the single SQLite connection
+	// and hanging every other DB-dependent request in the app,
+	// including unrelated CSRF token generation and login).
+	dialect := r.getDialect()
 	var res sql.Result
 	if dialect.IsPostgres() {
 		res, err = tx.ExecContext(ctx,
