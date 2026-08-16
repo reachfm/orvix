@@ -61,13 +61,22 @@ export function useSetTenantScope() {
       // into the newly selected tenant's view.
       qc.setQueryData(TENANT_SCOPE_QUERY_KEY, state);
       writeLastTenantScope(state);
-      qc.removeQueries({ queryKey: ["platform-domains"] });
+      qc.removeQueries({
+        queryKey: ["platform-domains"],
+        predicate: (q) => q.queryKey[1] !== "dns-cache",
+      });
       qc.removeQueries({ queryKey: ["platform-mailboxes"] });
       qc.removeQueries({ queryKey: ["platform-aliases"] });
       qc.removeQueries({ queryKey: ["platform-groups"] });
       qc.removeQueries({ queryKey: ["platform-suppressions"] });
       qc.removeQueries({ queryKey: ["platform-deliverability"] });
       qc.removeQueries({ queryKey: ["platform-bulk-mailboxes"] });
+      // NOTE: the one-time DNS/DKIM creation-response cache
+      // (domainKeys.dnsCache) is deliberately NOT cleared here — its key
+      // already embeds the tenant id, so it can never leak across
+      // tenants, and clearing it here would also wipe the cache entry a
+      // domain-creation success handler just seeded in the SAME tick
+      // (this mutation runs as part of that same success flow).
       // B-3: billing is tenant-scoped too. Without this, switching
       // tenants would leave the previous customer's balance,
       // adjustments and reconciliation on screen.
@@ -82,13 +91,22 @@ export function useClearTenantScope() {
     mutationFn: () => Promise.resolve(undefined),
     onSuccess: () => {
       qc.setQueryData(TENANT_SCOPE_QUERY_KEY, { tenantId: null });
-      qc.removeQueries({ queryKey: ["platform-domains"] });
+      qc.removeQueries({
+        queryKey: ["platform-domains"],
+        predicate: (q) => q.queryKey[1] !== "dns-cache",
+      });
       qc.removeQueries({ queryKey: ["platform-mailboxes"] });
       qc.removeQueries({ queryKey: ["platform-aliases"] });
       qc.removeQueries({ queryKey: ["platform-groups"] });
       qc.removeQueries({ queryKey: ["platform-suppressions"] });
       qc.removeQueries({ queryKey: ["platform-deliverability"] });
       qc.removeQueries({ queryKey: ["platform-bulk-mailboxes"] });
+      // NOTE: the one-time DNS/DKIM creation-response cache
+      // (domainKeys.dnsCache) is deliberately NOT cleared here — its key
+      // already embeds the tenant id, so it can never leak across
+      // tenants, and clearing it here would also wipe the cache entry a
+      // domain-creation success handler just seeded in the SAME tick
+      // (this mutation runs as part of that same success flow).
       // B-3: billing is tenant-scoped too. Without this, switching
       // tenants would leave the previous customer's balance,
       // adjustments and reconciliation on screen.

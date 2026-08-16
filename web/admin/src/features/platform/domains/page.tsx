@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Loader2, AlertCircle, Search, Plus } from "lucide-react";
 import TenantScopeBanner from "../tenant-context/components/TenantScopeBanner";
 import { useTenantScope } from "../tenant-context/queries";
@@ -25,10 +25,22 @@ export default function DomainsPage() {
   const [statusFilter, setStatusFilter] = useState("");
   const [page, setPage] = useState(0);
   const [selectedId, setSelectedId] = useState<number | null>(null);
+  const [selectedInitialTab, setSelectedInitialTab] = useState<"overview" | "dns" | "dkim" | "lifecycle">("overview");
   const [showCreate, setShowCreate] = useState(false);
   const createTriggerRef = useRef<HTMLButtonElement>(null);
 
   const tenantId = scope?.tenantId ?? null;
+
+  // Switching tenant scope must close an incompatible detail view — a
+  // domain id opened under the previous tenant is never valid for the
+  // new one, and its query cache is already evicted by useSetTenantScope.
+  const prevTenantIdRef = useRef(tenantId);
+  useEffect(() => {
+    if (prevTenantIdRef.current !== tenantId) {
+      setSelectedId(null);
+      prevTenantIdRef.current = tenantId;
+    }
+  }, [tenantId]);
 
   const listQ = usePlatformDomains(tenantId, {
     q: query || undefined,
@@ -117,7 +129,7 @@ export default function DomainsPage() {
             <>
               <DomainTable
                 domains={domains}
-                onSelect={(d) => setSelectedId(d.id)}
+                onSelect={(d) => { setSelectedInitialTab("overview"); setSelectedId(d.id); }}
               />
               <PaginationControls page={page} pageSize={PAGE_SIZE} total={total} onChange={setPage} />
             </>
@@ -126,13 +138,19 @@ export default function DomainsPage() {
       )}
 
       {tenantId !== null && selectedId !== null && (
-        <DomainDetailDrawer tenantId={tenantId} id={selectedId} onClose={() => setSelectedId(null)} />
+        <DomainDetailDrawer
+          key={selectedId}
+          tenantId={tenantId}
+          id={selectedId}
+          initialTab={selectedInitialTab}
+          onClose={() => setSelectedId(null)}
+        />
       )}
 
       {showCreate && (
         <CreateDomainDialog
           initialTenantId={tenantId}
-          onCreated={(domainId) => setSelectedId(domainId)}
+          onCreated={(domainId) => { setSelectedInitialTab("dns"); setSelectedId(domainId); }}
           onClose={() => {
             setShowCreate(false);
             // The dialog unmounts on close rather than staying mounted with

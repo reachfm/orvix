@@ -125,6 +125,8 @@ describe("features/platform/domains (platform routes)", () => {
     renderPage(7);
     await waitFor(() => expect(screen.getByText("acme.example")).toBeInTheDocument());
     fireEvent.click(screen.getByText("acme.example"));
+    await waitFor(() => expect(screen.getByRole("tab", { name: "Lifecycle" })).toBeInTheDocument());
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "Lifecycle" }));
     await waitFor(() => expect(screen.getByText("Lifecycle status")).toBeInTheDocument());
 
     fireEvent.change(screen.getByLabelText("New domain status"), { target: { value: "suspended" } });
@@ -140,6 +142,8 @@ describe("features/platform/domains (platform routes)", () => {
     renderPage(7);
     await waitFor(() => expect(screen.getByText("acme.example")).toBeInTheDocument());
     fireEvent.click(screen.getByText("acme.example"));
+    await waitFor(() => expect(screen.getByRole("tab", { name: "Lifecycle" })).toBeInTheDocument());
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "Lifecycle" }));
     await waitFor(() => expect(screen.getByText("Lifecycle status")).toBeInTheDocument());
     expect(screen.queryByText("Mail access policy")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("New mail access mode")).not.toBeInTheDocument();
@@ -202,5 +206,77 @@ describe("features/platform/domains (platform routes)", () => {
     fireEvent.click(screen.getByRole("button", { name: "Create domain" }));
     await waitFor(() => expect(screen.getByRole("alert")).toBeInTheDocument());
     expect(screen.queryByText("Domain created")).not.toBeInTheDocument();
+  });
+
+  it("links a newly-created domain's 'View domain' action to the DNS Setup tab, showing the real one-time creation records", async () => {
+    renderPage(7);
+    await waitFor(() => expect(screen.getByText("acme.example")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /create domain/i }));
+    fireEvent.change(screen.getByLabelText("Domain name *"), { target: { value: "new.example.com" } });
+
+    mockedRequest.mockImplementation((path: string, opts?: Parameters<typeof request>[1]) => {
+      if (path === "/platform/domains/7" && opts?.body) {
+        return Promise.resolve({
+          domain: { id: 99, tenant_id: 7, name: "new.example.com", status: "active", plan: "business", mailbox_count: 0, alias_count: 0, dkim_enabled: true, dkim_selector: "mail", dmarc_enabled: false, mail_access_mode: "inherit", created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z" },
+          effective_limits: { max_mailboxes: 50, max_mailboxes_unlimited: false, max_mailboxes_inherited: true, max_aliases: 50, max_aliases_unlimited: false, max_aliases_inherited: true, default_mailbox_quota_mb: 1024, max_mailbox_quota_mb: 10240, max_mailbox_quota_mb_unlimited: false, max_mailbox_quota_mb_inherited: true, default_mailbox_quota_mb_inherited: true },
+          dkim: { selector: "mail", public_dns_txt: "v=DKIM1; k=rsa; p=abcVERYLONGKEYDATAxyz", dns_record_name: "mail._domainkey.new.example.com" },
+          dns_requirements: [
+            { name: "new.example.com", type: "MX", value: "mail.orvix.email", ttl: 3600, priority: 10, required: true, purpose: "Mail routing" },
+            { name: "new.example.com", type: "TXT", value: "v=spf1 include:orvix.email ~all", ttl: 3600, required: true, purpose: "SPF" },
+          ],
+          dns_next_step: "publish_and_verify_dns",
+          public_dns_changed: false,
+          idempotent: false,
+        });
+      }
+      if (path.startsWith("/platform/domains/7/99")) {
+        return Promise.resolve({ id: 99, tenant_id: 7, name: "new.example.com", status: "active", plan: "business", mailbox_count: 0, alias_count: 0, dkim_enabled: true, dkim_selector: "mail", dmarc_enabled: false, mail_access_mode: "inherit", created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z" });
+      }
+      if (path.startsWith("/platform/organizations")) return Promise.resolve({ organizations: [{ id: 7, name: "Acme", slug: "acme", domain: "acme.example", plan: "business", active: true, mailbox_count: 12, domain_count: 1, created_at: "2026-01-01T00:00:00Z" }], total: 1 });
+      if (path.startsWith("/platform/domains/7")) return Promise.resolve(DOMAINS);
+      return Promise.resolve({});
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Create domain" }));
+    await waitFor(() => expect(screen.getByText("Domain created")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: "View domain" }));
+
+    await waitFor(() => expect(screen.getByRole("tab", { name: "DNS Setup" })).toBeInTheDocument());
+
+    // Lands directly on DNS Setup — no extra tab click needed.
+    await waitFor(() => expect(screen.getByText("Mail routing")).toBeInTheDocument());
+    expect(screen.getByText("mail.orvix.email")).toBeInTheDocument();
+    expect(screen.getByText(/v=spf1 include:orvix.email/)).toBeInTheDocument();
+
+    // Copy-all works via the real clipboard API mock.
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.assign(navigator, { clipboard: { writeText } });
+    fireEvent.click(screen.getByRole("button", { name: /copy all/i }));
+    await waitFor(() => expect(writeText).toHaveBeenCalled());
+    expect(writeText.mock.calls[0][0]).toContain("mail.orvix.email");
+
+    // DKIM tab shows the real public TXT value; the reassurance text
+    // mentions "private key" deliberately (never shown/requested) — what
+    // must never appear is an actual private-key input or PEM material.
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "DKIM" }));
+    await waitFor(() => expect(screen.getByText(/v=DKIM1/)).toBeInTheDocument());
+    expect(screen.queryByText(/BEGIN (RSA |EC )?PRIVATE KEY/i)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/private key/i)).not.toBeInTheDocument();
+  });
+
+  it("closes the detail drawer when tenant scope switches — a previous tenant's domain id must not survive", async () => {
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    qc.setQueryData(TENANT_SCOPE_QUERY_KEY, { tenantId: 7, tenantName: "Acme" });
+    render(<QueryClientProvider client={qc}><DomainsPage /></QueryClientProvider>);
+
+    await waitFor(() => expect(screen.getByText("acme.example")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("acme.example"));
+    await waitFor(() => expect(screen.getByRole("tab", { name: "Overview" })).toBeInTheDocument());
+
+    // Directly simulate a tenant-scope switch (as TenantScopeBanner would trigger).
+    qc.setQueryData(TENANT_SCOPE_QUERY_KEY, { tenantId: 8, tenantName: "Beta Co" });
+
+    await waitFor(() => expect(screen.queryByRole("tab", { name: "Overview" })).not.toBeInTheDocument());
   });
 });

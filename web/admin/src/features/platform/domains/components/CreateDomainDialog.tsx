@@ -1,7 +1,9 @@
 import { useMemo, useState } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
+import { useQueryClient } from "@tanstack/react-query";
 import { X, Copy, Check, AlertTriangle, Loader2, ChevronDown, ChevronRight } from "lucide-react";
 import { useCreateDomainMutation } from "../mutations";
+import { domainKeys } from "../queries";
 import { useSetTenantScope } from "../../tenant-context/queries";
 import TenantSelectField from "../../tenant-context/components/TenantSelectField";
 import { safeErrorInfo } from "../../errors";
@@ -37,6 +39,7 @@ export default function CreateDomainDialog({
 }) {
   const [tenantId, setTenantId] = useState<number | null>(initialTenantId);
   const setScope = useSetTenantScope();
+  const qc = useQueryClient();
   const createMut = useCreateDomainMutation(tenantId);
 
   const [name, setName] = useState("");
@@ -107,6 +110,17 @@ export default function CreateDomainDialog({
           // can copy what they need; "View domain" below opens the
           // detail view explicitly when they're ready.
           setScope.mutate({ tenantId, tenantName: undefined });
+          // Seed the DNS/DKIM one-time cache so the detail view's DNS
+          // Setup/DKIM tabs can show the real records the backend just
+          // returned — this data is NEVER available again from any GET
+          // route, so it must be carried forward now or not at all.
+          if (tenantId !== null) {
+            qc.setQueryData(domainKeys.dnsCache(tenantId, res.domain.id), {
+              dkim: res.dkim,
+              dns_requirements: res.dns_requirements,
+              dns_next_step: res.dns_next_step,
+            });
+          }
         },
         onError: (e) => setError(e),
       },
