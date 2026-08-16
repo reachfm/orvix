@@ -39,6 +39,7 @@ export async function mockProvisioningAPI(page: Page) {
     mailbox_count: 12, alias_count: 3, dkim_enabled: true, dkim_selector: "mail",
     dmarc_enabled: true, mail_access_mode: "internal_external",
     created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-02T00:00:00Z",
+    version: domainVersion,
   });
 
   const MAILBOX = () => ({

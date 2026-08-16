@@ -1,6 +1,19 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { createPlatformDomain, setPlatformDomainMailAccessMode, setPlatformDomainStatus } from "./api";
-import type { MailAccessMode, PlatformCreateDomainRequest } from "./contract";
+import {
+  createPlatformDomain,
+  deactivatePlatformDomain,
+  generatePlatformDomainDKIM,
+  rotatePlatformDomainDKIM,
+  setPlatformDomainMailAccessMode,
+  setPlatformDomainStatus,
+} from "./api";
+import { domainKeys } from "./queries";
+import type {
+  DeactivatePlatformDomainRequest,
+  MailAccessMode,
+  PlatformCreateDomainRequest,
+  PlatformDKIMMutationRequest,
+} from "./contract";
 
 export function domainInvalidationKeys() {
   return [
@@ -50,6 +63,64 @@ export function useSetMailAccessModeMutation(tenantId: number | null) {
     mutationFn: ({ id, mailAccessMode }: { id: number; mailAccessMode: MailAccessMode }) =>
       setPlatformDomainMailAccessMode(tenantId as number, id, { mail_access_mode: mailAccessMode }),
     onSuccess: () => {
+      for (const key of domainInvalidationKeys()) qc.invalidateQueries({ queryKey: key });
+    },
+  });
+}
+
+/**
+ * Provisions a new DKIM key pair for an existing domain that does not
+ * already have one. On success, refetches domain detail, the live DNS
+ * snapshot, and the domain list — the caller never assumes the new
+ * state before the backend confirms it.
+ */
+export function useGenerateDKIMMutation(tenantId: number | null) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, body, idempotencyKey }: { id: number; body: PlatformDKIMMutationRequest; idempotencyKey: string }) =>
+      generatePlatformDomainDKIM(tenantId as number, id, body, idempotencyKey),
+    onSuccess: (_result, { id }) => {
+      qc.invalidateQueries({ queryKey: domainKeys.detail(tenantId, id) });
+      qc.invalidateQueries({ queryKey: domainKeys.dns(tenantId, id) });
+      for (const key of domainInvalidationKeys()) qc.invalidateQueries({ queryKey: key });
+    },
+  });
+}
+
+/**
+ * Replaces an existing DKIM key pair. body.confirm_rotation must be
+ * "rotate-dkim-key". On success, refetches domain detail and the live
+ * DNS snapshot so the newly rotated public value is rendered — never
+ * an old TXT value retained as if it were current.
+ */
+export function useRotateDKIMMutation(tenantId: number | null) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, body, idempotencyKey }: { id: number; body: PlatformDKIMMutationRequest; idempotencyKey: string }) =>
+      rotatePlatformDomainDKIM(tenantId as number, id, body, idempotencyKey),
+    onSuccess: (_result, { id }) => {
+      qc.invalidateQueries({ queryKey: domainKeys.detail(tenantId, id) });
+      qc.invalidateQueries({ queryKey: domainKeys.dns(tenantId, id) });
+      for (const key of domainInvalidationKeys()) qc.invalidateQueries({ queryKey: key });
+    },
+  });
+}
+
+/**
+ * Canonical, audited platform domain deactivate/soft-delete. Requires
+ * the real currently-loaded domain.version as expected_version and the
+ * exact typed confirmation phrase (see deactivateDomainConfirmation).
+ * On success, invalidates list/detail/DNS state so the row never stays
+ * visually Active.
+ */
+export function useDeactivateDomainMutation(tenantId: number | null) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, body, idempotencyKey }: { id: number; body: DeactivatePlatformDomainRequest; idempotencyKey: string }) =>
+      deactivatePlatformDomain(tenantId as number, id, body, idempotencyKey),
+    onSuccess: (_result, { id }) => {
+      qc.invalidateQueries({ queryKey: domainKeys.detail(tenantId, id) });
+      qc.invalidateQueries({ queryKey: domainKeys.dns(tenantId, id) });
       for (const key of domainInvalidationKeys()) qc.invalidateQueries({ queryKey: key });
     },
   });

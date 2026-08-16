@@ -1,20 +1,23 @@
 // Exact contracts for the Platform Super Admin domain routes
 // (internal/api/router.go: /platform/domains/:tenant_id,
-// /platform/domains/:tenant_id/:id, .../status, .../mail-access-mode).
+// /platform/domains/:tenant_id/:id, .../status, .../mail-access-mode,
+// .../dns, .../dkim/generate, .../dkim/rotate, .../deactivate).
 //
 // Wire shapes match the Go structs field-for-field:
-//   - PlatformDomain: internal/platform/mailcontrol/domain.go
-//   - PlatformDomainList: internal/platform/mailcontrol/domain.go
+//   - PlatformDomain, PlatformDomainList, PlatformDomainDNSResult,
+//     PlatformDKIMResult: internal/platform/mailcontrol/domain.go
+//   - deactivate request/response: internal/api/handlers/platform_domain_lifecycle.go
 //
 // The backend exposes: list, detail, creation (POST
 // /platform/domains/:tenant_id — internal/api/handlers/platform_provisioning.go's
 // CreatePlatformDomain), lifecycle status mutation (active | disabled |
 // suspended — the writable set from internal/admin/domain/types.go
-// ParseDomainStatus; "locked" and "deleted" are read-side values only)
-// and the DOMAIN-level mail-access-mode mutation (internal_only |
+// ParseDomainStatus; "locked" and "deleted" are read-side values only),
+// the DOMAIN-level mail-access-mode mutation (internal_only |
 // internal_external — a distinct, pre-existing route from mailbox
-// creation's access-mode choice). DNS record detail beyond the
-// one-time creation response, DKIM rotation, TLS/ACME state,
+// creation's access-mode choice), a read-only existing-domain DNS/DKIM
+// snapshot (GET .../dns), version-guarded DKIM generate/rotate, and the
+// canonical audited deactivate/soft-delete route. TLS/ACME state,
 // update-after-create, and hard deletion are NOT part of this route
 // family — the UI must not fabricate them.
 //
@@ -37,6 +40,14 @@ export interface PlatformDomain {
   mail_access_mode: string;
   created_at: string;
   updated_at: string;
+  /**
+   * Real optimistic-concurrency counter from coremail_domains.version
+   * (mailcontrol.PlatformDomain.Version). Backend truth only — never
+   * fabricated, defaulted to 0, derived from timestamps, or incremented
+   * client-side. Passed back as expected_version on guarded mutations
+   * (dkim/generate, dkim/rotate, deactivate).
+   */
+  version: number;
 }
 
 export interface PlatformDomainList {
@@ -123,12 +134,17 @@ export interface PlatformEffectiveLimits {
 /**
  * PUBLIC DKIM result only — selector and the public DNS TXT record.
  * The backend NEVER returns a private key on this or any route; the
- * UI must never render or expect one.
+ * UI must never render or expect one. This is the SAME Go struct
+ * (mailcontrol.PlatformDKIMResult) used both by domain creation's
+ * optional dkim field and by the generate/rotate mutation responses —
+ * version is set only by the version-guarded generate/rotate route
+ * (zero/absent on the creation-response usage).
  */
 export interface PlatformDKIMResult {
   selector: string;
   public_dns_txt: string;
   dns_record_name: string;
+  version?: number;
 }
 
 export interface PlatformDNSRequirement {
@@ -162,4 +178,72 @@ export interface PlatformCreateDomainResult {
   public_dns_changed: boolean;
   plan?: PlatformPlanSummary;
   idempotent: boolean;
+}
+
+// ── Existing-domain DNS/DKIM snapshot (GET .../dns) ─────────────────
+// Field-for-field match of mailcontrol.PlatformDomainDNSResult. A
+// read-only snapshot for an EXISTING domain — distinct from the
+// one-time creation response above. dkim_configured=false means the
+// dkim_* fields are all absent (an honest not-configured state, never
+// a placeholder). No private key material is ever part of this or any
+// contract in this feature.
+export interface PlatformDomainDNSResult {
+  tenant_id: number;
+  domain_id: number;
+  domain: string;
+  version: number;
+  status: string;
+  dkim_configured: boolean;
+  dkim_selector?: string;
+  dkim_dns_record_name?: string;
+  dkim_public_dns_txt?: string;
+  dns_requirements?: PlatformDNSRequirement[];
+  dns_next_step?: string;
+}
+
+// ── DKIM generate/rotate (POST .../dkim/generate, .../dkim/rotate) ──
+// Field-for-field match of the platformDKIMMutation request body
+// (internal/api/handlers/platform_mail_control.go) and PlatformDKIMResult
+// response. confirm_rotation is REQUIRED (and must equal exactly
+// "rotate-dkim-key") on rotate only; generate must omit/leave it blank.
+export interface PlatformDKIMMutationRequest {
+  /** Empty string lets the backend default to its standard selector ("orvix"). */
+  selector?: string;
+  /** Rotate only: must be exactly "rotate-dkim-key". Omitted for generate. */
+  confirm_rotation?: string;
+  expected_version: number;
+}
+
+/**
+ * Response to both generate and rotate: the same PlatformDKIMResult
+ * Go struct as the creation response, with version always populated.
+ * NEVER a private key — the backend does not return one on this or
+ * any route, and this contract must never grow a private_key field.
+ */
+export type PlatformDKIMMutationResult = Required<Pick<PlatformDKIMResult, "selector" | "public_dns_txt" | "dns_record_name" | "version">>;
+
+// ── Deactivate / soft-delete (POST .../deactivate) ──────────────────
+// Field-for-field match of internal/api/handlers/platform_domain_lifecycle.go's
+// DeactivatePlatformDomain request/response. This is the canonical,
+// audited platform domain deactivation — NOT a hard delete: it sets
+// status=disabled and deactivated_at but never touches deleted_at and
+// never purges DKIM config or history. confirm MUST equal exactly
+// `DEACTIVATE-DOMAIN-<id>` (see deactivateDomainConfirmation below).
+export interface DeactivatePlatformDomainRequest {
+  confirm: string;
+  reason: string;
+  expected_version: number;
+}
+
+export interface DeactivatePlatformDomainResponse {
+  id: number;
+  tenant_id: number;
+  status: string;
+  version: number;
+  request_id: string;
+}
+
+/** The exact typed-confirmation phrase the backend requires for deactivate. */
+export function deactivateDomainConfirmation(domainId: number): string {
+  return `DEACTIVATE-DOMAIN-${domainId}`;
 }

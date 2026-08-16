@@ -1,12 +1,18 @@
 import { useState } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import * as Tabs from "@radix-ui/react-tabs";
-import { X, Loader2, AlertCircle, Copy, Check, AlertTriangle } from "lucide-react";
+import { X, Loader2, AlertCircle, Copy, Check, AlertTriangle, ShieldAlert } from "lucide-react";
 import StatusBadge from "../../components/StatusBadge";
-import { usePlatformDomain, useDomainDNSCache } from "../queries";
-import { useSetDomainStatusMutation } from "../mutations";
+import ConfirmDialog from "../../../../components/ConfirmDialog";
+import { usePlatformDomain, useDomainDNSCache, usePlatformDomainDNS } from "../queries";
+import {
+  useSetDomainStatusMutation,
+  useGenerateDKIMMutation,
+  useRotateDKIMMutation,
+  useDeactivateDomainMutation,
+} from "../mutations";
 import { domainStatusLabel, domainStatusTone, formatTimestamp } from "../formatters";
-import { DOMAIN_STATUSES } from "../contract";
+import { DOMAIN_STATUSES, deactivateDomainConfirmation, type PlatformDomainDNSResult } from "../contract";
 import { safeErrorInfo } from "../../errors";
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
@@ -58,20 +64,25 @@ function CopyButton({
 /**
  * Domain detail: Overview / DNS Setup / DKIM / Lifecycle tabs.
  *
- * DNS Setup and DKIM are backed ONLY by the one-time domain-creation
- * response (see queries.ts's dnsCache) — GetPlatformDomain never
- * re-exposes DNS requirements or the public DKIM TXT value, and there
- * is no generate/rotate route for an EXISTING domain
- * (internal/api/router.go's /platform/domains/:tenant_id family has
- * only list/detail/create/status/mail-access-mode/deactivate). Both
- * tabs are honest about this: they show the cache when present (a
- * domain just created in this session) and a clear "not available"
- * state otherwise — never a fabricated or re-derived value.
+ * DNS Setup and DKIM are backed by the LIVE existing-domain snapshot
+ * (GET /platform/domains/:tenant_id/:id/dns — usePlatformDomainDNS).
+ * The one-time domain-creation response cache (queries.ts's dnsCache)
+ * is used ONLY as an immediate-paint placeholder right after "View
+ * domain" from a just-created domain, while the live fetch is still in
+ * flight — the live snapshot always supersedes it once loaded, so a
+ * stale creation cache can never override newer server state.
  *
- * Lifecycle intentionally does NOT wire the deactivate route
- * (POST .../deactivate): it requires expected_version, and
- * GetPlatformDomain's response has no version field to source that
- * value from safely — see the final report for this exact gap.
+ * DKIM generate/rotate call the real version-guarded backend routes
+ * (POST .../dkim/generate, POST .../dkim/rotate) and refresh the live
+ * snapshot on success. The backend never returns a private key on any
+ * route, and this UI never renders, stores, or requests one.
+ *
+ * Lifecycle keeps the existing Active/Disabled/Suspended status
+ * control, plus a separate danger-zone Deactivate action wired to the
+ * canonical audited POST .../deactivate route, using the domain's real
+ * current `version` as expected_version and a typed confirmation
+ * phrase. This is a soft-delete (status=disabled, deactivated_at set)
+ * — never a hard delete.
  *
  * PRODUCT DECISION: mail_access_mode is a MAILBOX-level policy, not a
  * domain-level one, in this frontend — it is set and changed on the
@@ -90,17 +101,100 @@ export default function DomainDetailDrawer({
 }) {
   const { data: domain, isLoading, isError, error, refetch } = usePlatformDomain(tenantId, id);
   const dnsCache = useDomainDNSCache(tenantId, id);
+  const dnsQuery = usePlatformDomainDNS(tenantId, id);
   const statusMut = useSetDomainStatusMutation(tenantId);
+  const generateDKIMMut = useGenerateDKIMMutation(tenantId);
+  const rotateDKIMMut = useRotateDKIMMutation(tenantId);
+  const deactivateMut = useDeactivateDomainMutation(tenantId);
   const [statusDraft, setStatusDraft] = useState("");
   const [mutationError, setMutationError] = useState<unknown>(null);
+  const [dkimError, setDkimError] = useState<unknown>(null);
+  const [rotateConfirmOpen, setRotateConfirmOpen] = useState(false);
+  const [deactivateConfirmOpen, setDeactivateConfirmOpen] = useState(false);
+  const [deactivateReason, setDeactivateReason] = useState("");
+  const [deactivateError, setDeactivateError] = useState<unknown>(null);
   const { copiedField, copy, announcement } = useCopy();
 
   const submitting = statusMut.isPending;
 
-  const allRecordsText = dnsCache?.dns_requirements
-    ? dnsCache.dns_requirements.map((r) => `${r.name} ${r.type} ${r.priority ? r.priority + " " : ""}${r.value}`).join("\n") +
-      (dnsCache.dkim ? `\n${dnsCache.dkim.dns_record_name} TXT ${dnsCache.dkim.public_dns_txt}` : "")
+  // Immediate-paint placeholder from the creation-response cache,
+  // shaped to match the live PlatformDomainDNSResult contract. Only
+  // used until the live query resolves.
+  const cacheAsDNSResult: PlatformDomainDNSResult | null =
+    dnsCache && domain
+      ? {
+          tenant_id: domain.tenant_id,
+          domain_id: domain.id,
+          domain: domain.name,
+          version: domain.version,
+          status: domain.status,
+          dkim_configured: !!dnsCache.dkim,
+          dkim_selector: dnsCache.dkim?.selector,
+          dkim_dns_record_name: dnsCache.dkim?.dns_record_name,
+          dkim_public_dns_txt: dnsCache.dkim?.public_dns_txt,
+          dns_requirements: dnsCache.dns_requirements,
+          dns_next_step: dnsCache.dns_next_step,
+        }
+      : null;
+
+  // Live snapshot is authoritative; the cache placeholder is used only
+  // while it hasn't loaded yet.
+  const dns = dnsQuery.data ?? cacheAsDNSResult;
+
+  const allRecordsText = dns?.dns_requirements
+    ? dns.dns_requirements.map((r) => `${r.name} ${r.type} ${r.priority ? r.priority + " " : ""}${r.value}`).join("\n") +
+      (dns.dkim_configured && dns.dkim_dns_record_name && dns.dkim_public_dns_txt
+        ? `\n${dns.dkim_dns_record_name} TXT ${dns.dkim_public_dns_txt}`
+        : "")
     : "";
+
+  function submitGenerateDKIM() {
+    if (!domain) return;
+    setDkimError(null);
+    generateDKIMMut.mutate(
+      { id: domain.id, body: { expected_version: domain.version }, idempotencyKey: crypto.randomUUID() },
+      { onError: (e) => setDkimError(e) },
+    );
+  }
+
+  function submitRotateDKIM() {
+    if (!domain) return;
+    setDkimError(null);
+    rotateDKIMMut.mutate(
+      {
+        id: domain.id,
+        body: { confirm_rotation: "rotate-dkim-key", expected_version: domain.version },
+        idempotencyKey: crypto.randomUUID(),
+      },
+      {
+        onSuccess: () => setRotateConfirmOpen(false),
+        onError: (e) => setDkimError(e),
+      },
+    );
+  }
+
+  function submitDeactivate() {
+    if (!domain) return;
+    setDeactivateError(null);
+    deactivateMut.mutate(
+      {
+        id: domain.id,
+        body: {
+          confirm: deactivateDomainConfirmation(domain.id),
+          reason: deactivateReason.trim(),
+          expected_version: domain.version,
+        },
+        idempotencyKey: crypto.randomUUID(),
+      },
+      {
+        onSuccess: () => {
+          setDeactivateConfirmOpen(false);
+          onClose();
+        },
+        onError: (e) => setDeactivateError(e),
+      },
+    );
+  }
 
   return (
     <Dialog.Root open onOpenChange={(o) => !o && onClose()}>
@@ -185,13 +279,28 @@ export default function DomainDetailDrawer({
                 </Tabs.Content>
 
                 <Tabs.Content value="dns" className="space-y-4 outline-none">
-                  {dnsCache?.dns_requirements && dnsCache.dns_requirements.length > 0 ? (
+                  {dnsQuery.isLoading && !dns ? (
+                    <div className="flex items-center justify-center h-24">
+                      <Loader2 size={20} className="text-[var(--accent)] animate-spin" />
+                    </div>
+                  ) : dnsQuery.isError && !dns ? (
+                    <div className="border border-[var(--danger)]/30 rounded-lg p-4" role="alert">
+                      <p className="text-sm font-medium text-[var(--danger)]">Failed to load DNS records</p>
+                      <p className="text-xs text-[var(--text-secondary)] mt-0.5">{safeErrorInfo(dnsQuery.error).detail}</p>
+                      <button
+                        type="button"
+                        onClick={() => dnsQuery.refetch()}
+                        className="mt-3 px-3 py-1.5 text-sm rounded border border-[var(--border)] text-[var(--text-primary)] hover:bg-[var(--bg-elevated)]"
+                      >
+                        Retry
+                      </button>
+                    </div>
+                  ) : dns?.dns_requirements && dns.dns_requirements.length > 0 ? (
                     <>
                       <div className="flex items-center justify-between gap-2">
                         <p className="text-xs text-[var(--text-secondary)]">
-                          Records returned when this domain was created. The platform does not re-expose DNS
-                          records for an existing domain, and does not perform DNS verification from the browser —
-                          publish these with your DNS provider and verify with standard DNS tools.
+                          Live DNS records for this domain. The platform does not perform DNS verification from the
+                          browser — publish these with your DNS provider and verify with standard DNS tools.
                         </p>
                         <button
                           type="button"
@@ -203,7 +312,7 @@ export default function DomainDetailDrawer({
                         </button>
                       </div>
                       <ul className="space-y-2">
-                        {dnsCache.dns_requirements.map((rec, i) => {
+                        {dns.dns_requirements.map((rec, i) => {
                           const field = `dns-${i}`;
                           return (
                             <li key={field} className="border border-[var(--border)] rounded-lg p-3">
@@ -248,18 +357,17 @@ export default function DomainDetailDrawer({
                           );
                         })}
                       </ul>
-                      {dnsCache.dns_next_step && (
-                        <p className="text-xs text-[var(--text-secondary)]">{dnsCache.dns_next_step}</p>
+                      {dns.dns_next_step && (
+                        <p className="text-xs text-[var(--text-secondary)]">{dns.dns_next_step}</p>
                       )}
                     </>
                   ) : (
                     <div className="border border-[var(--border)] rounded-lg p-4 flex items-start gap-3">
                       <AlertTriangle size={16} className="text-[var(--text-muted)] shrink-0 mt-0.5" />
                       <div>
-                        <p className="text-sm font-medium text-[var(--text-primary)]">DNS records unavailable</p>
+                        <p className="text-sm font-medium text-[var(--text-primary)]">No DNS requirement records returned</p>
                         <p className="text-xs text-[var(--text-secondary)] mt-1">
-                          The platform only returns DNS records at the moment a domain is created — there is no
-                          route to re-fetch them for an existing domain. DKIM is{" "}
+                          The live DNS snapshot for this domain returned no requirement records. DKIM is{" "}
                           {domain.dkim_enabled ? "enabled" : "not enabled"} on this domain
                           {domain.dkim_selector ? ` (selector ${domain.dkim_selector})` : ""}.
                         </p>
@@ -270,45 +378,89 @@ export default function DomainDetailDrawer({
 
                 <Tabs.Content value="dkim" className="space-y-4 outline-none">
                   <div className="flex items-center gap-2">
-                    <StatusBadge tone={domain.dkim_enabled ? "success" : "neutral"}>
-                      {domain.dkim_enabled ? "Configured" : "Not configured"}
+                    <StatusBadge tone={dns?.dkim_configured ? "success" : "neutral"}>
+                      {dns?.dkim_configured ? "Configured" : "Not configured"}
                     </StatusBadge>
-                    {domain.dkim_selector && (
-                      <span className="text-sm text-[var(--text-secondary)]">Selector: {domain.dkim_selector}</span>
+                    {dns?.dkim_selector && (
+                      <span className="text-sm text-[var(--text-secondary)]">Selector: {dns.dkim_selector}</span>
                     )}
                   </div>
 
-                  {dnsCache?.dkim ? (
-                    <div className="border border-[var(--border)] rounded-lg p-3">
-                      <p className="text-xs text-[var(--text-secondary)] mb-2">
-                        Public DNS TXT record returned when this domain was created. This is the ONLY time the
-                        platform returns it — it cannot be re-fetched later. The private key is never shown, stored
-                        by this console, or requested by any control here.
-                      </p>
-                      <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1.5 text-xs">
-                        <dt className="text-[var(--text-secondary)]">Hostname</dt>
-                        <dd className="text-[var(--text-primary)] font-mono break-all flex items-center gap-2">
-                          <span className="break-all">{dnsCache.dkim.dns_record_name}</span>
-                          <CopyButton field="dkim-host" value={dnsCache.dkim.dns_record_name} copiedField={copiedField} onCopy={copy} label="DKIM hostname" />
-                        </dd>
-                        <dt className="text-[var(--text-secondary)]">TXT value</dt>
-                        <dd className="text-[var(--text-primary)] font-mono break-all whitespace-pre-wrap flex items-start gap-2">
-                          <span className="break-all whitespace-pre-wrap">{dnsCache.dkim.public_dns_txt}</span>
-                          <CopyButton field="dkim-value" value={dnsCache.dkim.public_dns_txt} copiedField={copiedField} onCopy={copy} label="DKIM TXT value" />
-                        </dd>
-                      </dl>
+                  {dnsQuery.isLoading && !dns ? (
+                    <div className="flex items-center justify-center h-24">
+                      <Loader2 size={20} className="text-[var(--accent)] animate-spin" />
                     </div>
-                  ) : (
-                    <div className="border border-[var(--border)] rounded-lg p-4 flex items-start gap-3">
-                      <AlertTriangle size={16} className="text-[var(--text-muted)] shrink-0 mt-0.5" />
-                      <div>
-                        <p className="text-sm font-medium text-[var(--text-primary)]">Public DKIM record unavailable</p>
-                        <p className="text-xs text-[var(--text-secondary)] mt-1">
-                          The platform returns the public DKIM TXT record only in the domain-creation response, and
-                          there is no generate or rotate route for an existing domain on this route family — DKIM
-                          can only be set up at the moment a domain is created.
+                  ) : dns?.dkim_configured && dns.dkim_dns_record_name && dns.dkim_public_dns_txt ? (
+                    <>
+                      <div className="border border-[var(--border)] rounded-lg p-3">
+                        <p className="text-xs text-[var(--text-secondary)] mb-2">
+                          Current public DKIM DNS TXT record. The private key is never shown, stored by this
+                          console, or requested by any control here.
                         </p>
+                        <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1.5 text-xs">
+                          <dt className="text-[var(--text-secondary)]">Hostname</dt>
+                          <dd className="text-[var(--text-primary)] font-mono break-all flex items-center gap-2">
+                            <span className="break-all">{dns.dkim_dns_record_name}</span>
+                            <CopyButton field="dkim-host" value={dns.dkim_dns_record_name} copiedField={copiedField} onCopy={copy} label="DKIM hostname" />
+                          </dd>
+                          <dt className="text-[var(--text-secondary)]">TXT value</dt>
+                          <dd className="text-[var(--text-primary)] font-mono break-all whitespace-pre-wrap flex items-start gap-2">
+                            <span className="break-all whitespace-pre-wrap">{dns.dkim_public_dns_txt}</span>
+                            <CopyButton field="dkim-value" value={dns.dkim_public_dns_txt} copiedField={copiedField} onCopy={copy} label="DKIM TXT value" />
+                          </dd>
+                        </dl>
                       </div>
+                      <button
+                        type="button"
+                        onClick={() => setRotateConfirmOpen(true)}
+                        className="px-3 py-1.5 text-sm rounded border border-[var(--danger)]/40 text-[var(--danger)] hover:bg-[var(--danger)]/10"
+                      >
+                        Rotate DKIM
+                      </button>
+                      <p className="text-xs text-[var(--text-muted)]">
+                        Rotation replaces the current key pair; the previously published TXT record stops matching
+                        as soon as it completes. Publish the new value before old mail relying on the prior key
+                        expires from caches.
+                      </p>
+                    </>
+                  ) : (
+                    <div className="space-y-3">
+                      <div className="border border-[var(--border)] rounded-lg p-4 flex items-start gap-3">
+                        <AlertTriangle size={16} className="text-[var(--text-muted)] shrink-0 mt-0.5" />
+                        <div>
+                          <p className="text-sm font-medium text-[var(--text-primary)]">DKIM is not configured</p>
+                          <p className="text-xs text-[var(--text-secondary)] mt-1">
+                            Generate a DKIM key pair for this domain. The public DNS TXT record will appear here as
+                            soon as it succeeds — no page refresh required. The private key is never shown, stored,
+                            or requested by this console.
+                          </p>
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        disabled={generateDKIMMut.isPending || !domain}
+                        onClick={submitGenerateDKIM}
+                        className="px-3 py-1.5 text-sm rounded bg-[var(--accent)] text-white disabled:opacity-40"
+                      >
+                        {generateDKIMMut.isPending && <Loader2 size={14} className="inline animate-spin mr-1.5" />}
+                        {generateDKIMMut.isPending ? "Generating…" : "Generate DKIM"}
+                      </button>
+                    </div>
+                  )}
+
+                  {dkimError !== null && (
+                    <div className="border border-[var(--danger)]/30 rounded-lg p-3 text-sm" role="alert">
+                      <p className="text-[var(--danger)] font-medium">{safeErrorInfo(dkimError).title}</p>
+                      <p className="text-xs text-[var(--text-secondary)] mt-0.5">{safeErrorInfo(dkimError).detail}</p>
+                      {safeErrorInfo(dkimError).code === "CONFLICT" && (
+                        <button
+                          type="button"
+                          onClick={() => { setDkimError(null); refetch(); dnsQuery.refetch(); }}
+                          className="mt-2 px-3 py-1.5 text-xs rounded border border-[var(--border)] text-[var(--text-primary)] hover:bg-[var(--bg-elevated)]"
+                        >
+                          Reload current state
+                        </button>
+                      )}
                     </div>
                   )}
                 </Tabs.Content>
@@ -363,9 +515,84 @@ export default function DomainDetailDrawer({
                       <p className="text-xs text-[var(--text-secondary)] mt-0.5">{safeErrorInfo(mutationError).detail}</p>
                     </div>
                   )}
+
+                  <section aria-label="Danger zone" className="border border-[var(--danger)]/40 rounded-lg p-4">
+                    <h3 className="text-sm font-semibold text-[var(--danger)] mb-1 flex items-center gap-1.5">
+                      <ShieldAlert size={16} />
+                      Danger zone
+                    </h3>
+                    <p className="text-xs text-[var(--text-secondary)] mb-3">
+                      Deactivating this domain stops it from accepting or sending mail. This is a soft-delete: it
+                      sets the domain to disabled and records a deactivation timestamp, but never hard-deletes the
+                      domain, its DKIM configuration, or its history. It is distinct from the Active/Disabled/
+                      Suspended status control above.
+                    </p>
+                    <label className="block text-xs text-[var(--text-secondary)] mb-2" htmlFor="deactivate-reason">
+                      Reason
+                      <textarea
+                        id="deactivate-reason"
+                        value={deactivateReason}
+                        onChange={(e) => setDeactivateReason(e.target.value)}
+                        rows={2}
+                        placeholder="Why is this domain being deactivated?"
+                        className="mt-1 w-full px-3 py-2 bg-[var(--bg-elevated)] border border-[var(--border)] rounded text-sm text-[var(--text-primary)]"
+                      />
+                    </label>
+                    <button
+                      type="button"
+                      disabled={!deactivateReason.trim()}
+                      onClick={() => setDeactivateConfirmOpen(true)}
+                      className="px-3 py-1.5 text-sm rounded border border-[var(--danger)]/40 text-[var(--danger)] hover:bg-[var(--danger)]/10 disabled:opacity-40"
+                    >
+                      Deactivate domain
+                    </button>
+                  </section>
+
+                  {deactivateError !== null && (
+                    <div className="border border-[var(--danger)]/30 rounded-lg p-3 text-sm" role="alert">
+                      <p className="text-[var(--danger)] font-medium">{safeErrorInfo(deactivateError).title}</p>
+                      <p className="text-xs text-[var(--text-secondary)] mt-0.5">{safeErrorInfo(deactivateError).detail}</p>
+                      {safeErrorInfo(deactivateError).code === "CONFLICT" && (
+                        <button
+                          type="button"
+                          onClick={() => { setDeactivateError(null); refetch(); dnsQuery.refetch(); }}
+                          className="mt-2 px-3 py-1.5 text-xs rounded border border-[var(--border)] text-[var(--text-primary)] hover:bg-[var(--bg-elevated)]"
+                        >
+                          Reload current state
+                        </button>
+                      )}
+                    </div>
+                  )}
                 </Tabs.Content>
               </div>
             </Tabs.Root>
+          )}
+
+          {domain && (
+            <ConfirmDialog
+              open={rotateConfirmOpen}
+              onOpenChange={setRotateConfirmOpen}
+              title="Rotate DKIM key"
+              description={`Rotating replaces the current DKIM key pair for ${domain.name}. The previously published TXT record stops matching as soon as this completes — publish the new value promptly.`}
+              confirmLabel="Rotate DKIM"
+              danger
+              pending={rotateDKIMMut.isPending}
+              onConfirm={submitRotateDKIM}
+            />
+          )}
+
+          {domain && (
+            <ConfirmDialog
+              open={deactivateConfirmOpen}
+              onOpenChange={(o) => { setDeactivateConfirmOpen(o); if (!o) setDeactivateReason(""); }}
+              title="Deactivate domain"
+              description={`Mail service for ${domain.name} will be deactivated. This is a soft-delete: status becomes disabled and a deactivation timestamp is recorded, but nothing is hard-deleted. Type the confirmation phrase to proceed.`}
+              requireTypedName={deactivateDomainConfirmation(domain.id)}
+              confirmLabel="Deactivate domain"
+              danger
+              pending={deactivateMut.isPending}
+              onConfirm={submitDeactivate}
+            />
           )}
         </Dialog.Content>
       </Dialog.Portal>

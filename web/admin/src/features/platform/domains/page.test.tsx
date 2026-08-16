@@ -1,6 +1,6 @@
 import "@testing-library/jest-dom/vitest";
 import { describe, it, expect, afterEach, vi, beforeEach } from "vitest";
-import { render, screen, cleanup, waitFor, fireEvent } from "@testing-library/react";
+import { render, screen, cleanup, waitFor, fireEvent, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import DomainsPage from "./page";
 import { request } from "../../../api";
@@ -32,13 +32,13 @@ const DOMAINS: PlatformDomainList = {
       id: 1, tenant_id: 7, name: "acme.example", status: "active", plan: "business",
       mailbox_count: 12, alias_count: 3, dkim_enabled: true, dkim_selector: "mail",
       dmarc_enabled: true, mail_access_mode: "internal_external",
-      created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-02T00:00:00Z",
+      created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-02T00:00:00Z", version: 3,
     },
     {
       id: 2, tenant_id: 7, name: "beta.example", status: "suspended", plan: "starter",
       mailbox_count: 0, alias_count: 0, dkim_enabled: false, dmarc_enabled: false,
       mail_access_mode: "internal_only",
-      created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-03T00:00:00Z",
+      created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-03T00:00:00Z", version: 1,
     },
   ],
   total: 2,
@@ -62,8 +62,29 @@ describe("features/platform/domains (platform routes)", () => {
       if (path.startsWith("/platform/organizations")) {
         return Promise.resolve({ organizations: [{ id: 7, name: "Acme", slug: "acme", domain: "acme.example", plan: "business", active: true, mailbox_count: 12, domain_count: 1, created_at: "2026-01-01T00:00:00Z" }], total: 1 });
       }
+      if (path === "/platform/domains/7/1/dns") {
+        return Promise.resolve({
+          tenant_id: 7, domain_id: 1, domain: "acme.example", version: 3, status: "active",
+          dkim_configured: true, dkim_selector: "mail",
+          dkim_dns_record_name: "mail._domainkey.acme.example",
+          dkim_public_dns_txt: "v=DKIM1; k=rsa; p=currentkey",
+        });
+      }
+      if (path === "/platform/domains/7/2/dns") {
+        return Promise.resolve({
+          tenant_id: 7, domain_id: 2, domain: "beta.example", version: 1, status: "suspended",
+          dkim_configured: false,
+          dns_requirements: [
+            { name: "relay.orvix.email", type: "MX", value: "relay.orvix.email", ttl: 3600, priority: 10, required: true, purpose: "Mail relay" },
+          ],
+          dns_next_step: "publish_and_verify_dns",
+        });
+      }
       if (path.startsWith("/platform/domains/7/1")) {
         return Promise.resolve(DOMAINS.domains[0]);
+      }
+      if (path.startsWith("/platform/domains/7/2")) {
+        return Promise.resolve(DOMAINS.domains[1]);
       }
       if (path.startsWith("/platform/domains/7")) {
         return Promise.resolve(DOMAINS);
@@ -229,8 +250,24 @@ describe("features/platform/domains (platform routes)", () => {
           idempotent: false,
         });
       }
+      if (path === "/platform/domains/7/99/dns") {
+        // The live endpoint mirrors the exact records from the creation
+        // response, so this deterministically settles to the same
+        // rendered state as the initial-paint cache (no flake window).
+        return Promise.resolve({
+          tenant_id: 7, domain_id: 99, domain: "new.example.com", version: 1, status: "active",
+          dkim_configured: true, dkim_selector: "mail",
+          dkim_dns_record_name: "mail._domainkey.new.example.com",
+          dkim_public_dns_txt: "v=DKIM1; k=rsa; p=abcVERYLONGKEYDATAxyz",
+          dns_requirements: [
+            { name: "new.example.com", type: "MX", value: "mail.orvix.email", ttl: 3600, priority: 10, required: true, purpose: "Mail routing" },
+            { name: "new.example.com", type: "TXT", value: "v=spf1 include:orvix.email ~all", ttl: 3600, required: true, purpose: "SPF" },
+          ],
+          dns_next_step: "publish_and_verify_dns",
+        });
+      }
       if (path.startsWith("/platform/domains/7/99")) {
-        return Promise.resolve({ id: 99, tenant_id: 7, name: "new.example.com", status: "active", plan: "business", mailbox_count: 0, alias_count: 0, dkim_enabled: true, dkim_selector: "mail", dmarc_enabled: false, mail_access_mode: "inherit", created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z" });
+        return Promise.resolve({ id: 99, tenant_id: 7, name: "new.example.com", status: "active", plan: "business", mailbox_count: 0, alias_count: 0, dkim_enabled: true, dkim_selector: "mail", dmarc_enabled: false, mail_access_mode: "inherit", created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z", version: 1 });
       }
       if (path.startsWith("/platform/organizations")) return Promise.resolve({ organizations: [{ id: 7, name: "Acme", slug: "acme", domain: "acme.example", plan: "business", active: true, mailbox_count: 12, domain_count: 1, created_at: "2026-01-01T00:00:00Z" }], total: 1 });
       if (path.startsWith("/platform/domains/7")) return Promise.resolve(DOMAINS);
@@ -278,5 +315,158 @@ describe("features/platform/domains (platform routes)", () => {
     qc.setQueryData(TENANT_SCOPE_QUERY_KEY, { tenantId: 8, tenantName: "Beta Co" });
 
     await waitFor(() => expect(screen.queryByRole("tab", { name: "Overview" })).not.toBeInTheDocument());
+  });
+
+  // ── Contract-closure regression barrier: existing-domain DNS/DKIM/
+  // lifecycle-deactivate must stay wired to the real backend routes. ──
+
+  it("fetches live existing-domain DNS via GET .../dns and renders it — no false 'records unavailable' message", async () => {
+    renderPage(7);
+    await waitFor(() => expect(screen.getByText("beta.example")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("beta.example"));
+    await waitFor(() => expect(screen.getByRole("tab", { name: "DNS Setup" })).toBeInTheDocument());
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "DNS Setup" }));
+
+    await waitFor(() => {
+      const dnsCalls = mockedRequest.mock.calls.filter((c) => c[0] === "/platform/domains/7/2/dns");
+      expect(dnsCalls.length).toBeGreaterThan(0);
+    });
+    await waitFor(() => expect(screen.getByText("Mail relay")).toBeInTheDocument());
+    expect(screen.getAllByText("relay.orvix.email").length).toBeGreaterThan(0);
+    expect(screen.queryByText(/there is no\s*\n?\s*route to re-fetch them for an existing domain/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/only returns DNS records at the moment a domain is created/i)).not.toBeInTheDocument();
+  });
+
+  it("DKIM not configured: shows a truthful state, exposes Generate DKIM, and calls the real generate route on click", async () => {
+    renderPage(7);
+    await waitFor(() => expect(screen.getByText("beta.example")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("beta.example"));
+    await waitFor(() => expect(screen.getByRole("tab", { name: "DKIM" })).toBeInTheDocument());
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "DKIM" }));
+
+    await waitFor(() => expect(screen.getByText("Not configured")).toBeInTheDocument());
+    expect(screen.getByRole("button", { name: "Generate DKIM" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Rotate DKIM" })).not.toBeInTheDocument();
+    expect(screen.queryByText(/there is no generate or rotate route for an existing domain/i)).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Generate DKIM" }));
+
+    await waitFor(() => {
+      const call = mockedRequest.mock.calls.find((c) => c[0] === "/platform/domains/7/2/dkim/generate");
+      expect(call).toBeDefined();
+      const opts = call![1] as { body: string; headers?: Record<string, string> };
+      expect(JSON.parse(opts.body)).toEqual({ expected_version: 1 });
+      expect(opts.headers?.["Idempotency-Key"]).toBeTruthy();
+    });
+  });
+
+  it("DKIM configured: shows selector/hostname/TXT and Rotate DKIM, and calls the real rotate route with confirm_rotation", async () => {
+    renderPage(7);
+    await waitFor(() => expect(screen.getByText("acme.example")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("acme.example"));
+    await waitFor(() => expect(screen.getByRole("tab", { name: "DKIM" })).toBeInTheDocument());
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "DKIM" }));
+
+    await waitFor(() => {
+      const dnsCalls = mockedRequest.mock.calls.filter((c) => c[0] === "/platform/domains/7/1/dns");
+      expect(dnsCalls.length).toBeGreaterThan(0);
+    });
+    await waitFor(() => expect(screen.getByText("mail._domainkey.acme.example")).toBeInTheDocument());
+    expect(screen.getByText(/v=DKIM1; k=rsa; p=currentkey/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Rotate DKIM" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Rotate DKIM" }));
+    // Confirm inside the dialog (danger confirm button, no typed-name gate for rotate).
+    await waitFor(() => expect(screen.getByRole("dialog", { name: "Rotate DKIM key" })).toBeInTheDocument());
+    const dialog = screen.getByRole("dialog", { name: "Rotate DKIM key" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Rotate DKIM" }));
+
+    await waitFor(() => {
+      const call = mockedRequest.mock.calls.find((c) => c[0] === "/platform/domains/7/1/dkim/rotate");
+      expect(call).toBeDefined();
+      const opts = call![1] as { body: string; headers?: Record<string, string> };
+      expect(JSON.parse(opts.body)).toEqual({ confirm_rotation: "rotate-dkim-key", expected_version: 3 });
+      expect(opts.headers?.["Idempotency-Key"]).toBeTruthy();
+    });
+  });
+
+  it("security: DKIM tabs never expect, display, or reference a private_key field", async () => {
+    renderPage(7);
+    await waitFor(() => expect(screen.getByText("acme.example")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("acme.example"));
+    await waitFor(() => expect(screen.getByRole("tab", { name: "DKIM" })).toBeInTheDocument());
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "DKIM" }));
+    await waitFor(() => expect(screen.getByText("mail._domainkey.acme.example")).toBeInTheDocument());
+    expect(screen.queryByText(/BEGIN (RSA |EC )?PRIVATE KEY/i)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/private key/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/private_key/i)).not.toBeInTheDocument();
+  });
+
+  it("lifecycle keeps Active/Disabled/Suspended AND exposes a separate danger-zone Deactivate action requiring typed confirmation and the real version", async () => {
+    renderPage(7);
+    await waitFor(() => expect(screen.getByText("acme.example")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("acme.example"));
+    await waitFor(() => expect(screen.getByRole("tab", { name: "Lifecycle" })).toBeInTheDocument());
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "Lifecycle" }));
+    await waitFor(() => expect(screen.getByText("Lifecycle status")).toBeInTheDocument());
+
+    // Normal status controls remain.
+    const options = Array.from(screen.getByLabelText("New domain status").querySelectorAll("option")).map((o) => o.textContent);
+    expect(options).toEqual(expect.arrayContaining(["Disabled", "Suspended"]));
+
+    // Separate danger zone.
+    expect(screen.getByText("Danger zone")).toBeInTheDocument();
+    const deactivateButton = screen.getByRole("button", { name: "Deactivate domain" });
+    expect(deactivateButton).toBeDisabled(); // no reason typed yet
+
+    fireEvent.change(screen.getByLabelText("Reason"), { target: { value: "Customer offboarding" } });
+    expect(deactivateButton).toBeEnabled();
+    fireEvent.click(deactivateButton);
+
+    await waitFor(() => expect(screen.getByText("DEACTIVATE-DOMAIN-1")).toBeInTheDocument());
+    const dialogConfirmButtons = screen.getAllByRole("button", { name: "Deactivate domain" });
+    const dialogConfirm = dialogConfirmButtons[dialogConfirmButtons.length - 1];
+    expect(dialogConfirm).toBeDisabled();
+
+    fireEvent.change(screen.getByRole("textbox", { name: /Type/i }), { target: { value: "DEACTIVATE-DOMAIN-1" } });
+    fireEvent.click(dialogConfirm);
+
+    await waitFor(() => {
+      const call = mockedRequest.mock.calls.find((c) => c[0] === "/platform/domains/7/1/deactivate");
+      expect(call).toBeDefined();
+      const opts = call![1] as { body: string; headers?: Record<string, string> };
+      const body = JSON.parse(opts.body);
+      expect(body).toEqual({ confirm: "DEACTIVATE-DOMAIN-1", reason: "Customer offboarding", expected_version: 3 });
+      expect(opts.headers?.["Idempotency-Key"]).toBeTruthy();
+    });
+
+    // Successful deactivate must not leave the row visually Active — the drawer closes.
+    await waitFor(() => expect(screen.queryByRole("tab", { name: "Lifecycle" })).not.toBeInTheDocument());
+  });
+
+  it("stale-version conflict on DKIM generate does not pretend success and offers a reload of current state", async () => {
+    renderPage(7);
+    await waitFor(() => expect(screen.getByText("beta.example")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("beta.example"));
+    await waitFor(() => expect(screen.getByRole("tab", { name: "DKIM" })).toBeInTheDocument());
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "DKIM" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Generate DKIM" })).toBeInTheDocument());
+
+    mockedRequest.mockImplementation((path: string, opts?: Parameters<typeof request>[1]) => {
+      if (path === "/platform/domains/7/2/dkim/generate") {
+        return Promise.reject(new MockApiError("CONFLICT", "domain version is no longer current", 409));
+      }
+      if (path.startsWith("/platform/organizations")) return Promise.resolve({ organizations: [{ id: 7, name: "Acme", slug: "acme", domain: "acme.example", plan: "business", active: true, mailbox_count: 12, domain_count: 1, created_at: "2026-01-01T00:00:00Z" }], total: 1 });
+      if (path === "/platform/domains/7/2/dns") return Promise.resolve({ tenant_id: 7, domain_id: 2, domain: "beta.example", version: 1, status: "suspended", dkim_configured: false });
+      if (path.startsWith("/platform/domains/7/2")) return Promise.resolve(DOMAINS.domains[1]);
+      if (path.startsWith("/platform/domains/7")) return Promise.resolve(DOMAINS);
+      return Promise.resolve({});
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Generate DKIM" }));
+
+    await waitFor(() => expect(screen.getByRole("alert")).toBeInTheDocument());
+    expect(screen.getByText("Not configured")).toBeInTheDocument(); // no fabricated success state
+    expect(screen.getByRole("button", { name: "Reload current state" })).toBeInTheDocument();
   });
 });
