@@ -181,6 +181,7 @@ func newDNSOpsHarness(t *testing.T) *dnsOpsHarness {
 		mailbox_count INTEGER NOT NULL DEFAULT 0,
 		created_at DATETIME NOT NULL,
 		updated_at DATETIME NOT NULL,
+		version INTEGER NOT NULL DEFAULT 1,
 		deleted_at DATETIME
 	)`); err != nil {
 		t.Fatalf("create coremail_domains: %v", err)

@@ -108,6 +108,7 @@ func newAutodiscoverHarness(t *testing.T) *autodiscoverHarness {
 		mailbox_count INTEGER NOT NULL DEFAULT 0,
 		created_at DATETIME NOT NULL,
 		updated_at DATETIME NOT NULL,
+		version INTEGER NOT NULL DEFAULT 1,
 		deleted_at DATETIME
 	)`); err != nil {
 		t.Fatalf("create coremail_domains: %v", err)
@@ -550,6 +551,7 @@ func TestMailClientSettingsForOverride(t *testing.T) {
 		status TEXT NOT NULL DEFAULT 'active',
 		created_at DATETIME NOT NULL,
 		updated_at DATETIME NOT NULL,
+		version INTEGER NOT NULL DEFAULT 1,
 		deleted_at DATETIME
 	)`); err != nil {
 		t.Fatalf("create: %v", err)
@@ -757,6 +759,7 @@ func newSoftDeletedDomainHarness(t *testing.T) *autodiscoverHarness {
 		mailbox_count INTEGER NOT NULL DEFAULT 0,
 		created_at DATETIME NOT NULL,
 		updated_at DATETIME NOT NULL,
+		version INTEGER NOT NULL DEFAULT 1,
 		deleted_at DATETIME
 	)`); err != nil {
 		t.Fatalf("create coremail_domains: %v", err)

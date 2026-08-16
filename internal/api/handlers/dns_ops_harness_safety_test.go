@@ -148,6 +148,7 @@ func newDNSOpsHarnessWithPublicIP(t *testing.T, publicIPv4, publicIPv6 string) *
 			mailbox_count INTEGER NOT NULL DEFAULT 0,
 			created_at DATETIME NOT NULL,
 			updated_at DATETIME NOT NULL,
+			version INTEGER NOT NULL DEFAULT 1,
 			deleted_at DATETIME
 		)`,
 	}
