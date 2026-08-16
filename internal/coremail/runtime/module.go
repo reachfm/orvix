@@ -320,6 +320,7 @@ func (m *Module) initCore(cfg *config.Config, sqlDB *sql.DB) error {
 		Forwarding:       m.store.Forwarding,
 		Logger:           m.logger,
 		MailAccessPolicy: m.mailPolicy,
+		Hostname:         cfg.CoreMail.Hostname,
 	})
 
 	// ── Antivirus engine ───────────────────────────────────
@@ -1195,6 +1196,10 @@ func (m *Module) RulesRunner() *rules.Runner {
 	// share no state, so the API runner's rule evaluations
 	// never interfere with the SMTP-side runner's per-message
 	// evaluation.
+	hostname := ""
+	if m.cfg != nil {
+		hostname = m.cfg.CoreMail.Hostname
+	}
 	return rules.NewRunner(rules.Dependencies{
 		MailStore:        m.store,
 		QueueEngine:      m.queue,
@@ -1202,6 +1207,7 @@ func (m *Module) RulesRunner() *rules.Runner {
 		Forwarding:       m.store.Forwarding,
 		Logger:           m.logger,
 		MailAccessPolicy: m.mailPolicy,
+		Hostname:         hostname,
 	})
 }
 

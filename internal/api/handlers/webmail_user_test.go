@@ -679,6 +679,59 @@ func TestWebmailAPISendCreatesSentMessage(t *testing.T) {
 	}
 }
 
+// TestWebmailAPISendMessageIDUsesRealHostnameNotOrvixLocal pins the
+// ORVIX — SURGICAL INTERNET MESSAGE-ID FIX: a message sent through
+// webmail must never carry the private "orvix.local" pseudo-domain
+// in its Message-ID header. The test harness's config.Defaults()
+// leaves coremail.hostname at "mail.local" (itself an invalid,
+// private pseudo-domain), so this also exercises the documented
+// safe fallback to the authenticated sender's own mailbox domain
+// ("orvix.email" for admin@orvix.email).
+func TestWebmailAPISendMessageIDUsesRealHostnameNotOrvixLocal(t *testing.T) {
+	e := buildWebmailTestEnv(t)
+	if err := e.mailbox.Folders.EnsureSystemFolders(t.Context(), mustMailboxIDForTest(t, e, e.email), nil); err != nil {
+		t.Fatalf("ensure system folders: %v", err)
+	}
+	tok := e.loginAdmin(t)
+
+	req := map[string]string{
+		"to":      "recipient@example.com",
+		"subject": "Message-ID hostname test",
+		"body":    "body",
+	}
+	status, resp := e.webmailRequest(t, "POST", "/api/v1/webmail/send", tok, req)
+	if status != http.StatusCreated {
+		t.Fatalf("POST /send: expected 201, got %d: %v", status, resp)
+	}
+	id, ok := resp["id"].(float64)
+	if !ok || id == 0 {
+		t.Fatalf("POST /send: response id invalid: %v", resp["id"])
+	}
+
+	status, msgResp := e.webmailRequest(t, "GET", fmt.Sprintf("/api/v1/webmail/messages/%d", int(id)), tok, nil)
+	if status != 200 {
+		t.Fatalf("GET /messages/%d: expected 200, got %d", int(id), status)
+	}
+	rfc822, _ := msgResp["rfc822"].(string)
+	if rfc822 == "" {
+		t.Fatalf("GET /messages/%d: rfc822 empty", int(id))
+	}
+	if strings.Contains(rfc822, "@orvix.local") {
+		t.Fatalf("sent RFC822 still contains the private orvix.local pseudo-domain in Message-ID:\n%s", rfc822)
+	}
+	idx := strings.Index(rfc822, "Message-ID: <")
+	if idx < 0 {
+		t.Fatalf("sent RFC822 missing Message-ID header:\n%s", rfc822)
+	}
+	line := rfc822[idx:]
+	if end := strings.IndexAny(line, "\r\n"); end >= 0 {
+		line = line[:end]
+	}
+	if !strings.HasSuffix(line, "@orvix.email>") {
+		t.Fatalf("Message-ID id-right = %q, want the sender-domain fallback \"orvix.email\" (coremail.hostname defaults to the invalid mail.local in tests)", line)
+	}
+}
+
 // TestWebmailAPIDeleteMovesToTrash confirms POST
 // /api/v1/webmail/messages/:id/delete moves the message
 // to the Trash folder and marks it deleted.

@@ -40,6 +40,7 @@ import (
 	"github.com/orvix/orvix/internal/billing"
 	"github.com/orvix/orvix/internal/coremail"
 	coremailmime "github.com/orvix/orvix/internal/coremail/mime"
+	"github.com/orvix/orvix/internal/coremail/msgid"
 	"github.com/orvix/orvix/internal/coremail/queue"
 	"github.com/orvix/orvix/internal/coremail/storage"
 	"go.uber.org/zap"
@@ -713,6 +714,21 @@ func (h *Handler) WebmailSend(c fiber.Ctx) error {
 		})
 	}
 
+	// Resolve the Message-ID hostname BEFORE any durable side effect
+	// (Sent-folder write, quota reservation, queue enqueue). A
+	// misconfigured/invalid coremail.hostname with no valid sender
+	// domain fallback fails the request closed here rather than ever
+	// falling back to the private "orvix.local" pseudo-domain.
+	msgIDHostname, hostErr := h.messageIDHostname(ctx.Mailbox.Email)
+	if hostErr != nil {
+		h.logger.Error("webmail send: no valid hostname for Message-ID generation",
+			zap.String("mailbox", ctx.Mailbox.Email), zap.Error(hostErr))
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+			"error": "mail server is not configured with a valid hostname",
+			"code":  "HOSTNAME_UNAVAILABLE",
+		})
+	}
+
 	// Canonical domain operability guard (Phase 8 C3A), checked FIRST —
 	// before the mail-access policy check, before quota reservation,
 	// before the Sent-folder write, before queue enqueue. The sender's
@@ -754,7 +770,7 @@ func (h *Handler) WebmailSend(c fiber.Ctx) error {
 	contentType := c.Get("Content-Type")
 	if strings.HasPrefix(contentType, "multipart/form-data") {
 		var err error
-		rfc822, req, err = h.webmailParseMultipartSend(c, ctx, messageID, now)
+		rfc822, req, err = h.webmailParseMultipartSend(c, ctx, messageID, msgIDHostname, now)
 		if err != nil {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 		}
@@ -776,6 +792,7 @@ func (h *Handler) WebmailSend(c fiber.Ctx) error {
 			Subject:   req.Subject,
 			Body:      req.Body,
 			MessageID: messageID,
+			Hostname:  msgIDHostname,
 			Date:      now,
 			FromName:  ctx.Mailbox.Name,
 		}))
@@ -890,7 +907,7 @@ func (h *Handler) WebmailSend(c fiber.Ctx) error {
 
 	msg := &storage.Message{
 		MessageID:         messageID,
-		InternetMessageID: fmt.Sprintf("<%s@orvix.local>", messageID),
+		InternetMessageID: fmt.Sprintf("<%s@%s>", messageID, msgIDHostname),
 		TenantID:          ctx.Mailbox.TenantID,
 		DomainID:          ctx.Mailbox.DomainID,
 		MailboxID:         ctx.Mailbox.ID,
@@ -1285,7 +1302,7 @@ type webmailSendTestHooks struct {
 // bcc, subject, body) and file uploads, validates sizes and
 // filenames, detects MIME types server-side, and builds a
 // multipart/mixed RFC822 message with base64-encoded attachments.
-func (h *Handler) webmailParseMultipartSend(c fiber.Ctx, ctx *webmailUserContext, messageID string, now time.Time) ([]byte, struct {
+func (h *Handler) webmailParseMultipartSend(c fiber.Ctx, ctx *webmailUserContext, messageID, hostname string, now time.Time) ([]byte, struct {
 	To, Cc, Bcc, Subject, Body string
 }, error) {
 	var empty struct{ To, Cc, Bcc, Subject, Body string }
@@ -1374,7 +1391,7 @@ func (h *Handler) webmailParseMultipartSend(c fiber.Ctx, ctx *webmailUserContext
 	}
 
 	rfc822 := buildMultipartRFC822ForWebmail(ctx.Mailbox.Name, ctx.Mailbox.Email,
-		req.To, req.Cc, req.Bcc, req.Subject, req.Body, messageID, now, attachments)
+		req.To, req.Cc, req.Bcc, req.Subject, req.Body, messageID, hostname, now, attachments)
 
 	return rfc822, req, nil
 }
@@ -1399,7 +1416,7 @@ func detectMIMEType(filename string, data []byte) string {
 
 // buildMultipartRFC822ForWebmail constructs a multipart/mixed RFC 5322
 // message with a text/plain body and base64-encoded attachments.
-func buildMultipartRFC822ForWebmail(fromName, fromEmail, to, cc, bcc, subject, body, messageID string, date time.Time, attachments []coremailmime.AttachmentData) []byte {
+func buildMultipartRFC822ForWebmail(fromName, fromEmail, to, cc, bcc, subject, body, messageID, hostname string, date time.Time, attachments []coremailmime.AttachmentData) []byte {
 	boundary := fmt.Sprintf("orvix-mixed-%d", date.UnixNano())
 
 	var b strings.Builder
@@ -1417,7 +1434,7 @@ func buildMultipartRFC822ForWebmail(fromName, fromEmail, to, cc, bcc, subject, b
 	}
 	fmt.Fprintf(&b, "Subject: %s\r\n", escapeHeader(subject))
 	fmt.Fprintf(&b, "Date: %s\r\n", date.Format(time.RFC1123Z))
-	fmt.Fprintf(&b, "Message-ID: <%s@orvix.local>\r\n", messageID)
+	fmt.Fprintf(&b, "Message-ID: <%s@%s>\r\n", messageID, hostname)
 	fmt.Fprintf(&b, "MIME-Version: 1.0\r\n")
 	fmt.Fprintf(&b, "Content-Type: multipart/mixed; boundary=\"%s\"\r\n", boundary)
 	b.WriteString("\r\n")
@@ -2185,6 +2202,18 @@ func (h *Handler) WebmailSaveDraft(c fiber.Ctx) error {
 		subject = "(no subject)"
 	}
 
+	// Resolve the Message-ID hostname before any durable write, same
+	// policy as WebmailSend — see (*Handler).messageIDHostname.
+	msgIDHostname, hostErr := h.messageIDHostname(ctx.Mailbox.Email)
+	if hostErr != nil {
+		h.logger.Error("webmail save draft: no valid hostname for Message-ID generation",
+			zap.String("mailbox", ctx.Mailbox.Email), zap.Error(hostErr))
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+			"error": "mail server is not configured with a valid hostname",
+			"code":  "HOSTNAME_UNAVAILABLE",
+		})
+	}
+
 	if req.ID != 0 {
 		// Update existing draft — must belong to caller.
 		msg, _, err := ctx.MailboxStore.LoadMessage(c.Context(), req.ID, nil)
@@ -2214,6 +2243,7 @@ func (h *Handler) WebmailSaveDraft(c fiber.Ctx) error {
 			Subject:   req.Subject,
 			Body:      req.Body,
 			MessageID: msg.MessageID,
+			Hostname:  msgIDHostname,
 			Date:      now,
 			FromName:  ctx.Mailbox.Name,
 		})
@@ -2238,12 +2268,13 @@ func (h *Handler) WebmailSaveDraft(c fiber.Ctx) error {
 		Subject:   req.Subject,
 		Body:      req.Body,
 		MessageID: messageID,
+		Hostname:  msgIDHostname,
 		Date:      now,
 		FromName:  ctx.Mailbox.Name,
 	})
 	msg := &storage.Message{
 		MessageID:         messageID,
-		InternetMessageID: fmt.Sprintf("<%s@orvix.local>", messageID),
+		InternetMessageID: fmt.Sprintf("<%s@%s>", messageID, msgIDHostname),
 		TenantID:          ctx.Mailbox.TenantID,
 		DomainID:          ctx.Mailbox.DomainID,
 		MailboxID:         ctx.Mailbox.ID,
@@ -2486,7 +2517,10 @@ type rfc822Params struct {
 	Subject   string
 	Body      string
 	MessageID string
-	Date      time.Time
+	// Hostname is the id-right (domain) for the Message-ID header —
+	// resolved via (*Handler).messageIDHostname, never a literal.
+	Hostname string
+	Date     time.Time
 }
 
 // buildRFC822 constructs an RFC 5322 message. We use the
@@ -2511,7 +2545,7 @@ func buildRFC822(p rfc822Params) string {
 	}
 	fmt.Fprintf(&b, "Subject: %s\r\n", escapeHeader(p.Subject))
 	fmt.Fprintf(&b, "Date: %s\r\n", p.Date.Format(time.RFC1123Z))
-	fmt.Fprintf(&b, "Message-ID: <%s@orvix.local>\r\n", p.MessageID)
+	fmt.Fprintf(&b, "Message-ID: <%s@%s>\r\n", p.MessageID, p.Hostname)
 	fmt.Fprintf(&b, "MIME-Version: 1.0\r\n")
 	fmt.Fprintf(&b, "Content-Type: text/plain; charset=UTF-8\r\n")
 	fmt.Fprintf(&b, "Content-Transfer-Encoding: 8bit\r\n")
@@ -2540,6 +2574,27 @@ func sanitizeCRLF(s string) string {
 	s = strings.ReplaceAll(s, "\r", "")
 	s = strings.ReplaceAll(s, "\n", "")
 	return s
+}
+
+// messageIDHostname resolves the id-right (domain) to use for a
+// server-generated RFC822 Message-ID header. Preferred source is the
+// configured coremail.hostname; if that is unset/invalid, it falls
+// back to the authenticated sender's own mailbox domain — safe here
+// because every caller of this helper operates on an authenticated,
+// already-resolved local mailbox. If neither yields a valid Internet
+// hostname, an error is returned and the caller MUST fail the
+// request before any durable side effect rather than defaulting to
+// the private "orvix.local" pseudo-domain.
+func (h *Handler) messageIDHostname(senderEmail string) (string, error) {
+	configured := ""
+	if h.cfg != nil {
+		configured = h.cfg.CoreMail.Hostname
+	}
+	fallbackDomain := ""
+	if i := strings.LastIndex(senderEmail, "@"); i >= 0 {
+		fallbackDomain = senderEmail[i+1:]
+	}
+	return msgid.ResolveHostname(configured, fallbackDomain)
 }
 
 // generateMessageID returns a unique 32-char hex message ID.
