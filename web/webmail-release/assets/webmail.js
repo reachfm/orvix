@@ -160,36 +160,81 @@
   // defence is out of scope for the v1 webmail client. The body
   // still flows through escapeHTML on the plain-text path, so XSS
   // from raw content is not possible there.
-  function renderBody(rfc822Text) {
-    if (!rfc822Text) return '<pre class="empty-body">(empty message)</pre>';
+  // renderBody renders the HUMAN-READABLE message body from the
+  // server's already-parsed MIME fields (msg.html_body / msg.has_html
+  // / msg.text_body) — never from msg.rfc822. The raw RFC822 blob is
+  // the full wire-format source (MIME boundaries, Content-Type /
+  // Content-Transfer-Encoding headers, base64 attachment payloads for
+  // every part) and must never be shown as the visible message body;
+  // it exists in the API response only for callers that need the raw
+  // source (e.g. server-side re-parsing), not for direct display.
+  //
+  // loadRemoteImages controls whether <img> tags pointing at a
+  // remote http(s) URL are left intact (true, once the user has
+  // explicitly opted in via the "Load remote images" action) or
+  // replaced with an inert placeholder (false/omitted, the default —
+  // remote images are a classic read-receipt / tracking vector).
+  function renderBody(msg, loadRemoteImages) {
+    if (!msg) return '<pre class="empty-body">(empty message)</pre>';
 
-    var headersEnd = rfc822Text.indexOf('\r\n\r\n');
-    var headerBlock = '';
-    var bodyText = rfc822Text;
-    if (headersEnd >= 0) {
-      headerBlock = rfc822Text.slice(0, headersEnd);
-      bodyText = rfc822Text.slice(headersEnd + 4);
-    } else {
-      var nl = rfc822Text.indexOf('\n\n');
-      if (nl >= 0) {
-        headerBlock = rfc822Text.slice(0, nl);
-        bodyText = rfc822Text.slice(nl + 2);
-      }
+    if (msg.has_html && msg.html_body) {
+      // html_body is already sanitized server-side
+      // (internal/coremail/mime.SanitizeHTML); sanitiseHTML here is a
+      // second, defence-in-depth pass — never trust a single layer
+      // for content that ends up in innerHTML.
+      var html = sanitiseHTML(msg.html_body);
+      if (!loadRemoteImages) html = blockRemoteImages(html);
+      return html;
     }
-
-    var contentType = '';
-    var ctypeMatch = headerBlock.match(/^Content-Type:\s*(.+)$/im);
-    if (ctypeMatch) contentType = ctypeMatch[1].trim().toLowerCase();
-
-    if (contentType.indexOf('text/html') === 0) {
-      return sanitiseHTML(bodyText);
-    }
-    // Default: plain text. Escape + linkify + respect
-    // dir="auto" via the pre wrapper (the browser will
-    // detect per-glyph direction).
-    var safe = escapeHTML(bodyText);
+    if (!msg.text_body) return '<pre class="empty-body">(empty message)</pre>';
+    // Plain text: escape + linkify + respect dir="auto" via the pre
+    // wrapper (the browser will detect per-glyph direction).
+    var safe = escapeHTML(msg.text_body);
     safe = linkifyURLs(safe);
     return '<pre class="plain-body">' + safe + '</pre>';
+  }
+
+  // blockRemoteImages replaces the src of any <img> tag pointing at a
+  // remote http(s) URL with a transparent inline placeholder, moving
+  // the real URL to data-blocked-src so a later "Load remote images"
+  // action can restore it without re-fetching msg.html_body. Local
+  // cid:/data: image sources are left untouched — only http(s) is a
+  // tracking-pixel vector.
+  var BLOCKED_IMG_PLACEHOLDER =
+    'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBTAA7';
+  function blockRemoteImages(html) {
+    return html.replace(
+      /(<img\b[^>]*\bsrc\s*=\s*)(["'])(https?:\/\/[^"']*)\2/gi,
+      function (whole, prefix, quote, url) {
+        return prefix + quote + BLOCKED_IMG_PLACEHOLDER + quote +
+          ' data-blocked-src=' + quote + url + quote +
+          ' class="orvix-blocked-remote-img"';
+      }
+    );
+  }
+
+  // plainTextForQuoting returns the human-readable body text used to
+  // seed a reply/forward quote. Prefers msg.text_body; for HTML-only
+  // messages (no text/plain part) falls back to a best-effort tag
+  // strip of msg.html_body — this is quote-seed text inserted into a
+  // plain <textarea>, not rendered as HTML, so a rough strip is
+  // sufficient and safe. Never uses msg.rfc822 (see renderBody).
+  function plainTextForQuoting(m) {
+    if (m.text_body) return m.text_body;
+    if (m.html_body) {
+      var text = m.html_body
+        .replace(/<br\s*\/?>/gi, '\n')
+        .replace(/<\/p>/gi, '\n\n')
+        .replace(/<[^>]+>/g, '')
+        .replace(/&nbsp;/gi, ' ')
+        .replace(/&amp;/gi, '&')
+        .replace(/&lt;/gi, '<')
+        .replace(/&gt;/gi, '>')
+        .replace(/&quot;/gi, '"')
+        .replace(/&#39;/gi, "'");
+      return text.trim();
+    }
+    return '';
   }
 
   function sanitiseHTML(html) {
@@ -1740,6 +1785,12 @@
   function openMessage(id) {
     state.selectedMessageID = id;
     state.readingPaneOpen = true;
+    // Remote images are blocked by default for every message; the
+    // user must explicitly opt in per-message via the "Load remote
+    // images" banner (see renderReadingPane). Reset on every open so
+    // opting in for one message never silently carries over to the
+    // next.
+    state.remoteImagesLoaded = false;
     if (els.readingPane) els.readingPane.classList.add('open');
     renderMessageList(); // refresh selected highlight
     renderReadingPaneLoading();
@@ -2024,9 +2075,27 @@
     if (msg.internet_id) detailRow('Message-ID', msg.internet_id, 'ltr');
     view.appendChild(details);
 
+    // Remote-image banner: shown only when the message actually has
+    // remote <img> sources AND the user has not already opted in for
+    // this open message. Clicking "Load" re-renders the body with
+    // loadRemoteImages=true and removes the banner — it never
+    // refetches or mutates msg, just changes how the same sanitized
+    // html_body is rendered.
+    if (msg.has_remote_images && !state.remoteImagesLoaded) {
+      var imgBanner = el('div', { class: 'remote-images-banner' });
+      imgBanner.appendChild(el('span', {}, 'Images are blocked to protect your privacy.'));
+      var loadBtn = el('button', { class: 'btn sm', type: 'button' }, 'Load remote images');
+      loadBtn.addEventListener('click', function () {
+        state.remoteImagesLoaded = true;
+        renderReadingPane();
+      });
+      imgBanner.appendChild(loadBtn);
+      view.appendChild(imgBanner);
+    }
+
     var body = el('div', { class: 'body' });
     body.setAttribute('dir', 'auto');
-    body.innerHTML = renderBody(msg.rfc822 || '');
+    body.innerHTML = renderBody(msg, state.remoteImagesLoaded);
     view.appendChild(body);
 
     // Attachments: present in the API response if any. The
@@ -4121,7 +4190,7 @@
           '\nTo: ' +
           (m.to || '') +
           '\n\n' +
-          stripRfc822Headers(m.rfc822 || '');
+          plainTextForQuoting(m);
         // Forwarding attachments is not yet supported by
         // the webmail compose path. Surface that fact plainly
         // in the banner so the user is not surprised
@@ -4144,7 +4213,7 @@
             '\nTo: ' +
             (m.to || '') +
             '\n\n' +
-            stripRfc822Headers(m.rfc822 || '');
+            plainTextForQuoting(m);
         }
         compose.body = applySignatureToCompose(fwdBody, 'forward');
       } else if (opts.mode === 'new') {
@@ -4192,16 +4261,8 @@
       senderForQuote +
       ' wrote:\n' +
       '> ' +
-      stripRfc822Headers(m.rfc822 || '').split('\n').join('\n> ')
+      plainTextForQuoting(m).split('\n').join('\n> ')
     );
-  }
-
-  function stripRfc822Headers(s) {
-    var i = s.indexOf('\r\n\r\n');
-    if (i >= 0) return s.slice(i + 4);
-    var j = s.indexOf('\n\n');
-    if (j >= 0) return s.slice(j + 2);
-    return s;
   }
 
   function renderComposeModal() {
@@ -5036,6 +5097,7 @@
       sanitiseHTML: sanitiseHTML,
       escapeHTML: escapeHTML,
       renderBody: renderBody,
+      plainTextForQuoting: plainTextForQuoting,
     },
   };
 })();

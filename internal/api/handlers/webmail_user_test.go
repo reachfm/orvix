@@ -363,6 +363,41 @@ func (e *webmailTestEnv) injectMessage(t *testing.T, subject, body string) uint 
 	return msg.ID
 }
 
+// injectRawMessage stores an arbitrary caller-supplied raw RFC822
+// blob into the test mailbox's INBOX, bypassing buildRFC822 — used
+// by tests that need precise control over MIME structure (multipart
+// boundaries, encodings, headers) rather than the plain single-part
+// message injectMessage builds.
+func (e *webmailTestEnv) injectRawMessage(t *testing.T, subject string, rfc822 []byte) uint {
+	t.Helper()
+	mailboxID := mailboxIDForEmail(t, e.mailbox, e.email)
+	inbox, err := e.mailbox.Folders.GetByPath(t.Context(), mailboxID, "INBOX", nil)
+	if err != nil || inbox == nil {
+		t.Fatalf("injectRawMessage: no INBOX folder: %v", err)
+	}
+	messageID := makeID()
+	now := time.Now().UTC()
+	from := "sender@example.com"
+	to := e.email
+	msg := &storage.Message{
+		MessageID:         messageID,
+		InternetMessageID: "<" + messageID + "@test>",
+		TenantID:          1,
+		DomainID:          1,
+		MailboxID:         mailboxID,
+		FolderID:          inbox.ID,
+		Subject:           subject,
+		FromAddress:       from,
+		ToAddresses:       to,
+		MessageDate:       &now,
+		ReceivedDate:      now,
+	}
+	if err := e.mailbox.StoreMessage(t.Context(), msg, rfc822, nil); err != nil {
+		t.Fatalf("StoreMessage: %v", err)
+	}
+	return msg.ID
+}
+
 // mailboxIDForEmail looks up the mailbox id for the given
 // email by querying coremail_mailboxes directly.
 func mailboxIDForEmail(t *testing.T, ms *storage.MailStore, email string) uint {

@@ -88,6 +88,7 @@ jobs:
           bash release/scripts/tests/test-doctor-dns-auth.sh
           bash release/scripts/tests/test-upgrade-rollback-complete.sh
           bash release/scripts/tests/test-build-metadata.sh
+          bash release/scripts/tests/test-webmail-reading-pane.sh
       - name: Server route and installer tests
         shell: bash
         run: |
