@@ -389,7 +389,23 @@ func (s *Server) handleConn(conn net.Conn) {
 			}
 
 			writeResponse(writer, MessageAccepted)
-			writer.Flush()
+			// The message is ALREADY durably committed at this point
+			// (AcceptMessage returned nil above) — a flush failure
+			// here means the client never sees confirmation of a
+			// delivery that already happened, which is exactly the
+			// condition that makes a well-behaved remote MTA retry
+			// the identical message. That retry is expected and must
+			// be handled by inbound delivery idempotency (see
+			// receive.go's dedup claim), not prevented here — by the
+			// time this write is attempted there is no way to "un-ack"
+			// a commit. The error is observed (not swallowed) purely
+			// so this pattern is diagnosable in production.
+			if err := writer.Flush(); err != nil && s.Observability != nil {
+				s.Observability.EventHistory.Record(observability.EventSMTPAckFlushFailed, map[string]string{
+					"remote_ip": session.RemoteAddr,
+					"detail":    "final 250 flush failed after durable acceptance",
+				})
+			}
 			session.State = StateGreeted
 			session.ResetTransaction()
 		}

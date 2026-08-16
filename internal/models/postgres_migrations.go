@@ -455,6 +455,21 @@ func postgresTables() []string {
 			created_at TIMESTAMP NOT NULL DEFAULT NOW()
 		)`,
 
+		// coremail_delivery_dedup: durable, DB-enforced idempotency
+		// boundary for inbound-to-mailbox delivery (see the SQLite
+		// schema's identical table in internal/coremail/storage/schema.go
+		// for the full rationale). A UNIQUE-constraint violation on
+		// (mailbox_id, dedup_key) means this exact delivery was already
+		// accepted into this mailbox.
+		`CREATE TABLE IF NOT EXISTS coremail_delivery_dedup (
+			id BIGSERIAL PRIMARY KEY,
+			mailbox_id INTEGER NOT NULL,
+			dedup_key TEXT NOT NULL,
+			message_id TEXT NOT NULL,
+			created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			UNIQUE(mailbox_id, dedup_key)
+		)`,
+
 		// --- Queue ---
 
 		`CREATE TABLE IF NOT EXISTS coremail_queue (

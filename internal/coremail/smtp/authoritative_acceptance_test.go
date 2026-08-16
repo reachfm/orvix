@@ -485,7 +485,12 @@ func TestProtocol_NoDuplicateDeliveryOnAmbiguousDisconnect(t *testing.T) {
 	if err != nil || !strings.HasPrefix(resp, "354") {
 		t.Fatalf("DATA response: %q err=%v", resp, err)
 	}
-	if _, err := conn.Write([]byte("Subject: Ambiguous\r\n\r\nbody\r\n.\r\n")); err != nil {
+	// A real remote MTA always sends a Message-ID header (either the
+	// originating MUA's or one it adds itself) — the delivery-dedup
+	// boundary this test exercises keys on exactly that header, so
+	// the fixture includes one to match the real production case.
+	const ambiguousMessageID = "<ambiguous-retry-test@sender.example>"
+	if _, err := conn.Write([]byte("Subject: Ambiguous\r\nMessage-ID: " + ambiguousMessageID + "\r\n\r\nbody\r\n.\r\n")); err != nil {
 		t.Fatalf("write body: %v", err)
 	}
 	conn.Close() // ambiguous: no response read
@@ -503,16 +508,21 @@ func TestProtocol_NoDuplicateDeliveryOnAmbiguousDisconnect(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 
-	// Attempt 2 (retry): a fresh session with the same body is a
-	// separate exactly-once acceptance.
+	// Attempt 2 (retry): a fresh session sending the BYTE-IDENTICAL
+	// message is exactly what a well-behaved remote MTA does after an
+	// ambiguous disconnect (it never saw a final 250, so it resends
+	// the exact same email). The server durably accepted attempt 1
+	// already — this is the delivery-dedup boundary being exercised:
+	// the retry must still be acknowledged (250), but must NOT create
+	// a second visible copy.
 	conn2, reader2 := env.beginSession(t)
 	env.cmd(t, conn2, reader2, "RCPT TO:<user@test.com>")
-	final := env.sendData(t, conn2, reader2, "Subject: Ambiguous\r\n\r\nbody")
+	final := env.sendData(t, conn2, reader2, "Subject: Ambiguous\r\nMessage-ID: "+ambiguousMessageID+"\r\n\r\nbody")
 	if !strings.HasPrefix(final, "250") {
 		t.Fatalf("retry: expected 250, got %q", final)
 	}
 	msgs, queues := env.rowCounts(t)
-	if msgs != 2 || queues != 2 {
-		t.Fatalf("after retry: messages=%d queue=%d, want exactly 2/2 (one per attempt)", msgs, queues)
+	if msgs != 1 || queues != 1 {
+		t.Fatalf("after retry: messages=%d queue=%d, want exactly 1/1 (retry of the SAME message must not duplicate)", msgs, queues)
 	}
 }

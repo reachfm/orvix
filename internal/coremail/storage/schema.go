@@ -65,6 +65,25 @@ func Tables() []string {
 			created_at DATETIME NOT NULL,
 			FOREIGN KEY (message_id) REFERENCES coremail_messages(id)
 		)`,
+		// coremail_delivery_dedup is the durable, DB-enforced
+		// idempotency boundary for inbound-to-mailbox delivery: an
+		// INSERT that violates the (mailbox_id, dedup_key) UNIQUE
+		// constraint means "this exact delivery to this exact mailbox
+		// was already accepted" — the caller treats that as a
+		// successful no-op rather than storing a second copy. This
+		// exists because a remote MTA that never sees a final SMTP 250
+		// (e.g. the connection drops between durable commit and reply
+		// flush) will correctly retry the identical message, and
+		// without this boundary that legitimate retry becomes a
+		// visible duplicate in the mailbox.
+		`CREATE TABLE IF NOT EXISTS coremail_delivery_dedup (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			mailbox_id INTEGER NOT NULL,
+			dedup_key TEXT NOT NULL,
+			message_id TEXT NOT NULL,
+			created_at DATETIME NOT NULL,
+			UNIQUE(mailbox_id, dedup_key)
+		)`,
 		`CREATE TABLE IF NOT EXISTS coremail_retention_policies (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			name TEXT NOT NULL,

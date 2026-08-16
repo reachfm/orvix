@@ -8,6 +8,16 @@ const (
 	// SMTP receive.
 	EventSMTPAccepted EventType = "smtp.accepted"
 	EventSMTPRejected EventType = "smtp.rejected"
+	// EventSMTPAckFlushFailed fires when the message was ALREADY
+	// durably accepted (committed) but the server could not confirm
+	// that back to the client (write/flush failure on the final 250
+	// reply — typically a dropped/reset connection). The remote MTA
+	// will very likely retry the identical message; inbound delivery
+	// idempotency (see internal/coremail/smtp/receive.go's dedup
+	// claim) is what actually prevents that retry from becoming a
+	// visible duplicate. This event exists purely for operator
+	// diagnosis of that pattern, not to change delivery behavior.
+	EventSMTPAckFlushFailed EventType = "smtp.ack_flush.failed"
 
 	// SMTP auth.
 	EventSMTPAuthSuccess EventType = "smtp.auth.success"

@@ -1008,20 +1008,29 @@ func (r *Receiver) AcceptMessage(ctx context.Context, session *Session) error {
 		msg   *storage.Message
 		label string // recipient target for error context
 	}
+	// The RFC822 Message-ID header — distinct from storage's own
+	// internal MessageID (storage.GenerateMessageID(), a fresh random
+	// id generated below for every accepted row). Persisting the real
+	// Internet Message-ID is what lets a retried delivery of the exact
+	// same email be recognized as such (see deliveryDedupKey below);
+	// it was previously extracted nowhere and silently discarded.
+	internetMessageID := strings.TrimSpace(extractHeaderValue(rfc822Data, "Message-ID"))
+
 	var msgs []acceptedMessage
 	for _, rcpt := range recipients {
 		msgs = append(msgs, acceptedMessage{
 			label: rcpt.Target,
 			msg: &storage.Message{
-				MessageID:    storage.GenerateMessageID(),
-				TenantID:     rcpt.TenantID,
-				DomainID:     rcpt.DomainID,
-				MailboxID:    rcpt.MailboxID,
-				FolderID:     inboxByMailbox[rcpt.MailboxID].ID,
-				FromAddress:  session.MailFrom,
-				ToAddresses:  strings.Join(session.Recipients, ","),
-				Subject:      extractSubject(rfc822Data),
-				ReceivedDate: time.Now().UTC(),
+				MessageID:         storage.GenerateMessageID(),
+				TenantID:          rcpt.TenantID,
+				DomainID:          rcpt.DomainID,
+				MailboxID:         rcpt.MailboxID,
+				FolderID:          inboxByMailbox[rcpt.MailboxID].ID,
+				FromAddress:       session.MailFrom,
+				ToAddresses:       strings.Join(session.Recipients, ","),
+				Subject:           extractSubject(rfc822Data),
+				InternetMessageID: internetMessageID,
+				ReceivedDate:      time.Now().UTC(),
 			},
 		})
 	}
@@ -1031,13 +1040,14 @@ func (r *Receiver) AcceptMessage(ctx context.Context, session *Session) error {
 	}
 	if len(msgs) == 0 && len(plan.external) > 0 {
 		extMsg := &storage.Message{
-			MessageID:    storage.GenerateMessageID(),
-			TenantID:     senderTenantID,
-			DomainID:     senderDomainID,
-			FromAddress:  session.MailFrom,
-			ToAddresses:  plan.external[0].Email,
-			Subject:      extractSubject(rfc822Data),
-			ReceivedDate: time.Now().UTC(),
+			MessageID:         storage.GenerateMessageID(),
+			TenantID:          senderTenantID,
+			DomainID:          senderDomainID,
+			FromAddress:       session.MailFrom,
+			ToAddresses:       plan.external[0].Email,
+			Subject:           extractSubject(rfc822Data),
+			InternetMessageID: internetMessageID,
+			ReceivedDate:      time.Now().UTC(),
 		}
 		if session.AuthIdentity != nil && session.AuthIdentity.MailboxID > 0 {
 			extMsg.MailboxID = session.AuthIdentity.MailboxID
@@ -1135,8 +1145,52 @@ func (r *Receiver) AcceptMessage(ctx context.Context, session *Session) error {
 		h.AfterDomainLockTx()
 	}
 
+	// Durable, DB-enforced delivery idempotency claim: one attempt per
+	// LOCAL recipient mailbox, under the SAME tx and the SAME domain
+	// lock acquired above. A claim that fails to insert (UNIQUE
+	// violation on (mailbox_id, dedup_key)) means this exact delivery
+	// was already accepted into this mailbox — by an earlier attempt
+	// of this same acceptance call, or (the real production case) by
+	// an entirely separate SMTP session that already durably committed
+	// before this one started (e.g. a remote-MTA retry after a
+	// dropped final-250 flush; see server.go's ACK boundary). Two
+	// concurrent acceptances racing for the same claim are made safe
+	// by the database's own UNIQUE constraint, not by this process's
+	// locking alone — whichever transaction commits first wins the
+	// claim regardless of interleaving.
+	//
+	// Skipped (already-claimed) recipients are silently treated as a
+	// successful no-op: their message/queue rows are never inserted,
+	// but the overall acceptance still succeeds and the SMTP client
+	// still receives a normal 250 — from the sender's point of view
+	// nothing is different about a retried delivery landing exactly
+	// once.
+	dedupSkip := make([]bool, len(msgs))
+	for i, am := range msgs {
+		if i >= len(recipients) {
+			// The "no local recipients, external-only" synthetic
+			// message (see above) isn't a mailbox delivery and has
+			// no idempotency requirement of its own.
+			continue
+		}
+		key := deliveryDedupKey(am.msg.InternetMessageID)
+		if key == "" {
+			continue
+		}
+		claimed, err := r.claimDeliveryDedup(ctx, tx, am.msg.MailboxID, key, am.msg.MessageID)
+		if err != nil {
+			return fmt.Errorf("claim delivery dedup for %s: %w", am.label, err)
+		}
+		if !claimed {
+			dedupSkip[i] = true
+		}
+	}
+
 	// Every message metadata insert on the SAME tx.
 	for i, am := range msgs {
+		if dedupSkip[i] {
+			continue
+		}
 		if h := r.TestHooks; h != nil && h.BeforeMessageInsert != nil {
 			if err := h.BeforeMessageInsert(i); err != nil {
 				return err
@@ -1151,6 +1205,9 @@ func (r *Receiver) AcceptMessage(ctx context.Context, session *Session) error {
 	// fails, the whole acceptance rolls back — no recipient can
 	// survive as a partial success.
 	for i, qe := range queueEntries {
+		if i < len(dedupSkip) && dedupSkip[i] {
+			continue
+		}
 		if h := r.TestHooks; h != nil && h.BeforeQueueInsert != nil {
 			if err := h.BeforeQueueInsert(i); err != nil {
 				return err
@@ -1163,7 +1220,18 @@ func (r *Receiver) AcceptMessage(ctx context.Context, session *Session) error {
 
 	// Publish staged files (bounded same-filesystem renames) BEFORE
 	// commit: at commit time every row references an existing file.
-	published, err = r.MailStore.PublishStaged(staged)
+	// Files belonging to a dedup-skipped (duplicate) message are
+	// deliberately NOT published — they have no message row to
+	// reference them, and are reclaimed below by the same attempt-
+	// directory cleanup used for every acceptance.
+	stagedToPublish := staged[:0:0]
+	for i, sf := range staged {
+		if i < len(dedupSkip) && dedupSkip[i] {
+			continue
+		}
+		stagedToPublish = append(stagedToPublish, sf)
+	}
+	published, err = r.MailStore.PublishStaged(stagedToPublish)
 	if err != nil {
 		return fmt.Errorf("publish staged message files: %w", err)
 	}
@@ -1176,14 +1244,20 @@ func (r *Receiver) AcceptMessage(ctx context.Context, session *Session) error {
 		return fmt.Errorf("commit acceptance tx: %w", err)
 	}
 	committed = true
-	// Staging directory is now empty (every file was renamed away);
-	// remove it so no empty attempt dirs accumulate.
+	// Removes the whole attempt directory, including any staged file
+	// that was intentionally left unpublished above (a dedup-skipped
+	// duplicate) — never assume the directory is already empty.
 	r.MailStore.AbortStaged(attemptKey, nil)
 
 	// ── Post-commit side effects (never under the lock) ────────
 	// Best-effort attachment extraction, exactly as the historical
-	// path ran it after the durable StoreMessage commit.
-	for _, am := range msgs {
+	// path ran it after the durable StoreMessage commit. Skipped for
+	// dedup-skipped messages — they were never stored, so am.msg.ID
+	// is unset and there is nothing to extract attachments into.
+	for i, am := range msgs {
+		if i < len(dedupSkip) && dedupSkip[i] {
+			continue
+		}
 		r.MailStore.ExtractAndStoreAttachments(ctx, am.msg.ID, rfc822Data)
 	}
 
@@ -1192,8 +1266,13 @@ func (r *Receiver) AcceptMessage(ctx context.Context, session *Session) error {
 	// atomically). The runner is best-effort: a panic / DB error
 	// inside the runner must not abort the SMTP accept because the
 	// original is already on the queue. applyRulesRunner's own
-	// defer-recover ensures that contract.
+	// defer-recover ensures that contract. Skipped for dedup-skipped
+	// recipients — there is no newly-delivered message for the rules
+	// engine to act on.
 	for i, rcpt := range recipients {
+		if i < len(dedupSkip) && dedupSkip[i] {
+			continue
+		}
 		if r.RulesRunner != nil {
 			r.applyRulesRunner(ctx, rcpt, msgs[i].msg, rfc822Data)
 		}
@@ -1287,6 +1366,74 @@ func extractHeaderValue(rfc822 []byte, name string) string {
 		}
 	}
 	return ""
+}
+
+// deliveryDedupKey computes the canonical identity a single delivery
+// attempt claims against coremail_delivery_dedup for one mailbox.
+//
+// The RFC822 Message-ID header is the ONLY identity used: it is what
+// a resending MTA preserves byte-for-byte on retry (it is the exact
+// same email, not a regenerated one), so two acceptances with the
+// same (mailbox, Message-ID) are the strongest available signal that
+// they are the same delivery. A bad/malicious sender that deliberately
+// reuses a Message-ID across genuinely different messages is an
+// explicit, documented policy choice (RFC 5322 mandates Message-ID
+// uniqueness; a sender violating that forfeits per-message delivery in
+// the rare collision case, exactly as most real-world mail systems
+// behave).
+//
+// Deliberately NOT content-hash based when Message-ID is absent: two
+// authenticated users (or the same user, twice) independently
+// composing and submitting byte-identical content are TWO real,
+// separately-intended messages, not a retry — content alone cannot
+// distinguish "the same email resent" from "someone typed the same
+// words again." An empty return means "no dedup identity available";
+// the caller always claims/stores in that case, exactly as before
+// this feature existed. In practice every real MTA (the actual
+// production bug this closes) always sends a Message-ID header, so
+// this covers the live case without over-reaching into content-based
+// guessing.
+func deliveryDedupKey(internetMessageID string) string {
+	if internetMessageID == "" {
+		return ""
+	}
+	return "mid:" + internetMessageID
+}
+
+// claimDeliveryDedup attempts to durably claim the (mailboxID, key)
+// idempotency slot on the given transaction. It returns claimed=true
+// only when THIS call's INSERT actually created the row — a UNIQUE
+// constraint violation (the key was already claimed, by this same
+// acceptance attempt's own retry path or, in production, by an
+// entirely separate acceptance of a resent message) returns
+// claimed=false with a nil error, which the caller treats as "this
+// recipient's delivery already happened, skip it" rather than as a
+// failure.
+func (r *Receiver) claimDeliveryDedup(ctx context.Context, tx *sql.Tx, mailboxID uint, key, messageID string) (claimed bool, err error) {
+	dialect, derr := dbdialect.Detect(r.DB)
+	if derr != nil || dialect == nil {
+		dialect = dbdialect.FromDriver("sqlite")
+	}
+	var res sql.Result
+	if dialect.IsPostgres() {
+		res, err = tx.ExecContext(ctx,
+			`INSERT INTO coremail_delivery_dedup (mailbox_id, dedup_key, message_id, created_at)
+			 VALUES ($1, $2, $3, $4) ON CONFLICT (mailbox_id, dedup_key) DO NOTHING`,
+			mailboxID, key, messageID, time.Now().UTC())
+	} else {
+		res, err = tx.ExecContext(ctx,
+			`INSERT OR IGNORE INTO coremail_delivery_dedup (mailbox_id, dedup_key, message_id, created_at)
+			 VALUES (?, ?, ?, ?)`,
+			mailboxID, key, messageID, time.Now().UTC())
+	}
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
 }
 
 // hasAttachmentHint inspects the MIME structure cheaply for
