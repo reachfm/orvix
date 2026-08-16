@@ -37,6 +37,11 @@ export default function SupportMailboxViewer({
   const [selectedMessageId, setSelectedMessageId] = useState<number | null>(null);
   const [remaining, setRemaining] = useState(() => minutesRemaining(session.expires_at));
   const [ended, setEnded] = useState(false);
+  // Remote images are blocked by default (data-remote-src, never
+  // fetched automatically just by opening the message) — this is a
+  // purely client-side reveal of already-sanitized markup, never a
+  // second unsanitized render path.
+  const [remoteImagesAllowed, setRemoteImagesAllowed] = useState(false);
 
   useEffect(() => {
     const t = setInterval(() => setRemaining(minutesRemaining(session.expires_at)), 30_000);
@@ -176,7 +181,7 @@ export default function SupportMailboxViewer({
                   <li key={m.id}>
                     <button
                       type="button"
-                      onClick={() => setSelectedMessageId(m.id)}
+                      onClick={() => { setSelectedMessageId(m.id); setRemoteImagesAllowed(false); }}
                       className={`w-full text-left px-3 py-2.5 border-b border-[var(--border)] text-sm ${selectedMessageId === m.id ? "bg-[var(--accent)]/10" : "hover:bg-[var(--bg-elevated)]"}`}
                     >
                       <div className="font-medium text-[var(--text-primary)] truncate">{m.subject || "(no subject)"}</div>
@@ -216,9 +221,38 @@ export default function SupportMailboxViewer({
                     ))}
                   </div>
                 )}
-                <pre className="mt-4 whitespace-pre-wrap break-words text-xs bg-[var(--bg-elevated)] border border-[var(--border)] rounded p-3">
-                  {detail.raw_rfc822}
-                </pre>
+                {detail.has_remote_images && !remoteImagesAllowed && (
+                  <div className="mt-4 flex items-center justify-between gap-3 border border-[var(--warning)]/40 bg-[var(--warning)]/5 rounded p-2 text-xs">
+                    <span className="text-[var(--text-secondary)]">Remote images were blocked.</span>
+                    <button
+                      type="button"
+                      onClick={() => setRemoteImagesAllowed(true)}
+                      className="px-2 py-1 rounded border border-[var(--border)] text-[var(--text-primary)] hover:bg-[var(--bg-elevated)]"
+                    >
+                      Load remote images
+                    </button>
+                  </div>
+                )}
+                {/* Human-readable rendered body only — never MIME
+                    boundaries/headers/quoted-printable escapes. The
+                    backend already sanitized this HTML (script/
+                    iframe/object/embed/event-handlers/javascript:
+                    stripped); revealing remote images here is a pure
+                    client-side attribute swap on that same sanitized
+                    markup, not a second unsanitized render path. */}
+                {detail.has_html ? (
+                  <div
+                    className="mt-4 text-sm bg-[var(--bg-elevated)] border border-[var(--border)] rounded p-3 overflow-x-auto [&_img]:max-w-full"
+                    // eslint-disable-next-line react/no-danger
+                    dangerouslySetInnerHTML={{
+                      __html: remoteImagesAllowed ? detail.html_body.replace(/data-remote-src=/g, "src=") : detail.html_body,
+                    }}
+                  />
+                ) : (
+                  <pre className="mt-4 whitespace-pre-wrap break-words text-xs bg-[var(--bg-elevated)] border border-[var(--border)] rounded p-3">
+                    {detail.text_body}
+                  </pre>
+                )}
               </div>
             ) : null}
           </section>

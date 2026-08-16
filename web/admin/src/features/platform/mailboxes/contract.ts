@@ -268,7 +268,11 @@ export interface SupportViewAttachmentSummary {
 
 export interface SupportViewMessageDetailResponse {
   message: SupportViewMessageSummary;
-  raw_rfc822: string;
+  /** Server-parsed, decoded, sanitized body — never raw MIME source. */
+  text_body: string;
+  html_body: string;
+  has_html: boolean;
+  has_remote_images: boolean;
   attachments: SupportViewAttachmentSummary[];
 }
 

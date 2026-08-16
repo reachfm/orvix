@@ -382,6 +382,62 @@ describe("features/platform/mailboxes (platform routes)", () => {
     }
   });
 
+  it("renders the server-parsed message body, never raw MIME source, and gates remote images behind an explicit action", async () => {
+    mockedRequest.mockImplementation((path: string, opts?: Parameters<typeof request>[1]) => {
+      if (String(path) === "/platform/mailboxes/7/101/support-view" && opts?.method === "POST") {
+        return Promise.resolve({ session_id: "sess-mime", tenant_id: 7, mailbox_id: 101, email: "alice@acme.example", mode: "read_only", expires_at: new Date(Date.now() + 30 * 60_000).toISOString() });
+      }
+      if (String(path).includes("/support-view/sess-mime/folders")) {
+        return Promise.resolve({ folders: [{ id: 1, mailbox_id: 101, name: "Inbox", path: "INBOX", folder_type: "inbox", message_count: 1, unread_count: 0, total_size: 0 }] });
+      }
+      if (String(path).includes("/support-view/sess-mime/messages/42")) {
+        return Promise.resolve({
+          message: { id: 42, mailbox_id: 101, folder_id: 1, subject: "Re: Orvix bill", from_address: "sender@example.com", to_addresses: "alice@acme.example", received_date: "2026-01-01T00:00:00Z", size_bytes: 100, seen: true },
+          text_body: "Please see the invoice below.",
+          html_body: '<p>Please see the invoice below.</p><img data-remote-src="https://tracker.example/pixel.png">',
+          has_html: true,
+          has_remote_images: true,
+          attachments: [],
+        });
+      }
+      if (String(path).includes("/support-view/sess-mime/messages")) {
+        return Promise.resolve({
+          messages: [{ id: 42, mailbox_id: 101, folder_id: 1, subject: "Re: Orvix bill", from_address: "sender@example.com", to_addresses: "alice@acme.example", received_date: "2026-01-01T00:00:00Z", size_bytes: 100, seen: true }],
+          total: 1,
+        });
+      }
+      if (path.startsWith("/platform/organizations")) return Promise.resolve({ organizations: [], total: 0 });
+      if (path.startsWith("/platform/mailboxes/7/101")) return Promise.resolve(MAILBOXES.mailboxes[0]);
+      if (path.startsWith("/platform/mailboxes/7")) return Promise.resolve(MAILBOXES);
+      return Promise.resolve({});
+    });
+
+    renderPage(7);
+    await waitFor(() => expect(screen.getByText("alice@acme.example")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("alice@acme.example"));
+    fireEvent.click(await screen.findByRole("button", { name: /Access mailbox/i }));
+    fireEvent.change(screen.getByLabelText(/Ticket \/ reference/), { target: { value: "SUP-9" } });
+    fireEvent.change(screen.getByLabelText("Reason"), { target: { value: "Customer escalation" } });
+    fireEvent.change(screen.getByLabelText(/Type ACCESS-MAILBOX-101/), { target: { value: "ACCESS-MAILBOX-101" } });
+    fireEvent.click(screen.getByRole("button", { name: "Start read-only session" }));
+
+    await waitFor(() => expect(screen.getByRole("dialog", { name: "Support mailbox viewer" })).toBeInTheDocument());
+    fireEvent.click(await screen.findByText("Re: Orvix bill"));
+
+    await waitFor(() => expect(screen.getByText("Please see the invoice below.")).toBeInTheDocument());
+    // Never the raw MIME/QP source.
+    expect(screen.queryByText(/Content-Type:/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/=3D/)).not.toBeInTheDocument();
+    expect(document.body.textContent).not.toContain("multipart/alternative");
+
+    // Remote images blocked by default, with an explicit reveal action.
+    expect(screen.getByText(/Remote images were blocked/i)).toBeInTheDocument();
+    const img = document.querySelector("img");
+    expect(img?.getAttribute("src")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Load remote images" }));
+    await waitFor(() => expect(document.querySelector("img")?.getAttribute("src")).toBe("https://tracker.example/pixel.png"));
+  });
+
   it("ends the support session via the audited end route and shows the ended state", async () => {
     let ended = false;
     mockedRequest.mockImplementation((path: string, opts?: Parameters<typeof request>[1]) => {

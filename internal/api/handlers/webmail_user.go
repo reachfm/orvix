@@ -627,27 +627,43 @@ func (h *Handler) WebmailMessage(c fiber.Ctx) error {
 		}
 	}
 
+	// Server-side MIME parse: the reading pane must never receive raw
+	// RFC822 as its display body — that was the "MIME boundaries /
+	// encoded HTML / raw markup shown to the user" live bug.
+	// ExtractBodies decodes quoted-printable/base64 and applies
+	// charset transcoding, prefers HTML with a text/plain fallback,
+	// sanitizes the HTML (strips script/iframe/object/embed/event
+	// handlers/javascript: URLs), and reports whether remote images
+	// were blocked so the client can offer an explicit "Load remote
+	// images" action rather than fetching them by default. Raw
+	// RFC822 source, when genuinely needed, is served separately by
+	// WebmailMessageSource ("View source") — never substituted here.
+	bodies := coremailmime.ExtractBodies(rfc822)
+
 	return c.JSON(fiber.Map{
-		"id":            msg.ID,
-		"message_id":    msg.MessageID,
-		"subject":       msg.Subject,
-		"from":          msg.FromAddress,
-		"to":            msg.ToAddresses,
-		"cc":            msg.CcAddresses,
-		"bcc":           msg.BccAddresses,
-		"reply_to":      msg.ReplyTo,
-		"size_bytes":    msg.SizeBytes,
-		"seen":          msg.Seen,
-		"flagged":       msg.Flagged,
-		"answered":      msg.Answered,
-		"draft":         msg.Draft,
-		"junk":          msg.Junk,
-		"received_date": msg.ReceivedDate,
-		"message_date":  msg.MessageDate,
-		"folder_id":     msg.FolderID,
-		"internet_id":   msg.InternetMessageID,
-		"rfc822":        string(rfc822),
-		"attachments":   attachmentsOut,
+		"id":                msg.ID,
+		"message_id":        msg.MessageID,
+		"subject":           msg.Subject,
+		"from":              msg.FromAddress,
+		"to":                msg.ToAddresses,
+		"cc":                msg.CcAddresses,
+		"bcc":               msg.BccAddresses,
+		"reply_to":          msg.ReplyTo,
+		"size_bytes":        msg.SizeBytes,
+		"seen":              msg.Seen,
+		"flagged":           msg.Flagged,
+		"answered":          msg.Answered,
+		"draft":             msg.Draft,
+		"junk":              msg.Junk,
+		"received_date":     msg.ReceivedDate,
+		"message_date":      msg.MessageDate,
+		"folder_id":         msg.FolderID,
+		"internet_id":       msg.InternetMessageID,
+		"text_body":         bodies.TextBody,
+		"html_body":         bodies.HTMLBody,
+		"has_html":          bodies.HasHTML,
+		"has_remote_images": bodies.HasRemoteImages,
+		"attachments":       attachmentsOut,
 	})
 }
 

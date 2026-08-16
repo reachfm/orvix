@@ -10,6 +10,7 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/orvix/orvix/internal/audit"
+	"github.com/orvix/orvix/internal/coremail/mime"
 	"github.com/orvix/orvix/internal/coremail/storage"
 	"github.com/orvix/orvix/internal/platform/kernel"
 	"github.com/orvix/orvix/internal/supportaccess"
@@ -288,13 +289,21 @@ func (h *Handler) GetMailboxSupportMessage(c fiber.Ctx) error {
 		attachments = nil
 	}
 
+	// Server-side MIME parse — the support viewer must never render
+	// raw MIME source (boundaries, quoted-printable escapes) as the
+	// display body, same fix as the normal webmail reading pane.
+	bodies := mime.ExtractBodies(raw)
+
 	c.Set("Cache-Control", "no-store")
 	h.writeSupportMailboxAudit(c, "support.mailbox_view.message_read",
 		fmt.Sprintf("mailbox:%d|tenant:%d|session:%s|message:%d", mailboxID, tenantID, session.ID, messageID), tenantID)
 	return c.JSON(fiber.Map{
-		"message":     meta,
-		"raw_rfc822":  string(raw),
-		"attachments": attachments,
+		"message":           meta,
+		"text_body":         bodies.TextBody,
+		"html_body":         bodies.HTMLBody,
+		"has_html":          bodies.HasHTML,
+		"has_remote_images": bodies.HasRemoteImages,
+		"attachments":       attachments,
 	})
 }
 
