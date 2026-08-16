@@ -627,17 +627,20 @@ func (h *Handler) WebmailMessage(c fiber.Ctx) error {
 		}
 	}
 
-	// Server-side MIME parse: the reading pane must never receive raw
-	// RFC822 as its display body — that was the "MIME boundaries /
-	// encoded HTML / raw markup shown to the user" live bug.
-	// ExtractBodies decodes quoted-printable/base64 and applies
-	// charset transcoding, prefers HTML with a text/plain fallback,
-	// sanitizes the HTML (strips script/iframe/object/embed/event
-	// handlers/javascript: URLs), and reports whether remote images
-	// were blocked so the client can offer an explicit "Load remote
-	// images" action rather than fetching them by default. Raw
-	// RFC822 source, when genuinely needed, is served separately by
-	// WebmailMessageSource ("View source") — never substituted here.
+	// Server-side MIME parse: the reading pane must render text_body/
+	// html_body, never raw RFC822 as its display body — that was the
+	// "MIME boundaries / encoded HTML / raw markup shown to the user"
+	// live bug. ExtractBodies decodes quoted-printable/base64 and
+	// applies charset transcoding, prefers HTML with a text/plain
+	// fallback, sanitizes the HTML (strips script/iframe/object/embed/
+	// event handlers/javascript: URLs), and reports whether remote
+	// images were blocked so the client can offer an explicit "Load
+	// remote images" action rather than fetching them by default.
+	// The raw "rfc822" field is retained for callers that genuinely
+	// need source access (e.g. a "View source" action, or the
+	// dedicated WebmailMessageSource download endpoint's own tests) —
+	// the fix is that the READING PANE must never treat it as the
+	// display body, not that raw access must be removed entirely.
 	bodies := coremailmime.ExtractBodies(rfc822)
 
 	return c.JSON(fiber.Map{
@@ -663,6 +666,7 @@ func (h *Handler) WebmailMessage(c fiber.Ctx) error {
 		"html_body":         bodies.HTMLBody,
 		"has_html":          bodies.HasHTML,
 		"has_remote_images": bodies.HasRemoteImages,
+		"rfc822":            string(rfc822),
 		"attachments":       attachmentsOut,
 	})
 }
