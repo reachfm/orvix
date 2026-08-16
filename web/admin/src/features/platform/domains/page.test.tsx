@@ -80,6 +80,23 @@ describe("features/platform/domains (platform routes)", () => {
     expect(screen.queryByRole("table")).not.toBeInTheDocument();
   });
 
+  it("always shows Create domain, even with no page-level tenant scope applied yet — the tenant selector lives inside the dialog", async () => {
+    renderPage(null);
+    const createButton = screen.getByRole("button", { name: "Create domain" });
+    expect(createButton).toBeEnabled();
+
+    fireEvent.click(createButton);
+    // The dialog's own required tenant selector — not the page banner.
+    await waitFor(() => expect(screen.getByLabelText(/Organization \/ tenant/)).toBeInTheDocument());
+    expect(screen.getByRole("button", { name: "Create domain" })).toBeDisabled();
+
+    // Wait for the real organization options to load before selecting one.
+    await waitFor(() => expect(screen.getByRole("option", { name: "Acme (tenant 7)" })).toBeInTheDocument());
+    fireEvent.change(screen.getByLabelText(/Organization \/ tenant/), { target: { value: "7" } });
+    fireEvent.change(screen.getByLabelText("Domain name *"), { target: { value: "new.example.com" } });
+    expect(screen.getByRole("button", { name: "Create domain" })).toBeEnabled();
+  });
+
   it("calls the platform route with the tenant in the path — never /domains and never a support header", async () => {
     renderPage(7);
     await waitFor(() => expect(screen.getByText("acme.example")).toBeInTheDocument());
@@ -104,27 +121,29 @@ describe("features/platform/domains (platform routes)", () => {
     expect(screen.getByText("Internal only")).toBeInTheDocument();
   });
 
-  it("opens the detail drawer with real fields and mutates mail-access mode via the platform route", async () => {
+  it("opens the detail drawer with real fields and mutates lifecycle status via the platform route", async () => {
     renderPage(7);
     await waitFor(() => expect(screen.getByText("acme.example")).toBeInTheDocument());
     fireEvent.click(screen.getByText("acme.example"));
-    await waitFor(() => expect(screen.getByText("Mail access policy")).toBeInTheDocument());
-    expect(screen.getByText(/local-to-local delivery remains permitted/i)).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText("Lifecycle status")).toBeInTheDocument());
 
-    fireEvent.change(screen.getByLabelText("New mail access mode"), { target: { value: "internal_only" } });
-    fireEvent.click(screen.getByRole("button", { name: "Apply mode" }));
+    fireEvent.change(screen.getByLabelText("New domain status"), { target: { value: "suspended" } });
+    fireEvent.click(screen.getByRole("button", { name: "Apply status" }));
     await waitFor(() => {
-      const calls = mockedRequest.mock.calls.filter((c) => String(c[0]).endsWith("/mail-access-mode"));
+      const calls = mockedRequest.mock.calls.filter((c) => String(c[0]).endsWith("/status"));
       expect(calls.length).toBe(1);
-      expect(JSON.parse(String(calls[0][1] && (calls[0][1] as { body?: string }).body))).toEqual({ mail_access_mode: "internal_only" });
+      expect(JSON.parse(String(calls[0][1] && (calls[0][1] as { body?: string }).body))).toEqual({ status: "suspended", reason: "" });
     });
   });
 
-  it("does not invent DNS-verify/DKIM-rotate/TLS controls the platform routes do not expose", async () => {
+  it("does not present a domain-level mail-access-mode control or invent DNS-verify/DKIM-rotate/TLS controls the platform routes do not expose — mail access mode is mailbox-level in this UI", async () => {
     renderPage(7);
     await waitFor(() => expect(screen.getByText("acme.example")).toBeInTheDocument());
     fireEvent.click(screen.getByText("acme.example"));
-    await waitFor(() => expect(screen.getByText("Mail access policy")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText("Lifecycle status")).toBeInTheDocument());
+    expect(screen.queryByText("Mail access policy")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("New mail access mode")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /apply mode/i })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /rotate dkim/i })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /verify dns/i })).not.toBeInTheDocument();
   });

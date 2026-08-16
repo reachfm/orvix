@@ -4,14 +4,9 @@ import { X, Loader2, AlertCircle } from "lucide-react";
 import type { ReactNode } from "react";
 import StatusBadge from "../../components/StatusBadge";
 import { usePlatformDomain } from "../queries";
-import { useSetDomainStatusMutation, useSetMailAccessModeMutation } from "../mutations";
-import {
-  domainStatusLabel,
-  domainStatusTone,
-  mailAccessModeDescription,
-  mailAccessModeLabel,
-} from "../formatters";
-import { DOMAIN_STATUSES, MAIL_ACCESS_MODES, type MailAccessMode } from "../contract";
+import { useSetDomainStatusMutation } from "../mutations";
+import { domainStatusLabel, domainStatusTone } from "../formatters";
+import { DOMAIN_STATUSES } from "../contract";
 import { safeErrorInfo } from "../../errors";
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
@@ -24,11 +19,17 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 }
 
 /**
- * Domain detail + the two real platform mutations (lifecycle status,
- * mail-access mode). DNS records, DKIM rotation, and TLS/ACME actions
- * are not part of the platform route family — the panel explains the
- * configured DKIM/DMARC state the backend actually reports instead of
- * inventing controls.
+ * Domain detail + the real platform lifecycle-status mutation. DNS
+ * records, DKIM rotation, and TLS/ACME actions are not part of the
+ * platform route family — the panel explains the configured
+ * DKIM/DMARC state the backend actually reports instead of inventing
+ * controls.
+ *
+ * PRODUCT DECISION: mail_access_mode is a MAILBOX-level policy, not a
+ * domain-level one, in this frontend — it is set and changed on the
+ * mailbox create/detail views only. The domain still has a legacy
+ * mail_access_mode field on the backend for compatibility, but this
+ * drawer deliberately does not read or mutate it.
  */
 export default function DomainDetailDrawer({
   tenantId,
@@ -41,12 +42,10 @@ export default function DomainDetailDrawer({
 }) {
   const { data: domain, isLoading, isError, error } = usePlatformDomain(tenantId, id);
   const statusMut = useSetDomainStatusMutation(tenantId);
-  const modeMut = useSetMailAccessModeMutation(tenantId);
   const [statusDraft, setStatusDraft] = useState("");
-  const [modeDraft, setModeDraft] = useState<MailAccessMode | "">("");
   const [mutationError, setMutationError] = useState<unknown>(null);
 
-  const submitting = statusMut.isPending || modeMut.isPending;
+  const submitting = statusMut.isPending;
 
   return (
     <Dialog.Root open onOpenChange={(o) => !o && onClose()}>
@@ -131,45 +130,6 @@ export default function DomainDetailDrawer({
                     {statusMut.isPending ? "Saving…" : "Apply status"}
                   </button>
                 </div>
-              </section>
-
-              {/* Mail access policy — canonical modes with explanation */}
-              <section aria-label="Mail access policy" className="border border-[var(--border)] rounded-lg p-4">
-                <h3 className="text-sm font-semibold text-[var(--text-primary)] mb-2">Mail access policy</h3>
-                <p className="text-sm text-[var(--text-secondary)] mb-1">
-                  Configured: <span className="font-medium text-[var(--text-primary)]">{mailAccessModeLabel(domain.mail_access_mode)}</span>
-                </p>
-                <p className="text-xs text-[var(--text-secondary)] mb-3">{mailAccessModeDescription(domain.mail_access_mode)}</p>
-                <div className="flex flex-wrap items-center gap-2">
-                  <select
-                    aria-label="New mail access mode"
-                    value={modeDraft}
-                    onChange={(e) => setModeDraft(e.target.value as MailAccessMode)}
-                    className="px-3 py-1.5 bg-[var(--bg-elevated)] border border-[var(--border)] rounded text-sm text-[var(--text-primary)]"
-                  >
-                    <option value="">— Choose mode —</option>
-                    {MAIL_ACCESS_MODES.filter((m) => m !== domain.mail_access_mode).map((m) => (
-                      <option key={m} value={m}>{mailAccessModeLabel(m)}</option>
-                    ))}
-                  </select>
-                  <button
-                    type="button"
-                    disabled={!modeDraft || submitting}
-                    onClick={() =>
-                      modeMut.mutate({ id: domain.id, mailAccessMode: modeDraft as MailAccessMode }, {
-                        onSuccess: () => setModeDraft(""),
-                        onError: (e) => setMutationError(e),
-                      })
-                    }
-                    className="px-3 py-1.5 text-sm rounded bg-[var(--accent)] text-white disabled:opacity-40"
-                  >
-                    {modeMut.isPending ? "Saving…" : "Apply mode"}
-                  </button>
-                </div>
-                <p className="text-xs text-[var(--text-muted)] mt-3">
-                  The updated value is only claimed after the backend confirms the mutation — enforcement is server-side,
-                  not client-side.
-                </p>
               </section>
 
               {mutationError !== null && (

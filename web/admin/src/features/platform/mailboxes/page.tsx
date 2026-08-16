@@ -50,16 +50,14 @@ export default function MailboxesPage() {
             support grant is involved.
           </p>
         </div>
-        {tenantId !== null && (
-          <button
-            ref={createTriggerRef}
-            type="button"
-            onClick={() => setShowCreate(true)}
-            className="inline-flex items-center gap-1.5 px-3 py-2 text-sm rounded bg-[var(--accent)] text-white shrink-0"
-          >
-            <Plus size={14} /> Create mailbox
-          </button>
-        )}
+        <button
+          ref={createTriggerRef}
+          type="button"
+          onClick={() => setShowCreate(true)}
+          className="inline-flex items-center gap-1.5 px-3 py-2 text-sm rounded bg-[var(--accent)] text-white shrink-0"
+        >
+          <Plus size={14} /> Create mailbox
+        </button>
       </div>
 
       <TenantScopeBanner />
@@ -131,9 +129,9 @@ export default function MailboxesPage() {
         <MailboxDetailDrawer tenantId={tenantId} id={selectedId} onClose={() => setSelectedId(null)} />
       )}
 
-      {tenantId !== null && showCreate && (
+      {showCreate && (
         <CreateMailboxDialog
-          tenantId={tenantId}
+          initialTenantId={tenantId}
           onClose={() => {
             setShowCreate(false);
             requestAnimationFrame(() => createTriggerRef.current?.focus());

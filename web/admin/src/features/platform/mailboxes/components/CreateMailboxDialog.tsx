@@ -2,11 +2,25 @@ import { useState } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import { X, AlertTriangle, Loader2 } from "lucide-react";
 import { useCreateMailboxMutation } from "../mutations";
+import { usePlatformDomains } from "../../domains/queries";
+import { useSetTenantScope } from "../../tenant-context/queries";
+import TenantSelectField from "../../tenant-context/components/TenantSelectField";
 import { safeErrorInfo } from "../../errors";
 import { MAILBOX_ACCESS_MODE_OPTIONS, type MailAccessMode } from "../contract";
 
 /**
- * Mailbox creation dialog for an explicit tenant.
+ * Mailbox creation dialog.
+ *
+ * The tenant selector lives IN THIS DIALOG (see CreateDomainDialog for
+ * the same pattern) — "Create mailbox" is always available regardless
+ * of the page's current scope. The domain selector is filtered to the
+ * ACTIVE domains of whichever tenant is currently selected here, and
+ * clears if the tenant changes (a domain id from another tenant must
+ * never survive a tenant switch). There is no domain_id field on the
+ * backend's create-mailbox contract — the domain is carried by the
+ * email string itself — so this selector's only job is to constrain
+ * the operator to a real domain of the right tenant instead of typing
+ * an arbitrary/mistyped one.
  *
  * Security:
  *  - the password field is masked and uses autocomplete="new-password";
@@ -23,15 +37,22 @@ import { MAILBOX_ACCESS_MODE_OPTIONS, type MailAccessMode } from "../contract";
  * the platform creation route's own contract.
  */
 export default function CreateMailboxDialog({
-  tenantId,
+  initialTenantId,
   onClose,
+  onCreated,
 }: {
-  tenantId: number;
+  initialTenantId: number | null;
   onClose: () => void;
+  onCreated?: (tenantId: number) => void;
 }) {
+  const [tenantId, setTenantId] = useState<number | null>(initialTenantId);
+  const setScope = useSetTenantScope();
   const createMut = useCreateMailboxMutation(tenantId);
+  const domainsQ = usePlatformDomains(tenantId, { status: "active", limit: 200, offset: 0 });
+  const domains = domainsQ.data?.domains ?? [];
 
-  const [email, setEmail] = useState("");
+  const [localPart, setLocalPart] = useState("");
+  const [domainId, setDomainId] = useState<number | null>(null);
   const [name, setName] = useState("");
   const [password, setPassword] = useState("");
   const [quotaMB, setQuotaMB] = useState("");
@@ -52,17 +73,21 @@ export default function CreateMailboxDialog({
     onClose();
   };
 
-  const valid = email.trim() !== "" && password !== "" && accessMode !== "";
+  const selectedDomain = domains.find((d) => d.id === domainId) ?? null;
+  const trimmedLocalPart = localPart.trim();
+  const email = selectedDomain ? `${trimmedLocalPart}@${selectedDomain.name}` : "";
+  const valid =
+    tenantId !== null && domainId !== null && trimmedLocalPart !== "" && password !== "" && accessMode !== "";
 
   const submit = () => {
-    if (!valid || createMut.isPending) return;
+    if (!valid || tenantId === null || createMut.isPending) return;
     const key = idempotencyKey ?? crypto.randomUUID();
     setIdempotencyKey(key);
     setError(null);
     createMut.mutate(
       {
         data: {
-          email: email.trim(),
+          email,
           name: name.trim() || undefined,
           password,
           quota_mb: quotaMB.trim() !== "" ? Number(quotaMB) : undefined,
@@ -76,6 +101,8 @@ export default function CreateMailboxDialog({
         onSuccess: (res) => {
           setCreatedEmail(res.mailbox.email);
           clearPassword();
+          setScope.mutate({ tenantId, tenantName: undefined });
+          onCreated?.(tenantId);
         },
         onError: (e) => {
           setError(e);
@@ -124,17 +151,51 @@ export default function CreateMailboxDialog({
                 </div>
               )}
 
-              <label className="block text-sm">
-                <span className="text-[var(--text-secondary)]">Email *</span>
-                <input
-                  type="email"
-                  value={email}
-                  onChange={(e) => { setEmail(e.target.value); invalidateKey(); }}
-                  placeholder="user@example.com"
-                  required
-                  className="mt-1 w-full px-3 py-2 bg-[var(--bg-elevated)] border border-[var(--border)] rounded text-sm text-[var(--text-primary)]"
-                />
-              </label>
+              <TenantSelectField
+                value={tenantId}
+                onChange={(id) => { setTenantId(id); setDomainId(null); invalidateKey(); }}
+                disabled={createMut.isPending}
+              />
+
+              <div className="grid grid-cols-[1fr_auto_1.4fr] items-end gap-2">
+                <label className="block text-sm">
+                  <span className="text-[var(--text-secondary)]">Local part *</span>
+                  <input
+                    value={localPart}
+                    onChange={(e) => { setLocalPart(e.target.value); invalidateKey(); }}
+                    placeholder="user"
+                    required
+                    disabled={createMut.isPending}
+                    className="mt-1 w-full px-3 py-2 bg-[var(--bg-elevated)] border border-[var(--border)] rounded text-sm text-[var(--text-primary)] disabled:opacity-60"
+                  />
+                </label>
+                <span className="pb-2 text-[var(--text-secondary)]">@</span>
+                <label className="block text-sm">
+                  <span className="text-[var(--text-secondary)]">Domain *</span>
+                  <select
+                    value={domainId === null ? "" : String(domainId)}
+                    onChange={(e) => { setDomainId(e.target.value === "" ? null : Number(e.target.value)); invalidateKey(); }}
+                    required
+                    disabled={tenantId === null || domainsQ.isLoading || createMut.isPending}
+                    className="mt-1 w-full px-3 py-2 bg-[var(--bg-elevated)] border border-[var(--border)] rounded text-sm text-[var(--text-primary)] disabled:opacity-60"
+                  >
+                    <option value="">
+                      {tenantId === null ? "Select a tenant first" : domainsQ.isLoading ? "Loading…" : "— Select a domain —"}
+                    </option>
+                    {domains.map((d) => (
+                      <option key={d.id} value={String(d.id)}>{d.name}</option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+              {tenantId !== null && !domainsQ.isLoading && domains.length === 0 && (
+                <p className="text-xs text-[var(--text-muted)] flex items-center gap-1">
+                  <AlertTriangle size={12} /> This tenant has no active domains — create one first.
+                </p>
+              )}
+              {email && (
+                <p className="text-xs text-[var(--text-secondary)]">Mailbox address: <span className="font-mono">{email}</span></p>
+              )}
 
               <label className="block text-sm">
                 <span className="text-[var(--text-secondary)]">Display name</span>

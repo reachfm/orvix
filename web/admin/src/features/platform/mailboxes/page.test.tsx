@@ -67,6 +67,16 @@ describe("features/platform/mailboxes (platform routes)", () => {
       if (path.startsWith("/platform/mailboxes/7")) {
         return Promise.resolve(MAILBOXES);
       }
+      if (path.startsWith("/platform/domains/7")) {
+        return Promise.resolve({
+          domains: [{
+            id: 1, tenant_id: 7, name: "acme.example", status: "active", plan: "business",
+            mailbox_count: 2, alias_count: 0, dkim_enabled: true, dmarc_enabled: true,
+            mail_access_mode: "inherit", created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z",
+          }],
+          total: 1, limit: 200, offset: 0,
+        });
+      }
       return Promise.resolve({});
     });
   });
@@ -77,6 +87,22 @@ describe("features/platform/mailboxes (platform routes)", () => {
     renderPage(null);
     expect(screen.getByText("Select a tenant")).toBeInTheDocument();
     expect(screen.queryByRole("table")).not.toBeInTheDocument();
+  });
+
+  it("always shows Create mailbox, even with no page-level tenant scope applied yet — the tenant selector lives inside the dialog", async () => {
+    renderPage(null);
+    const createButton = screen.getByRole("button", { name: "Create mailbox" });
+    expect(createButton).toBeEnabled();
+
+    fireEvent.click(createButton);
+    await waitFor(() => expect(screen.getByLabelText(/Organization \/ tenant/)).toBeInTheDocument());
+    // No domain can be chosen before a tenant is selected.
+    expect(screen.getByLabelText("Domain *")).toBeDisabled();
+
+    // Wait for the real organization options to load before selecting one.
+    await waitFor(() => expect(screen.getByRole("option", { name: "Acme (tenant 7)" })).toBeInTheDocument());
+    fireEvent.change(screen.getByLabelText(/Organization \/ tenant/), { target: { value: "7" } });
+    await waitFor(() => expect(screen.getByLabelText("Domain *")).toBeEnabled());
   });
 
   it("calls /platform/mailboxes/:tenant_id — never /mailboxes and never a support header", async () => {
@@ -181,7 +207,11 @@ describe("features/platform/mailboxes (platform routes)", () => {
     fireEvent.click(screen.getByRole("button", { name: /create mailbox/i }));
 
     const createButton = screen.getByRole("button", { name: "Create mailbox" });
-    fireEvent.change(screen.getByLabelText("Email *"), { target: { value: "new@acme.example" } });
+    // The domain selector is filtered to the currently-selected tenant's
+    // active domains — wait for it to load before choosing one.
+    await waitFor(() => expect(screen.getByRole("option", { name: "acme.example" })).toBeInTheDocument());
+    fireEvent.change(screen.getByLabelText("Domain *"), { target: { value: "1" } });
+    fireEvent.change(screen.getByLabelText("Local part *"), { target: { value: "new" } });
     fireEvent.change(screen.getByLabelText("Password *"), { target: { value: "s3cret-pass!" } });
     // No access mode chosen yet — the button must stay disabled (mandatory choice).
     expect(createButton).toBeDisabled();

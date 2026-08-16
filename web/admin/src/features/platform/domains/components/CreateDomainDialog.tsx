@@ -2,28 +2,41 @@ import { useMemo, useState } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import { X, Copy, Check, AlertTriangle, Loader2, ChevronDown, ChevronRight } from "lucide-react";
 import { useCreateDomainMutation } from "../mutations";
+import { useSetTenantScope } from "../../tenant-context/queries";
+import TenantSelectField from "../../tenant-context/components/TenantSelectField";
 import { safeErrorInfo } from "../../errors";
 import type { PlatformCreateDomainResult, PlatformDomainLimits } from "../contract";
 
 /**
- * Domain creation dialog for an explicit tenant. Deliberately has NO
- * mail-access-mode selector — mail-access policy belongs to the
- * mailbox, never the domain, on this route (see contract.ts).
+ * Domain creation dialog. Deliberately has NO mail-access-mode
+ * selector — mail-access policy belongs to the mailbox, never the
+ * domain, on this route (see contract.ts).
+ *
+ * The tenant selector lives IN THIS DIALOG, not on the parent page:
+ * "Create domain" is always available regardless of whether a page
+ * scope is currently applied. initialTenantId pre-fills the selector
+ * (current page scope, or the operator's last-used tenant) but the
+ * operator can change it here, and every submit sends the currently
+ * selected tenant id explicitly — nothing is inferred.
  *
  * Idempotency: one key is generated when the dialog first mounts and
  * is reused across repeated submissions of the SAME form state
  * (network retry, double-click). Any field edit after a failed
  * attempt clears the key so the next submit gets a fresh one — the
  * request has genuinely changed, so replaying the old key would be
- * wrong.
+ * wrong. Changing the tenant also clears the key for the same reason.
  */
 export default function CreateDomainDialog({
-  tenantId,
+  initialTenantId,
   onClose,
+  onCreated,
 }: {
-  tenantId: number;
+  initialTenantId: number | null;
   onClose: () => void;
+  onCreated?: (domainId: number, tenantId: number) => void;
 }) {
+  const [tenantId, setTenantId] = useState<number | null>(initialTenantId);
+  const setScope = useSetTenantScope();
   const createMut = useCreateDomainMutation(tenantId);
 
   const [name, setName] = useState("");
@@ -48,6 +61,8 @@ export default function CreateDomainDialog({
 
   const trimmedName = name.trim();
   const nameValid = trimmedName.length > 0;
+  const tenantValid = tenantId !== null;
+  const formValid = nameValid && tenantValid;
 
   const limits: PlatformDomainLimits | undefined = useMemo(() => {
     const l: PlatformDomainLimits = {};
@@ -65,7 +80,7 @@ export default function CreateDomainDialog({
   };
 
   const submit = () => {
-    if (!nameValid || createMut.isPending) return;
+    if (!formValid || tenantId === null || createMut.isPending) return;
     const key = idempotencyKey ?? crypto.randomUUID();
     setIdempotencyKey(key);
     setError(null);
@@ -81,7 +96,18 @@ export default function CreateDomainDialog({
         idempotencyKey: key,
       },
       {
-        onSuccess: (res) => setResult(res),
+        onSuccess: (res) => {
+          setResult(res);
+          // The dialog may have created a domain for a DIFFERENT
+          // tenant than the page's current scope — bind the page
+          // scope to the tenant actually used so the list view (and
+          // the newly-created domain within it) is visible without
+          // a second manual step. The success panel itself (DKIM/DNS
+          // records + copy buttons) stays on screen so the operator
+          // can copy what they need; "View domain" below opens the
+          // detail view explicitly when they're ready.
+          setScope.mutate({ tenantId, tenantName: undefined });
+        },
         onError: (e) => setError(e),
       },
     );
@@ -204,10 +230,23 @@ export default function CreateDomainDialog({
                 </p>
               )}
 
-              <div className="flex justify-end">
-                <button type="button" onClick={onClose} className="px-3 py-2 text-sm rounded bg-[var(--accent)] text-white">
+              <div className="flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={onClose}
+                  className="px-3 py-2 text-sm rounded border border-[var(--border)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+                >
                   Done
                 </button>
+                {onCreated && tenantId !== null && (
+                  <button
+                    type="button"
+                    onClick={() => { onCreated(result.domain.id, tenantId); onClose(); }}
+                    className="px-3 py-2 text-sm rounded bg-[var(--accent)] text-white"
+                  >
+                    View domain
+                  </button>
+                )}
               </div>
             </div>
           ) : (
@@ -218,6 +257,12 @@ export default function CreateDomainDialog({
                   <p className="text-xs text-[var(--text-secondary)] mt-0.5">{safeErrorInfo(error).detail}</p>
                 </div>
               )}
+
+              <TenantSelectField
+                value={tenantId}
+                onChange={(id) => { setTenantId(id); invalidateKey(); }}
+                disabled={createMut.isPending}
+              />
 
               <label className="block text-sm">
                 <span className="text-[var(--text-secondary)]">Domain name *</span>
@@ -340,7 +385,7 @@ export default function CreateDomainDialog({
                 </Dialog.Close>
                 <button
                   type="button"
-                  disabled={!nameValid || createMut.isPending}
+                  disabled={!formValid || createMut.isPending}
                   onClick={submit}
                   className="inline-flex items-center gap-2 px-3 py-2 text-sm rounded bg-[var(--accent)] text-white disabled:opacity-40"
                 >
@@ -348,7 +393,12 @@ export default function CreateDomainDialog({
                   Create domain
                 </button>
               </div>
-              {!nameValid && (
+              {!tenantValid && (
+                <p className="text-xs text-[var(--text-muted)] flex items-center gap-1">
+                  <AlertTriangle size={12} /> Select an organization/tenant.
+                </p>
+              )}
+              {tenantValid && !nameValid && (
                 <p className="text-xs text-[var(--text-muted)] flex items-center gap-1">
                   <AlertTriangle size={12} /> Domain name is required.
                 </p>

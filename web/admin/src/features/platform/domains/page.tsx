@@ -50,16 +50,14 @@ export default function DomainsPage() {
             support grant is involved.
           </p>
         </div>
-        {tenantId !== null && (
-          <button
-            ref={createTriggerRef}
-            type="button"
-            onClick={() => setShowCreate(true)}
-            className="inline-flex items-center gap-1.5 px-3 py-2 text-sm rounded bg-[var(--accent)] text-white shrink-0"
-          >
-            <Plus size={14} /> Create domain
-          </button>
-        )}
+        <button
+          ref={createTriggerRef}
+          type="button"
+          onClick={() => setShowCreate(true)}
+          className="inline-flex items-center gap-1.5 px-3 py-2 text-sm rounded bg-[var(--accent)] text-white shrink-0"
+        >
+          <Plus size={14} /> Create domain
+        </button>
       </div>
 
       <TenantScopeBanner />
@@ -131,9 +129,10 @@ export default function DomainsPage() {
         <DomainDetailDrawer tenantId={tenantId} id={selectedId} onClose={() => setSelectedId(null)} />
       )}
 
-      {tenantId !== null && showCreate && (
+      {showCreate && (
         <CreateDomainDialog
-          tenantId={tenantId}
+          initialTenantId={tenantId}
+          onCreated={(domainId) => setSelectedId(domainId)}
           onClose={() => {
             setShowCreate(false);
             // The dialog unmounts on close rather than staying mounted with
