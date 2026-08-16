@@ -2,6 +2,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   createPlatformDomain,
   deactivatePlatformDomain,
+  deletePlatformDomain,
   generatePlatformDomainDKIM,
   rotatePlatformDomainDKIM,
   setPlatformDomainMailAccessMode,
@@ -11,6 +12,7 @@ import {
 import { domainKeys } from "./queries";
 import type {
   DeactivatePlatformDomainRequest,
+  DeletePlatformDomainRequest,
   MailAccessMode,
   PlatformCreateDomainRequest,
   PlatformDKIMMutationRequest,
@@ -119,6 +121,27 @@ export function useDeactivateDomainMutation(tenantId: number | null) {
   return useMutation({
     mutationFn: ({ id, body, idempotencyKey }: { id: number; body: DeactivatePlatformDomainRequest; idempotencyKey: string }) =>
       deactivatePlatformDomain(tenantId as number, id, body, idempotencyKey),
+    onSuccess: (_result, { id }) => {
+      qc.invalidateQueries({ queryKey: domainKeys.detail(tenantId, id) });
+      qc.invalidateQueries({ queryKey: domainKeys.dns(tenantId, id) });
+      for (const key of domainInvalidationKeys()) qc.invalidateQueries({ queryKey: key });
+    },
+  });
+}
+
+/**
+ * Canonical, audited, PERMANENT platform domain delete
+ * (deleted_at-tombstone) — distinct from deactivate above. Requires
+ * the domain to already be deactivated and the real currently-loaded
+ * domain.version as expected_version. On success, invalidates list/
+ * detail/DNS state so the domain genuinely disappears from active
+ * inventory — never a fake client-only row removal.
+ */
+export function useDeleteDomainMutation(tenantId: number | null) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, body, idempotencyKey }: { id: number; body: DeletePlatformDomainRequest; idempotencyKey: string }) =>
+      deletePlatformDomain(tenantId as number, id, body, idempotencyKey),
     onSuccess: (_result, { id }) => {
       qc.invalidateQueries({ queryKey: domainKeys.detail(tenantId, id) });
       qc.invalidateQueries({ queryKey: domainKeys.dns(tenantId, id) });

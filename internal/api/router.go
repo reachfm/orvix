@@ -2068,6 +2068,12 @@ func (r *Router) setupRoutes() {
 	// remediation): canonical, audited deactivation/soft-delete. See
 	// platform_domain_lifecycle.go for the full contract.
 	protected.Post("/platform/domains/:tenant_id/:id/deactivate", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermPlatformDomainsDeactivate), r.h.DeactivatePlatformDomain)
+	// Canonical, audited, PERMANENT deleted_at-tombstone delete —
+	// distinct authority from deactivate above. See
+	// platform_domain_lifecycle.go for the full contract (deactivate-
+	// then-delete gate, structured dependency blockers, active-DKIM
+	// purge with history preserved).
+	protected.Post("/platform/domains/:tenant_id/:id/delete", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermPlatformDomainsDelete), r.h.DeletePlatformDomain)
 
 	// Platform user lifecycle (Phase 8 production-acceptance remediation):
 	// canonical, audited, non-self deactivation of another platform-scoped
@@ -2090,6 +2096,18 @@ func (r *Router) setupRoutes() {
 	protected.Post("/platform/mailboxes/:tenant_id/:id/quota", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermMailboxesWrite), r.h.SetPlatformMailboxQuota)
 	protected.Post("/platform/mailboxes/:tenant_id/:id/reset-password", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermMailboxesWrite), r.h.ResetPlatformMailboxPassword)
 	protected.Delete("/platform/mailboxes/:tenant_id/:id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermMailboxesWrite), r.h.DeletePlatformMailbox)
+	// ── Audited, read-only mailbox support view (PermPlatformMailboxSupportView) ──
+	// Platform-only: never inherited by any tenant role. The session
+	// model (supportaccess.MailboxViewSession) binds one operator to
+	// one mailbox in one tenant for a bounded window; the platform
+	// operator's own auth cookie/session is never touched by any of
+	// these routes, and the mailbox password is never read.
+	protected.Post("/platform/mailboxes/:tenant_id/:id/support-view", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermPlatformMailboxSupportView), r.h.StartMailboxSupportView)
+	protected.Get("/platform/mailboxes/:tenant_id/:id/support-view/:session_id/folders", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermPlatformMailboxSupportView), r.h.ListMailboxSupportFolders)
+	protected.Get("/platform/mailboxes/:tenant_id/:id/support-view/:session_id/messages", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermPlatformMailboxSupportView), r.h.ListMailboxSupportMessages)
+	protected.Get("/platform/mailboxes/:tenant_id/:id/support-view/:session_id/messages/:message_id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermPlatformMailboxSupportView), r.h.GetMailboxSupportMessage)
+	protected.Get("/platform/mailboxes/:tenant_id/:id/support-view/:session_id/messages/:message_id/attachments/:attachment_id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermPlatformMailboxSupportView), r.h.GetMailboxSupportAttachment)
+	protected.Post("/platform/mailboxes/:tenant_id/:id/support-view/:session_id/end", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermPlatformMailboxSupportView), r.h.EndMailboxSupportView)
 	protected.Post("/platform/mailboxes/:tenant_id/bulk/status", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermMailboxesWrite), r.h.BulkPlatformMailboxStatus)
 
 	// ── Platform bulk mailbox provisioning (Stage 8) ─────────────

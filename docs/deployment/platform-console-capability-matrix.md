@@ -1,13 +1,16 @@
 # Platform Console Capability Matrix
 
 Complete audit of every route gated with `platformMW[0], platformMW[1]`
-in `internal/api/router.go` (128 route registrations, verified by
+in `internal/api/router.go` (223 route registrations, verified by
 `internal/api/capability_matrix_test.go` against the branch head this
 document was written against — updated for the Milestone 13-15 DR,
 retention, platform billing, and signed-update-artifact routes, plus
 three pre-existing queue routes found undocumented during that pass,
 plus the DR operation-history and platform-billing reconciliation
-routes added during the M13-15 re-audit gap-closure pass).
+routes added during the M13-15 re-audit gap-closure pass, plus the
+canonical, audited, permanent platform domain delete route added
+alongside deactivate, plus the six audited read-only mailbox
+support-view routes).
 Every disposition below reflects the actual handler and actual
 frontend consumer, not the route's name.
 
@@ -251,6 +254,7 @@ are RBAC-permissioned, audited, and tenant-scoped in SQL.
 | `POST /platform/domains/:tenant_id/:id/status` | platformMW | `SetPlatformDomainStatus` | allowed lifecycle transition, tenant-scoped, audited | Platform | `internal/platform/mailcontrol/service_test.go` | MISSING_UI |
 | `POST /platform/domains/:tenant_id/:id/mail-access-mode` | platformMW | `SetPlatformDomainMailAccessMode` | set canonical SMTP mail-access mode (`internal_only`/`internal_external`), audited | Platform | `internal/platform/mailcontrol/service_test.go` | MISSING_UI |
 | `POST /platform/domains/:tenant_id/:id/deactivate` | platformMW | `DeactivatePlatformDomain` | canonical domain deactivation/soft-delete lifecycle (`PermPlatformDomainsDeactivate`; typed confirmation, optimistic concurrency, dependency checks against active mailboxes/aliases/queued mail, never touches `deleted_at` or DKIM evidence; Idempotency-Key required) | Platform | `internal/api/handlers/platform_domain_lifecycle_acceptance_test.go` | MISSING_UI |
+| `POST /platform/domains/:tenant_id/:id/delete` | platformMW | `DeletePlatformDomain` | canonical, audited, PERMANENT `deleted_at`-tombstone delete distinct from deactivate above (`PermPlatformDomainsDelete`; typed confirmation, optimistic concurrency, requires prior canonical deactivation via `deactivated_at`, blocks with structured dependency counts on active mailboxes/aliases/queued mail, purges the active DKIM config while preserving DKIM/audit history, never mutates public DNS, Idempotency-Key required) | Platform | `internal/api/handlers/platform_domain_lifecycle_acceptance_test.go`, `web/admin/src/features/platform/domains/page.test.tsx` | UI_SUPPORTED |
 | `GET /platform/domains/:tenant_id/:id/dns` | platformMW | `GetPlatformDomainDNS` | read-only public DNS/DKIM snapshot for an existing domain (never generates a key; DNS requirements reuse the same dnsops generator `CreatePlatformDomain` uses) | Platform | `internal/api/handlers/platform_domain_lifecycle_acceptance_test.go` | MISSING_UI |
 | `POST /platform/domains/:tenant_id/:id/dns/verify` | platformMW | `VerifyPlatformDomainDNS` | read-only live public-DNS verification of every record `GetPlatformDomainDNS` presents, via the shared `dnsops.Service.Generate`/`Verify` (the same `Verifier` the existing admin DNS verify route uses); external DNS lookups only — never mutates public DNS, never generates/rotates DKIM, never modifies the domain; DKIM is compared against the CURRENT configured key read fresh on every call; `DomainDetailDrawer.tsx`'s DNS Setup tab auto-triggers it once per domain (gated to `activeTab === "dns"`) and offers an explicit "Re-check DNS" action, rendering per-record Matched/Mismatch/Missing/Check failed status with Expected/Actual on mismatch | Platform | `internal/api/handlers/platform_dns_verify_test.go`, `internal/dnsops/verifier_test.go`, `web/admin/src/features/platform/domains/page.test.tsx`, `web/admin/tests/e2e/platform-domains-contract.spec.ts` | UI_SUPPORTED |
 | `POST /platform/domains/:tenant_id/:id/dkim/generate` | platformMW | `GeneratePlatformDomainDKIM` | canonical, version-guarded DKIM generation for a domain with none configured (`PlatformDKIMForTenant`; tenant-scoped resolution, optimistic concurrency, Idempotency-Key required) | Platform | `internal/api/handlers/platform_domain_lifecycle_acceptance_test.go` | MISSING_UI |
@@ -265,6 +269,12 @@ are RBAC-permissioned, audited, and tenant-scoped in SQL.
 | `POST /platform/mailboxes/:tenant_id/:id/reset-password` | platformMW | `ResetPlatformMailboxPassword` | secure one-time password reset via the production service, audited | Platform | `internal/platform/mailcontrol/service_test.go` | MISSING_UI |
 | `DELETE /platform/mailboxes/:tenant_id/:id` | platformMW | `DeletePlatformMailbox` | soft-delete with typed confirmation `PURGE-MAILBOX-<id>`, audited | Platform | `internal/platform/mailcontrol/service_test.go` | MISSING_UI |
 | `POST /platform/mailboxes/:tenant_id/bulk/status` | platformMW | `BulkPlatformMailboxStatus` | bounded bulk status transition (max 500 ids), tenant-scoped, audited | Platform | `internal/platform/mailcontrol/service_test.go` | MISSING_UI |
+| `POST /platform/mailboxes/:tenant_id/:id/support-view` | platformMW | `StartMailboxSupportView` | starts an audited, read-only, time-boxed support session (`PermPlatformMailboxSupportView`; typed confirmation `ACCESS-MAILBOX-<id>`, ticket/reason required, default 30m/max 60m expiry, mailbox password never read; response never contains a password/hash/reusable token); `AccessMailboxDialog.tsx`'s "Access mailbox" action on the mailbox detail drawer | Platform | `internal/api/handlers/platform_mailbox_support_view_test.go`, `web/admin/src/features/platform/mailboxes/page.test.tsx` | UI_SUPPORTED |
+| `GET /platform/mailboxes/:tenant_id/:id/support-view/:session_id/folders` | platformMW | `ListMailboxSupportFolders` | read-only folder list for the session's bound mailbox; fails closed on any operator/tenant/mailbox mismatch or expired/ended/revoked session; `SupportMailboxViewer.tsx`'s folder sidebar | Platform | `internal/api/handlers/platform_mailbox_support_view_test.go`, `web/admin/src/features/platform/mailboxes/page.test.tsx` | UI_SUPPORTED |
+| `GET /platform/mailboxes/:tenant_id/:id/support-view/:session_id/messages` | platformMW | `ListMailboxSupportMessages` | read-only message list/search for the session's bound mailbox; `SupportMailboxViewer.tsx`'s message list | Platform | `internal/api/handlers/platform_mailbox_support_view_test.go`, `web/admin/src/features/platform/mailboxes/page.test.tsx` | UI_SUPPORTED |
+| `GET /platform/mailboxes/:tenant_id/:id/support-view/:session_id/messages/:message_id` | platformMW | `GetMailboxSupportMessage` | read-only message body/headers/attachment list; never calls `UpdateFlags` (never marks a customer message seen as a side effect); `SupportMailboxViewer.tsx`'s message detail pane | Platform | `internal/api/handlers/platform_mailbox_support_view_test.go` | MISSING_UI |
+| `GET /platform/mailboxes/:tenant_id/:id/support-view/:session_id/messages/:message_id/attachments/:attachment_id` | platformMW | `GetMailboxSupportAttachment` | read-only attachment download, scoped to the session's message; `SupportMailboxViewer.tsx` renders a download link but it is not yet exercised by an automated test | Platform | `internal/api/handlers/platform_mailbox_support_view_test.go` | MISSING_UI |
+| `POST /platform/mailboxes/:tenant_id/:id/support-view/:session_id/end` | platformMW | `EndMailboxSupportView` | operator-initiated session end, audited, idempotent; `SupportMailboxViewer.tsx`'s "End access" action | Platform | `internal/api/handlers/platform_mailbox_support_view_test.go`, `web/admin/src/features/platform/mailboxes/page.test.tsx` | UI_SUPPORTED |
 | `GET /platform/aliases/:tenant_id` | platformMW | `ListPlatformAliases` | paginated alias list for an explicit tenant/domain | Platform | `internal/platform/mailcontrol/service_test.go` | MISSING_UI |
 | `GET /platform/aliases/:tenant_id/:id` | platformMW | `GetPlatformAlias` | alias detail, tenant-scoped | Platform | `internal/platform/mailcontrol/service_test.go` | MISSING_UI |
 | `POST /platform/aliases/:tenant_id` | platformMW | `CreatePlatformAlias` | create alias with domain ownership, loop rejection, conflict detection, audited | Platform | `internal/platform/mailcontrol/service_test.go` | MISSING_UI |
@@ -363,19 +373,19 @@ above (not carried over from an earlier draft) and is enforced equal
 to the router's actual route set by
 `internal/api/capability_matrix_test.go`, which parses
 `platformMW[0], platformMW[1]` registrations straight out of
-`router.go` — currently 216 — and parses every `` `METHOD /path` ``
+`router.go` — currently 223 — and parses every `` `METHOD /path` ``
 occurrence and its row's disposition straight out of this document.
 
 | Disposition | Routes |
 |---|---|
-| UI_SUPPORTED | 60 |
+| UI_SUPPORTED | 65 |
 | READ_ONLY_STATUS | 5 |
 | MACHINE_ONLY | 3 |
 | DEPRECATED | 12 |
 | DUPLICATE_SUPERSEDED_ROUTE | 18 |
-| MISSING_UI | 118 |
+| MISSING_UI | 120 |
 | MISSING_BACKEND | 0 (the one MISSING_BACKEND case — platform-initiated organization creation — is a non-route documented under Organizations, not counted here) |
-| **Total** | **216** |
+| **Total** | **223** |
 
 Three pre-existing MISSING_UI gaps were documented rather than
 silently omitted: `GET /admin/backups/:id` (single-backup fetch; the

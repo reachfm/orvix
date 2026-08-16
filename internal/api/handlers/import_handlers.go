@@ -344,6 +344,26 @@ func errorResponse(c fiber.Ctx, err error) error {
 	if err == nil {
 		return nil
 	}
+	// domainDeleteBlockedError carries structured blocker counts (see
+	// platform_domain_lifecycle.go) so the operator sees exactly what
+	// must be cleaned up first, not just a generic conflict string.
+	if _, ok := err.(*domainNotDeactivatedError); ok {
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{
+			"error": "deactivate the domain before deleting it permanently",
+			"code":  "DOMAIN_NOT_DEACTIVATED",
+		})
+	}
+	if blocked, ok := err.(*domainDeleteBlockedError); ok {
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{
+			"error": "domain has live dependencies blocking deletion",
+			"code":  "DOMAIN_DELETE_BLOCKED",
+			"blockers": fiber.Map{
+				"mailboxes":       blocked.Mailboxes,
+				"aliases":         blocked.Aliases,
+				"queued_messages": blocked.QueuedMessages,
+			},
+		})
+	}
 	kerr := kernel.AsAPIError(err)
 	return c.Status(kerr.HTTPStatus()).JSON(fiber.Map{"error": kerr.Message, "code": string(kerr.Code)})
 }

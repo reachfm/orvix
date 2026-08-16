@@ -315,4 +315,104 @@ describe("features/platform/mailboxes (platform routes)", () => {
     // silently overwrite the local, now-stale view).
     await waitFor(() => expect(refetchCount).toBeGreaterThan(0));
   });
+
+  it("shows Access mailbox as a distinct action, requires ticket/reason/typed confirmation, and starts a read-only session without ever sending a password", async () => {
+    mockedRequest.mockImplementation((path: string, opts?: Parameters<typeof request>[1]) => {
+      if (String(path) === "/platform/mailboxes/7/101/support-view" && opts?.method === "POST") {
+        return Promise.resolve({
+          session_id: "sess-abc123",
+          tenant_id: 7,
+          mailbox_id: 101,
+          email: "alice@acme.example",
+          mode: "read_only",
+          expires_at: "2026-01-01T01:00:00Z",
+        });
+      }
+      if (String(path).includes("/support-view/sess-abc123/folders")) {
+        return Promise.resolve({ folders: [{ id: 1, mailbox_id: 101, name: "Inbox", path: "INBOX", folder_type: "inbox", message_count: 1, unread_count: 0, total_size: 0 }] });
+      }
+      if (String(path).includes("/support-view/sess-abc123/messages")) {
+        return Promise.resolve({ messages: [], total: 0 });
+      }
+      if (path.startsWith("/platform/organizations")) return Promise.resolve({ organizations: [], total: 0 });
+      if (path.startsWith("/platform/mailboxes/7/101")) return Promise.resolve(MAILBOXES.mailboxes[0]);
+      if (path.startsWith("/platform/mailboxes/7")) return Promise.resolve(MAILBOXES);
+      return Promise.resolve({});
+    });
+
+    renderPage(7);
+    await waitFor(() => expect(screen.getByText("alice@acme.example")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("alice@acme.example"));
+    await waitFor(() => expect(screen.getByRole("button", { name: /Access mailbox/i })).toBeInTheDocument());
+    // Distinct from the other mailbox actions.
+    expect(screen.getByRole("button", { name: "Reset password" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Soft-delete mailbox" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Access mailbox/i }));
+    const startButton = await screen.findByRole("button", { name: "Start read-only session" });
+    expect(startButton).toBeDisabled();
+
+    fireEvent.change(screen.getByLabelText(/Ticket \/ reference/), { target: { value: "SUP-9" } });
+    fireEvent.change(screen.getByLabelText("Reason"), { target: { value: "Customer escalation" } });
+    expect(startButton).toBeDisabled(); // confirmation phrase not typed yet
+    fireEvent.change(screen.getByLabelText(/Type ACCESS-MAILBOX-101/), { target: { value: "ACCESS-MAILBOX-101" } });
+    expect(startButton).toBeEnabled();
+    fireEvent.click(startButton);
+
+    await waitFor(() => {
+      const call = mockedRequest.mock.calls.find((c) => c[0] === "/platform/mailboxes/7/101/support-view");
+      expect(call).toBeDefined();
+      const body = JSON.parse((call![1] as { body: string }).body);
+      expect(body).toEqual({ ticket_ref: "SUP-9", reason: "Customer escalation", duration_minutes: 30, confirm: "ACCESS-MAILBOX-101" });
+    });
+    // The request body must never carry a password field of any kind.
+    for (const call of mockedRequest.mock.calls) {
+      if (call[0] !== "/platform/mailboxes/7/101/support-view") continue;
+      const body = JSON.parse((call[1] as { body: string }).body);
+      expect(body).not.toHaveProperty("password");
+    }
+
+    // Viewer opens with the persistent read-only banner.
+    await waitFor(() => expect(screen.getByRole("dialog", { name: "Support mailbox viewer" })).toBeInTheDocument());
+    expect(screen.getByText("Support access")).toBeInTheDocument();
+    expect(screen.getByText(/Read-only/)).toBeInTheDocument();
+    // No write controls anywhere in the viewer.
+    for (const label of [/compose/i, /reply/i, /forward/i, /^delete$/i, /mark as read/i, /mark as unread/i]) {
+      expect(screen.queryByRole("button", { name: label })).not.toBeInTheDocument();
+    }
+  });
+
+  it("ends the support session via the audited end route and shows the ended state", async () => {
+    let ended = false;
+    mockedRequest.mockImplementation((path: string, opts?: Parameters<typeof request>[1]) => {
+      if (String(path) === "/platform/mailboxes/7/101/support-view" && opts?.method === "POST") {
+        return Promise.resolve({ session_id: "sess-xyz", tenant_id: 7, mailbox_id: 101, email: "alice@acme.example", mode: "read_only", expires_at: "2026-01-01T01:00:00Z" });
+      }
+      if (String(path) === "/platform/mailboxes/7/101/support-view/sess-xyz/end" && opts?.method === "POST") {
+        ended = true;
+        return Promise.resolve({ session_id: "sess-xyz", ended: true });
+      }
+      if (String(path).includes("/support-view/sess-xyz/folders")) return Promise.resolve({ folders: [] });
+      if (String(path).includes("/support-view/sess-xyz/messages")) return Promise.resolve({ messages: [], total: 0 });
+      if (path.startsWith("/platform/organizations")) return Promise.resolve({ organizations: [], total: 0 });
+      if (path.startsWith("/platform/mailboxes/7/101")) return Promise.resolve(MAILBOXES.mailboxes[0]);
+      if (path.startsWith("/platform/mailboxes/7")) return Promise.resolve(MAILBOXES);
+      return Promise.resolve({});
+    });
+
+    renderPage(7);
+    await waitFor(() => expect(screen.getByText("alice@acme.example")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("alice@acme.example"));
+    fireEvent.click(await screen.findByRole("button", { name: /Access mailbox/i }));
+    fireEvent.change(screen.getByLabelText(/Ticket \/ reference/), { target: { value: "SUP-9" } });
+    fireEvent.change(screen.getByLabelText("Reason"), { target: { value: "Customer escalation" } });
+    fireEvent.change(screen.getByLabelText(/Type ACCESS-MAILBOX-101/), { target: { value: "ACCESS-MAILBOX-101" } });
+    fireEvent.click(screen.getByRole("button", { name: "Start read-only session" }));
+
+    await waitFor(() => expect(screen.getByRole("dialog", { name: "Support mailbox viewer" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "End access" }));
+
+    await waitFor(() => expect(ended).toBe(true));
+    await waitFor(() => expect(screen.getByText(/support session has ended/i)).toBeInTheDocument());
+  });
 });

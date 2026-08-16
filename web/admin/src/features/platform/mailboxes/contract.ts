@@ -187,3 +187,92 @@ export interface BulkMailboxRequest {
   action: BulkMailboxAction;
   reason?: string;
 }
+
+// ── Audited, read-only support view (POST .../support-view) ────────
+// Field-for-field match of internal/api/handlers/platform_mailbox_support_view.go.
+// This is NOT impersonation: the operator stays authenticated as
+// themselves. The mailbox password is never read; the response never
+// contains a password, hash, or reusable bearer token — only an
+// opaque session id scoped to (operator, tenant, mailbox, mailbox_view).
+// confirm MUST equal exactly `ACCESS-MAILBOX-<id>`.
+
+export interface StartMailboxSupportViewRequest {
+  ticket_ref: string;
+  reason: string;
+  duration_minutes?: number;
+  confirm: string;
+}
+
+export interface StartMailboxSupportViewResponse {
+  session_id: string;
+  tenant_id: number;
+  mailbox_id: number;
+  email: string;
+  mode: "read_only";
+  expires_at: string;
+}
+
+export function accessMailboxConfirmation(mailboxId: number): string {
+  return `ACCESS-MAILBOX-${mailboxId}`;
+}
+
+export const SUPPORT_VIEW_DEFAULT_DURATION_MINUTES = 30;
+export const SUPPORT_VIEW_MAX_DURATION_MINUTES = 60;
+
+// ── Support-view read-only folder/message/attachment reads ─────────
+// Field-for-field match of the coremail storage package's Folder,
+// Message, and Attachment structs, as projected by the support-view
+// handlers. These are READ-ONLY views — there is no write route in
+// this family, by design, and the UI must never fabricate one.
+
+export interface SupportViewFolder {
+  id: number;
+  mailbox_id: number;
+  parent_id?: number | null;
+  name: string;
+  path: string;
+  folder_type: string;
+  message_count: number;
+  unread_count: number;
+  total_size: number;
+}
+
+export interface SupportViewMessageSummary {
+  id: number;
+  mailbox_id: number;
+  folder_id: number;
+  subject: string;
+  from_address: string;
+  to_addresses: string;
+  received_date: string;
+  size_bytes: number;
+  seen: boolean;
+}
+
+export interface SupportViewFoldersResponse {
+  folders: SupportViewFolder[];
+}
+
+export interface SupportViewMessagesResponse {
+  messages: SupportViewMessageSummary[];
+  total: number;
+}
+
+export interface SupportViewAttachmentSummary {
+  id: number;
+  message_id: number;
+  filename: string;
+  content_type: string;
+  size_bytes: number;
+}
+
+export interface SupportViewMessageDetailResponse {
+  message: SupportViewMessageSummary;
+  raw_rfc822: string;
+  attachments: SupportViewAttachmentSummary[];
+}
+
+export interface EndMailboxSupportViewResponse {
+  session_id: string;
+  ended: true;
+}

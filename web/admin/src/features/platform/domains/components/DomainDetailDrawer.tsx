@@ -10,17 +10,20 @@ import {
   useGenerateDKIMMutation,
   useRotateDKIMMutation,
   useDeactivateDomainMutation,
+  useDeleteDomainMutation,
   useVerifyDomainDNSMutation,
 } from "../mutations";
 import { domainStatusLabel, domainStatusTone, formatTimestamp } from "../formatters";
 import {
   DOMAIN_STATUSES,
   deactivateDomainConfirmation,
+  deleteDomainConfirmation,
   type PlatformDomainDNSResult,
   type PlatformDNSVerifyRecord,
   type PlatformDNSVerifyStatus,
+  type DomainDeleteBlockers,
 } from "../contract";
-import { safeErrorInfo } from "../../errors";
+import { safeErrorInfo, errorCodeOf } from "../../errors";
 
 /**
  * Maps a verify status to operator-facing text/icon/tone. Color is
@@ -149,6 +152,7 @@ export default function DomainDetailDrawer({
   const generateDKIMMut = useGenerateDKIMMutation(tenantId);
   const rotateDKIMMut = useRotateDKIMMutation(tenantId);
   const deactivateMut = useDeactivateDomainMutation(tenantId);
+  const deleteMut = useDeleteDomainMutation(tenantId);
   const verifyMut = useVerifyDomainDNSMutation(tenantId);
   const [autoVerifiedFor, setAutoVerifiedFor] = useState<number | null>(null);
   const [activeTab, setActiveTab] = useState<"overview" | "dns" | "dkim" | "lifecycle">(initialTab ?? "overview");
@@ -159,6 +163,9 @@ export default function DomainDetailDrawer({
   const [deactivateConfirmOpen, setDeactivateConfirmOpen] = useState(false);
   const [deactivateReason, setDeactivateReason] = useState("");
   const [deactivateError, setDeactivateError] = useState<unknown>(null);
+  const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
+  const [deleteReason, setDeleteReason] = useState("");
+  const [deleteError, setDeleteError] = useState<unknown>(null);
   const { copiedField, copy, announcement } = useCopy();
 
   const submitting = statusMut.isPending;
@@ -272,6 +279,36 @@ export default function DomainDetailDrawer({
       },
     );
   }
+
+  function submitDelete() {
+    if (!domain) return;
+    setDeleteError(null);
+    deleteMut.mutate(
+      {
+        id: domain.id,
+        body: {
+          confirm: deleteDomainConfirmation(domain.id),
+          reason: deleteReason.trim(),
+          expected_version: domain.version,
+        },
+        idempotencyKey: crypto.randomUUID(),
+      },
+      {
+        onSuccess: () => {
+          setDeleteConfirmOpen(false);
+          onClose();
+        },
+        onError: (e) => setDeleteError(e),
+      },
+    );
+  }
+
+  // Structured blocker counts from a 409 DOMAIN_DELETE_BLOCKED, when
+  // present, so the operator sees exactly what to clean up first.
+  const deleteBlockers: DomainDeleteBlockers | null =
+    deleteError && errorCodeOf(deleteError) === "DOMAIN_DELETE_BLOCKED" && typeof deleteError === "object" && deleteError !== null && "body" in deleteError
+      ? ((deleteError as { body?: { blockers?: DomainDeleteBlockers } }).body?.blockers ?? null)
+      : null;
 
   return (
     <Dialog.Root open onOpenChange={(o) => !o && onClose()}>
@@ -701,7 +738,7 @@ export default function DomainDetailDrawer({
                       Suspended status control above.
                     </p>
                     <label className="block text-xs text-[var(--text-secondary)] mb-2" htmlFor="deactivate-reason">
-                      Reason
+                      Deactivate reason
                       <textarea
                         id="deactivate-reason"
                         value={deactivateReason}
@@ -719,6 +756,33 @@ export default function DomainDetailDrawer({
                     >
                       Deactivate domain
                     </button>
+
+                    <hr className="border-[var(--danger)]/20 my-4" />
+
+                    <p className="text-xs text-[var(--text-secondary)] mb-3">
+                      <strong className="text-[var(--danger)]">Delete domain</strong> removes the domain from active
+                      inventory and purges its active DKIM configuration. This action is irreversible from the
+                      console. The domain must already be deactivated.
+                    </p>
+                    <label className="block text-xs text-[var(--text-secondary)] mb-2" htmlFor="delete-reason">
+                      Delete reason
+                      <textarea
+                        id="delete-reason"
+                        value={deleteReason}
+                        onChange={(e) => setDeleteReason(e.target.value)}
+                        rows={2}
+                        placeholder="Why is this domain being permanently deleted?"
+                        className="mt-1 w-full px-3 py-2 bg-[var(--bg-elevated)] border border-[var(--border)] rounded text-sm text-[var(--text-primary)]"
+                      />
+                    </label>
+                    <button
+                      type="button"
+                      disabled={!deleteReason.trim()}
+                      onClick={() => setDeleteConfirmOpen(true)}
+                      className="px-3 py-1.5 text-sm rounded bg-[var(--danger)] text-white disabled:opacity-40"
+                    >
+                      Delete domain
+                    </button>
                   </section>
 
                   {deactivateError !== null && (
@@ -729,6 +793,29 @@ export default function DomainDetailDrawer({
                         <button
                           type="button"
                           onClick={() => { setDeactivateError(null); refetch(); dnsQuery.refetch(); }}
+                          className="mt-2 px-3 py-1.5 text-xs rounded border border-[var(--border)] text-[var(--text-primary)] hover:bg-[var(--bg-elevated)]"
+                        >
+                          Reload current state
+                        </button>
+                      )}
+                    </div>
+                  )}
+
+                  {deleteError !== null && (
+                    <div className="border border-[var(--danger)]/30 rounded-lg p-3 text-sm" role="alert">
+                      <p className="text-[var(--danger)] font-medium">{safeErrorInfo(deleteError).title}</p>
+                      <p className="text-xs text-[var(--text-secondary)] mt-0.5">{safeErrorInfo(deleteError).detail}</p>
+                      {deleteBlockers && (
+                        <ul className="text-xs text-[var(--text-secondary)] mt-1.5 list-disc list-inside">
+                          {deleteBlockers.mailboxes > 0 && <li>{deleteBlockers.mailboxes} mailbox{deleteBlockers.mailboxes === 1 ? "" : "es"}</li>}
+                          {deleteBlockers.aliases > 0 && <li>{deleteBlockers.aliases} alias{deleteBlockers.aliases === 1 ? "" : "es"}</li>}
+                          {deleteBlockers.queued_messages > 0 && <li>{deleteBlockers.queued_messages} queued message{deleteBlockers.queued_messages === 1 ? "" : "s"}</li>}
+                        </ul>
+                      )}
+                      {(errorCodeOf(deleteError) === "CONFLICT" || errorCodeOf(deleteError) === "DOMAIN_DELETE_BLOCKED") && (
+                        <button
+                          type="button"
+                          onClick={() => { setDeleteError(null); refetch(); dnsQuery.refetch(); }}
                           className="mt-2 px-3 py-1.5 text-xs rounded border border-[var(--border)] text-[var(--text-primary)] hover:bg-[var(--bg-elevated)]"
                         >
                           Reload current state
@@ -765,6 +852,20 @@ export default function DomainDetailDrawer({
               danger
               pending={deactivateMut.isPending}
               onConfirm={submitDeactivate}
+            />
+          )}
+
+          {domain && (
+            <ConfirmDialog
+              open={deleteConfirmOpen}
+              onOpenChange={(o) => { setDeleteConfirmOpen(o); if (!o) setDeleteReason(""); }}
+              title="Delete domain"
+              description={`${domain.name} will be permanently removed from active inventory and its active DKIM configuration will be purged. This is irreversible from the console — DKIM/audit history is preserved for forensic purposes. Type the confirmation phrase to proceed.`}
+              requireTypedName={deleteDomainConfirmation(domain.id)}
+              confirmLabel="Delete domain"
+              danger
+              pending={deleteMut.isPending}
+              onConfirm={submitDelete}
             />
           )}
         </Dialog.Content>

@@ -4,6 +4,7 @@
 import { request } from "../../../api";
 import type {
   DeletePlatformMailboxResponse,
+  EndMailboxSupportViewResponse,
   PlatformCreateMailboxRequest,
   PlatformCreateMailboxResult,
   PlatformMailbox,
@@ -16,6 +17,11 @@ import type {
   SetPlatformMailboxQuotaResponse,
   SetPlatformMailboxStatusRequest,
   SetPlatformMailboxStatusResponse,
+  StartMailboxSupportViewRequest,
+  StartMailboxSupportViewResponse,
+  SupportViewFoldersResponse,
+  SupportViewMessageDetailResponse,
+  SupportViewMessagesResponse,
 } from "./contract";
 
 export function listPlatformMailboxes(tenantId: number, filter: PlatformMailboxFilter): Promise<PlatformMailboxList> {
@@ -99,5 +105,56 @@ export function deletePlatformMailbox(tenantId: number, id: number, confirmation
   return request<DeletePlatformMailboxResponse>(`/platform/mailboxes/${tenantId}/${id}`, {
     method: "DELETE",
     headers: { "X-Confirm": confirmation },
+  });
+}
+
+// ── Audited, read-only support view ─────────────────────────────────
+// The operator's own platform session is never touched by any of
+// these calls — no impersonation, no customer JWT, no password read.
+
+export function startMailboxSupportView(
+  tenantId: number,
+  id: number,
+  body: StartMailboxSupportViewRequest,
+): Promise<StartMailboxSupportViewResponse> {
+  return request<StartMailboxSupportViewResponse>(`/platform/mailboxes/${tenantId}/${id}/support-view`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export function listSupportViewFolders(tenantId: number, id: number, sessionId: string): Promise<SupportViewFoldersResponse> {
+  return request<SupportViewFoldersResponse>(`/platform/mailboxes/${tenantId}/${id}/support-view/${sessionId}/folders`);
+}
+
+export function listSupportViewMessages(
+  tenantId: number,
+  id: number,
+  sessionId: string,
+  opts: { folderId?: number; q?: string } = {},
+): Promise<SupportViewMessagesResponse> {
+  const params = new URLSearchParams();
+  if (opts.folderId !== undefined) params.set("folder_id", String(opts.folderId));
+  if (opts.q) params.set("q", opts.q);
+  const qs = params.toString();
+  return request<SupportViewMessagesResponse>(`/platform/mailboxes/${tenantId}/${id}/support-view/${sessionId}/messages${qs ? "?" + qs : ""}`);
+}
+
+export function getSupportViewMessage(
+  tenantId: number,
+  id: number,
+  sessionId: string,
+  messageId: number,
+): Promise<SupportViewMessageDetailResponse> {
+  return request<SupportViewMessageDetailResponse>(`/platform/mailboxes/${tenantId}/${id}/support-view/${sessionId}/messages/${messageId}`);
+}
+
+export function supportViewAttachmentUrl(tenantId: number, id: number, sessionId: string, messageId: number, attachmentId: number): string {
+  return `/api/v1/platform/mailboxes/${tenantId}/${id}/support-view/${sessionId}/messages/${messageId}/attachments/${attachmentId}`;
+}
+
+export function endMailboxSupportView(tenantId: number, id: number, sessionId: string): Promise<EndMailboxSupportViewResponse> {
+  return request<EndMailboxSupportViewResponse>(`/platform/mailboxes/${tenantId}/${id}/support-view/${sessionId}/end`, {
+    method: "POST",
   });
 }

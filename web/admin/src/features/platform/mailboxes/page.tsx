@@ -6,8 +6,9 @@ import { usePlatformMailboxes } from "./queries";
 import MailboxTable from "./components/MailboxTable";
 import MailboxDetailDrawer from "./components/MailboxDetailDrawer";
 import CreateMailboxDialog from "./components/CreateMailboxDialog";
+import SupportMailboxViewer from "./components/SupportMailboxViewer";
 import PaginationControls from "../components/PaginationControls";
-import { MAILBOX_STATUSES } from "./contract";
+import { MAILBOX_STATUSES, type StartMailboxSupportViewResponse } from "./contract";
 import { mailboxStatusLabel } from "./formatters";
 import { safeErrorInfo } from "../errors";
 
@@ -26,6 +27,7 @@ export default function MailboxesPage() {
   const [page, setPage] = useState(0);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [showCreate, setShowCreate] = useState(false);
+  const [supportSession, setSupportSession] = useState<StartMailboxSupportViewResponse | null>(null);
   const createTriggerRef = useRef<HTMLButtonElement>(null);
 
   const tenantId = scope?.tenantId ?? null;
@@ -126,7 +128,12 @@ export default function MailboxesPage() {
       )}
 
       {tenantId !== null && selectedId !== null && (
-        <MailboxDetailDrawer tenantId={tenantId} id={selectedId} onClose={() => setSelectedId(null)} />
+        <MailboxDetailDrawer
+          tenantId={tenantId}
+          id={selectedId}
+          onClose={() => setSelectedId(null)}
+          onSupportSessionStarted={(session) => setSupportSession(session)}
+        />
       )}
 
       {showCreate && (
@@ -136,6 +143,19 @@ export default function MailboxesPage() {
             setShowCreate(false);
             requestAnimationFrame(() => createTriggerRef.current?.focus());
           }}
+        />
+      )}
+
+      {/* Rendered as a page-level sibling, never inside the drawer's own
+          Radix Dialog — the drawer already closed itself when this
+          session started, so no open Dialog's "hide others" behavior
+          can mark this overlay (or the rest of the page) aria-hidden. */}
+      {tenantId !== null && supportSession && (
+        <SupportMailboxViewer
+          tenantId={tenantId}
+          mailboxId={supportSession.mailbox_id}
+          session={supportSession}
+          onClose={() => setSupportSession(null)}
         />
       )}
     </div>

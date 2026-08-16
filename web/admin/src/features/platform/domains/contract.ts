@@ -243,6 +243,44 @@ export interface DeactivatePlatformDomainResponse {
   request_id: string;
 }
 
+// ── Delete (POST .../delete) — PERMANENT, distinct from deactivate ──
+// Field-for-field match of DeletePlatformDomain's request/response.
+// This is the canonical deleted_at-tombstone delete: the domain
+// disappears from active inventory and its active DKIM config is
+// purged (DKIM/audit history survives). Requires the domain to already
+// be canonically deactivated — a live domain gets a 409
+// DOMAIN_NOT_DEACTIVATED. confirm MUST equal exactly
+// `DELETE-DOMAIN-<id>` (see deleteDomainConfirmation below).
+export interface DeletePlatformDomainRequest {
+  confirm: string;
+  reason: string;
+  expected_version: number;
+}
+
+export interface DeletePlatformDomainResponse {
+  id: number;
+  tenant_id: number;
+  deleted: true;
+  version: number;
+  request_id: string;
+}
+
+/**
+ * Structured blocker counts the backend returns on 409
+ * DOMAIN_DELETE_BLOCKED — exactly what must be cleaned up before the
+ * domain can be permanently deleted.
+ */
+export interface DomainDeleteBlockers {
+  mailboxes: number;
+  aliases: number;
+  queued_messages: number;
+}
+
+/** The exact typed-confirmation phrase the backend requires for delete. */
+export function deleteDomainConfirmation(domainId: number): string {
+  return `DELETE-DOMAIN-${domainId}`;
+}
+
 /** The exact typed-confirmation phrase the backend requires for deactivate. */
 export function deactivateDomainConfirmation(domainId: number): string {
   return `DEACTIVATE-DOMAIN-${domainId}`;

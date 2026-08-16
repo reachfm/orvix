@@ -51,6 +51,8 @@ export async function mockPlatformDomainsAPI(page: Page, opts: DomainsContractOp
     acme: {
       version: 3,
       status: "active",
+      deactivated: false,
+      deleted: false,
       dkimConfigured: true,
       dkimSelector: "mail",
       dkimTxt: "v=DKIM1; k=rsa; p=CURRENTPUBLICKEYDATA",
@@ -156,8 +158,30 @@ export async function mockPlatformDomainsAPI(page: Page, opts: DomainsContractOp
     if (body.expected_version !== state.acme.version) return conflict(r);
     state.acme.version += 1;
     state.acme.status = "disabled";
+    state.acme.deactivated = true;
     return json(r, {
       id: 1, tenant_id: 7, status: "disabled", version: state.acme.version, request_id: "req_test_abc123",
+    });
+  });
+
+  // ── Permanent delete (domain 1) — distinct from deactivate above ──
+  await page.route(/\/api\/v1\/platform\/domains\/7\/1\/delete$/, async (r) => {
+    await record(r);
+    mutationCount += 1;
+    if (opts.conflictOnFirstMutation && mutationCount === 1) return conflict(r);
+    const body = JSON.parse(r.request().postData() || "{}");
+    if (body.confirm !== "DELETE-DOMAIN-1") {
+      return json(r, { error: "type the confirmation phrase exactly: DELETE-DOMAIN-1", code: "PRECONDITION_FAILED" }, 412);
+    }
+    if (!body.reason) return json(r, { error: "reason is required", code: "VALIDATION_FAILED" }, 400);
+    if (!state.acme.deactivated) {
+      return json(r, { error: "deactivate the domain before deleting it permanently", code: "DOMAIN_NOT_DEACTIVATED" }, 409);
+    }
+    if (body.expected_version !== state.acme.version) return conflict(r);
+    state.acme.version += 1;
+    state.acme.deleted = true;
+    return json(r, {
+      id: 1, tenant_id: 7, deleted: true, version: state.acme.version, request_id: "req_test_delete_abc123",
     });
   });
 

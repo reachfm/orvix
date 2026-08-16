@@ -5,6 +5,8 @@ import { request } from "../../../api";
 import type {
   DeactivatePlatformDomainRequest,
   DeactivatePlatformDomainResponse,
+  DeletePlatformDomainRequest,
+  DeletePlatformDomainResponse,
   PlatformCreateDomainRequest,
   PlatformCreateDomainResult,
   PlatformDKIMMutationRequest,
@@ -122,6 +124,26 @@ export function deactivatePlatformDomain(
   idempotencyKey: string,
 ): Promise<DeactivatePlatformDomainResponse> {
   return request<DeactivatePlatformDomainResponse>(`/platform/domains/${tenantId}/${id}/deactivate`, {
+    method: "POST",
+    body: JSON.stringify(body),
+    headers: { "Idempotency-Key": idempotencyKey },
+  });
+}
+
+/**
+ * Canonical, audited, PERMANENT platform domain delete
+ * (deleted_at-tombstone). Distinct authority and route from deactivate
+ * above — requires the domain to already be deactivated. On a 409
+ * DOMAIN_DELETE_BLOCKED, the thrown ApiError's `body.blockers` carries
+ * the structured dependency counts.
+ */
+export function deletePlatformDomain(
+  tenantId: number,
+  id: number,
+  body: DeletePlatformDomainRequest,
+  idempotencyKey: string,
+): Promise<DeletePlatformDomainResponse> {
+  return request<DeletePlatformDomainResponse>(`/platform/domains/${tenantId}/${id}/delete`, {
     method: "POST",
     body: JSON.stringify(body),
     headers: { "Idempotency-Key": idempotencyKey },

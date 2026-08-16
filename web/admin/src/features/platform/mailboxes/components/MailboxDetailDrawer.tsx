@@ -1,6 +1,6 @@
 import { useState } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
-import { X, Loader2, AlertCircle, KeyRound, Trash2 } from "lucide-react";
+import { X, Loader2, AlertCircle, KeyRound, Trash2, Eye } from "lucide-react";
 import StatusBadge from "../../components/StatusBadge";
 import ConfirmDialog from "../../../../components/ConfirmDialog";
 import { usePlatformMailbox } from "../queries";
@@ -12,8 +12,9 @@ import {
   useSetMailboxStatusMutation,
 } from "../mutations";
 import { allowedMailboxTransitions, formatBytes, mailAccessModeLabel, mailboxStatusLabel, mailboxStatusTone } from "../formatters";
-import { mailboxPurgeConfirmation, MAILBOX_ACCESS_MODE_OPTIONS, type MailAccessMode } from "../contract";
+import { mailboxPurgeConfirmation, MAILBOX_ACCESS_MODE_OPTIONS, type MailAccessMode, type StartMailboxSupportViewResponse } from "../contract";
 import PasswordResetDialog from "./PasswordResetDialog";
+import AccessMailboxDialog from "./AccessMailboxDialog";
 import { safeErrorInfo, errorCodeOf } from "../../errors";
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
@@ -29,10 +30,19 @@ export default function MailboxDetailDrawer({
   tenantId,
   id,
   onClose,
+  onSupportSessionStarted,
 }: {
   tenantId: number;
   id: number;
   onClose: () => void;
+  /**
+   * The support viewer renders as a page-level overlay OUTSIDE this
+   * drawer's own Radix Dialog — Radix's open-dialog "hide others"
+   * behavior would otherwise mark the entire rest of the page
+   * (including a sibling overlay) aria-hidden. The drawer closes
+   * itself and hands the session up to the caller.
+   */
+  onSupportSessionStarted?: (session: StartMailboxSupportViewResponse) => void;
 }) {
   const { data: mailbox, isLoading, isError, error } = usePlatformMailbox(tenantId, id);
   const statusMut = useSetMailboxStatusMutation(tenantId);
@@ -46,6 +56,7 @@ export default function MailboxDetailDrawer({
   const [accessModeConflict, setAccessModeConflict] = useState(false);
   const [showPasswordReset, setShowPasswordReset] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [showAccessDialog, setShowAccessDialog] = useState(false);
   const [mutationError, setMutationError] = useState<unknown>(null);
 
   const submitting = statusMut.isPending || quotaMut.isPending || deleteMut.isPending || accessModeMut.isPending;
@@ -212,6 +223,13 @@ export default function MailboxDetailDrawer({
                   <div className="flex flex-wrap gap-2">
                     <button
                       type="button"
+                      onClick={() => setShowAccessDialog(true)}
+                      className="inline-flex items-center gap-2 px-3 py-2 text-sm rounded border border-[var(--accent)]/50 text-[var(--accent)] hover:bg-[var(--accent)]/5"
+                    >
+                      <Eye size={16} /> Access mailbox
+                    </button>
+                    <button
+                      type="button"
                       onClick={() => setShowPasswordReset(true)}
                       className="inline-flex items-center gap-2 px-3 py-2 text-sm rounded border border-[var(--border)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
                     >
@@ -264,6 +282,20 @@ export default function MailboxDetailDrawer({
               { onSuccess: () => { setConfirmDelete(false); onClose(); }, onError: (e) => setMutationError(e) },
             )
           }
+        />
+      )}
+
+      {showAccessDialog && mailbox && (
+        <AccessMailboxDialog
+          tenantId={tenantId}
+          mailboxId={mailbox.id}
+          email={mailbox.email}
+          onClose={() => setShowAccessDialog(false)}
+          onStarted={(session) => {
+            setShowAccessDialog(false);
+            onSupportSessionStarted?.(session);
+            onClose();
+          }}
         />
       )}
     </Dialog.Root>

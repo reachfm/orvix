@@ -120,6 +120,10 @@ type Handler struct {
 	incidentSvc *incident.Service
 	// supportAccessSvc is lazily initialized by h.supportAccessService().
 	supportAccessSvc *supportaccess.Service
+	// mailboxSessionRepo is lazily initialized by h.mailboxSessionRepository();
+	// backs the audited, per-mailbox, time-boxed read-only support-view
+	// sessions (distinct from the tenant-wide supportAccessSvc grants above).
+	mailboxSessionRepo *supportaccess.MailboxSessionRepository
 	// webhookSvc is lazily initialized by h.webhookService().
 	webhookSvc *webhooks.Service
 	jobSvc     *platformjobs.Service

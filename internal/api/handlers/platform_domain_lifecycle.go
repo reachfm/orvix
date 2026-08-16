@@ -241,3 +241,236 @@ func deactivatePlatformDomainTx(ctx context.Context, sqlDB *sql.DB, dialect *dbd
 	_, _ = rand.Read(reqIDBytes)
 	return &deactivateDomainResult{RequestID: hex.EncodeToString(reqIDBytes), NewVersion: expectedVersion + 1}, nil
 }
+
+// ── Platform domain delete (canonical deleted_at tombstone) ────────────────
+//
+// POST /api/v1/platform/domains/:tenant_id/:id/delete
+//
+// The canonical, audited, PERMANENT platform domain delete — distinct
+// from DeactivatePlatformDomain above (a reversible status change) and
+// distinct from the tenant-scoped domain.Service.DeleteDomain (which
+// this handler deliberately does NOT call, because that path has no
+// deactivate-first gate and no structured blocker payload; the
+// transactional logic below reimplements the same deleted_at-tombstone
+// + active-DKIM-purge semantics with the platform surface's own
+// guardrails).
+//
+// What delete does, atomically, or not at all:
+//   - re-verifies tenant ownership INSIDE the SQL predicate;
+//   - requires the domain to already be canonically deactivated
+//     (deactivated_at IS NOT NULL) — a live, never-deactivated domain
+//     returns 409 DOMAIN_NOT_DEACTIVATED with UI guidance, because
+//     jumping straight from "active" to "gone" skips the operator's
+//     chance to notice active traffic; Disabled is also a normal
+//     writable status (SetDomainStatus), so status alone is never used
+//     as the gate — deactivated_at is the one-way signal;
+//   - applies optimistic concurrency via expected_version (409 on
+//     mismatch, same convention as deactivate);
+//   - refuses (409 DOMAIN_DELETE_BLOCKED with structured blocker
+//     counts) while protected dependencies exist: active mailboxes,
+//     active aliases, or mail still in flight in the queue — never
+//     cascade-deletes customer data;
+//   - sets deleted_at=now, keeps status='disabled', bumps version,
+//     updates updated_at;
+//   - deletes the ACTIVE coremail_dkim_config row for this domain
+//     (coremail_dkim_selector_history — a separate table — is never
+//     touched, so DKIM generate/rotate/revoke history survives);
+//   - writes one platform_domain.delete audit entry (actor/tenant/
+//     target/reason/request_id) — never the DKIM private key;
+//   - never mutates public DNS at any provider.
+//
+// Idempotency: POST requires an Idempotency-Key (h.platformIdempotent);
+// a genuine retry (same key) replays the stored response without
+// re-running the transaction.
+func (h *Handler) DeletePlatformDomain(c fiber.Ctx) error {
+	if err := h.requireDB(c); err != nil {
+		return err
+	}
+	sqlDB := h.sqlDB()
+
+	tenantID, err := parseTenantParam(c)
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	id, err := parseIDParam(c, "id")
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	domainID := uint(id)
+
+	body, err := platformMutationBody(c)
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	var req struct {
+		Confirm         string `json:"confirm"`
+		Reason          string `json:"reason"`
+		ExpectedVersion int    `json:"expected_version"`
+	}
+	if err := bindStrictJSONBytes(body, &req); err != nil {
+		return strictJSONError(c, err)
+	}
+	wantConfirm := fmt.Sprintf("DELETE-DOMAIN-%d", domainID)
+	if req.Confirm != wantConfirm {
+		return fiber.NewError(fiber.StatusPreconditionFailed, "type the confirmation phrase exactly: "+wantConfirm)
+	}
+	if strings.TrimSpace(req.Reason) == "" {
+		return fiber.NewError(fiber.StatusBadRequest, "reason is required")
+	}
+	if req.ExpectedVersion < 1 {
+		return fiber.NewError(fiber.StatusBadRequest, "a positive expected_version is required")
+	}
+
+	c.Set("Cache-Control", "no-store")
+
+	actorID := h.platformActorID(c)
+	scope := "platform.domain.delete:POST:/platform/domains/" + strconv.FormatUint(uint64(tenantID), 10) + "/" + strconv.FormatUint(uint64(domainID), 10) + ":actor:" + strconv.FormatUint(uint64(actorID), 10)
+
+	return h.platformIdempotent(c, scope, func() (int, any, any, error) {
+		result, err := deletePlatformDomainTx(c.Context(), sqlDB, h.dialect, tenantID, domainID, req.ExpectedVersion)
+		if err != nil {
+			return 0, nil, nil, err
+		}
+		if h.auditStore != nil {
+			_ = h.auditStore.Record(c.Context(), &audit.Entry{
+				Actor:     fmt.Sprintf("user:%d", actorID),
+				Action:    "platform_domain.delete",
+				Target:    fmt.Sprintf("domain:%d|tenant:%d|reason:%s|request_id:%s", domainID, tenantID, req.Reason, result.RequestID),
+				Result:    "success",
+				TenantID:  tenantID,
+				IP:        c.IP(),
+				UserAgent: c.Get("User-Agent"),
+				Timestamp: time.Now().UTC(),
+			})
+		}
+		resp := fiber.Map{
+			"id":         domainID,
+			"tenant_id":  tenantID,
+			"deleted":    true,
+			"version":    result.NewVersion,
+			"request_id": result.RequestID,
+		}
+		return fiber.StatusOK, resp, resp, nil
+	})
+}
+
+type deleteDomainResult struct {
+	RequestID  string
+	NewVersion int
+}
+
+// domainDeleteBlockedError is a typed error carrying structured
+// blocker counts so the handler can surface exactly what the
+// operator must clean up first, instead of a bare string.
+type domainDeleteBlockedError struct {
+	Mailboxes      int64
+	Aliases        int64
+	QueuedMessages int64
+}
+
+func (e *domainDeleteBlockedError) Error() string {
+	return "domain has live dependencies blocking deletion"
+}
+
+// errDomainNotDeactivated is the deactivate-then-delete policy gate.
+// A distinct sentinel (not a generic kernel.ErrCodeConflict) so the
+// frontend can branch on code "DOMAIN_NOT_DEACTIVATED" and show
+// "Deactivate the domain before deleting it permanently" guidance
+// rather than a generic conflict message.
+var errDomainNotDeactivated = &domainNotDeactivatedError{}
+
+type domainNotDeactivatedError struct{}
+
+func (e *domainNotDeactivatedError) Error() string {
+	return "domain must be deactivated before it can be permanently deleted"
+}
+
+// deletePlatformDomainTx is the canonical platform-domain-delete
+// service operation.
+func deletePlatformDomainTx(ctx context.Context, sqlDB *sql.DB, dialect *dbdialect.Info, tenantID, domainID uint, expectedVersion int) (*deleteDomainResult, error) {
+	tx, err := sqlDB.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, kernel.NewError(kernel.ErrCodeInternal, "failed to process request")
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	var version int
+	var status string
+	var name string
+	var deactivatedAt sql.NullTime
+	err = tx.QueryRowContext(ctx,
+		`SELECT version, status, name, deactivated_at FROM coremail_domains WHERE id = `+dialect.Placeholder(1)+` AND tenant_id = `+dialect.Placeholder(2)+` AND deleted_at IS NULL`,
+		domainID, tenantID).Scan(&version, &status, &name, &deactivatedAt)
+	if err == sql.ErrNoRows {
+		return nil, kernel.NewError(kernel.ErrCodeNotFound, "domain not found")
+	}
+	if err != nil {
+		return nil, kernel.NewError(kernel.ErrCodeInternal, "failed to process request")
+	}
+
+	// Deactivate-then-delete policy: deactivated_at is the one-way
+	// signal, never status=='disabled' alone — Disabled is also a
+	// normal, reversible writable lifecycle status set via
+	// SetDomainStatus, so it cannot double as "ready for permanent
+	// deletion".
+	if !deactivatedAt.Valid {
+		return nil, errDomainNotDeactivated
+	}
+
+	if version != expectedVersion {
+		return nil, kernel.NewError(kernel.ErrCodeConflict, fmt.Sprintf("domain version is no longer %d", expectedVersion))
+	}
+
+	var mbCount, alCount, queuedCount int64
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM coremail_mailboxes WHERE domain_id = `+dialect.Placeholder(1)+` AND tenant_id = `+dialect.Placeholder(2)+` AND deleted_at IS NULL`,
+		domainID, tenantID).Scan(&mbCount); err != nil {
+		return nil, kernel.NewError(kernel.ErrCodeInternal, "failed to process request")
+	}
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM coremail_aliases WHERE domain_id = `+dialect.Placeholder(1)+` AND tenant_id = `+dialect.Placeholder(2)+` AND deleted_at IS NULL`,
+		domainID, tenantID).Scan(&alCount); err != nil {
+		return nil, kernel.NewError(kernel.ErrCodeInternal, "failed to process request")
+	}
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM coremail_queue WHERE domain_id = `+dialect.Placeholder(1)+` AND status IN ('pending', 'leased', 'deferred')`,
+		domainID).Scan(&queuedCount); err != nil {
+		return nil, kernel.NewError(kernel.ErrCodeInternal, "failed to process request")
+	}
+	if mbCount > 0 || alCount > 0 || queuedCount > 0 {
+		return nil, &domainDeleteBlockedError{Mailboxes: mbCount, Aliases: alCount, QueuedMessages: queuedCount}
+	}
+
+	now := time.Now().UTC()
+	res, err := tx.ExecContext(ctx,
+		`UPDATE coremail_domains SET deleted_at = `+dialect.Placeholder(1)+`, version = version + 1, updated_at = `+dialect.Placeholder(2)+` WHERE id = `+dialect.Placeholder(3)+` AND tenant_id = `+dialect.Placeholder(4)+` AND version = `+dialect.Placeholder(5),
+		now, now, domainID, tenantID, expectedVersion)
+	if err != nil {
+		return nil, kernel.NewError(kernel.ErrCodeInternal, "failed to process request")
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return nil, kernel.NewError(kernel.ErrCodeConflict, fmt.Sprintf("domain version is no longer %d", expectedVersion))
+	}
+
+	// Purge the ACTIVE DKIM config only. coremail_dkim_selector_history
+	// is a separate table and is never touched here — generate/rotate/
+	// revoke history survives the delete intact.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM coremail_dkim_config WHERE domain = `+dialect.Placeholder(1), name); err != nil {
+		return nil, kernel.NewError(kernel.ErrCodeInternal, "failed to process request")
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, kernel.NewError(kernel.ErrCodeInternal, "failed to process request")
+	}
+	committed = true
+
+	reqIDBytes := make([]byte, 8)
+	_, _ = rand.Read(reqIDBytes)
+	return &deleteDomainResult{RequestID: hex.EncodeToString(reqIDBytes), NewVersion: expectedVersion + 1}, nil
+}

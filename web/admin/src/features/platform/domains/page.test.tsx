@@ -434,7 +434,7 @@ describe("features/platform/domains (platform routes)", () => {
     const deactivateButton = screen.getByRole("button", { name: "Deactivate domain" });
     expect(deactivateButton).toBeDisabled(); // no reason typed yet
 
-    fireEvent.change(screen.getByLabelText("Reason"), { target: { value: "Customer offboarding" } });
+    fireEvent.change(screen.getByLabelText("Deactivate reason"), { target: { value: "Customer offboarding" } });
     expect(deactivateButton).toBeEnabled();
     fireEvent.click(deactivateButton);
 
@@ -457,6 +457,88 @@ describe("features/platform/domains (platform routes)", () => {
 
     // Successful deactivate must not leave the row visually Active — the drawer closes.
     await waitFor(() => expect(screen.queryByRole("tab", { name: "Lifecycle" })).not.toBeInTheDocument());
+  });
+
+  it("exposes Delete domain as a separate, stronger danger action from Deactivate, requiring its own reason and typed confirmation", async () => {
+    renderPage(7);
+    await waitFor(() => expect(screen.getByText("acme.example")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("acme.example"));
+    await waitFor(() => expect(screen.getByRole("tab", { name: "Lifecycle" })).toBeInTheDocument());
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "Lifecycle" }));
+    await waitFor(() => expect(screen.getByText("Lifecycle status")).toBeInTheDocument());
+
+    // Both actions present and distinct.
+    expect(screen.getByRole("button", { name: "Deactivate domain" })).toBeInTheDocument();
+    const deleteButton = screen.getByRole("button", { name: "Delete domain" });
+    expect(deleteButton).toBeInTheDocument();
+    expect(deleteButton).toBeDisabled(); // no reason typed yet
+
+    fireEvent.change(screen.getByLabelText("Delete reason"), { target: { value: "Customer offboarding, fully wound down" } });
+    expect(deleteButton).toBeEnabled();
+    fireEvent.click(deleteButton);
+
+    await waitFor(() => expect(screen.getByText("DELETE-DOMAIN-1")).toBeInTheDocument());
+    const dialogConfirmButtons = screen.getAllByRole("button", { name: "Delete domain" });
+    const dialogConfirm = dialogConfirmButtons[dialogConfirmButtons.length - 1];
+    expect(dialogConfirm).toBeDisabled();
+
+    fireEvent.change(screen.getByRole("textbox", { name: /Type/i }), { target: { value: "DELETE-DOMAIN-1" } });
+    fireEvent.click(dialogConfirm);
+
+    await waitFor(() => {
+      const call = mockedRequest.mock.calls.find((c) => c[0] === "/platform/domains/7/1/delete");
+      expect(call).toBeDefined();
+      const opts = call![1] as { body: string; headers?: Record<string, string> };
+      const body = JSON.parse(opts.body);
+      expect(body).toEqual({ confirm: "DELETE-DOMAIN-1", reason: "Customer offboarding, fully wound down", expected_version: 3 });
+      expect(opts.headers?.["Idempotency-Key"]).toBeTruthy();
+    });
+
+    // Successful delete must not fake removal client-side — the drawer closes on real server confirmation.
+    await waitFor(() => expect(screen.queryByRole("tab", { name: "Lifecycle" })).not.toBeInTheDocument());
+  });
+
+  it("renders structured blocker counts on 409 DOMAIN_DELETE_BLOCKED without pretending success", async () => {
+    mockedRequest.mockImplementation((path: string, opts?: any) => {
+      if (path === "/platform/domains/7/1/delete") {
+        return Promise.reject(
+          new MockApiError("DOMAIN_DELETE_BLOCKED", "domain has live dependencies blocking deletion", 409, {
+            error: "domain has live dependencies blocking deletion",
+            code: "DOMAIN_DELETE_BLOCKED",
+            blockers: { mailboxes: 2, aliases: 1, queued_messages: 0 },
+          }),
+        );
+      }
+      if (path.startsWith("/platform/organizations")) {
+        return Promise.resolve({ organizations: [{ id: 7, name: "Acme", slug: "acme", domain: "acme.example", plan: "business", active: true, mailbox_count: 12, domain_count: 1, created_at: "2026-01-01T00:00:00Z" }], total: 1 });
+      }
+      if (path.startsWith("/platform/domains/7/1")) {
+        return Promise.resolve(DOMAINS.domains[0]);
+      }
+      if (path.startsWith("/platform/domains/7")) {
+        return Promise.resolve(DOMAINS);
+      }
+      return Promise.resolve({});
+    });
+
+    renderPage(7);
+    await waitFor(() => expect(screen.getByText("acme.example")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("acme.example"));
+    await waitFor(() => expect(screen.getByRole("tab", { name: "Lifecycle" })).toBeInTheDocument());
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "Lifecycle" }));
+    await waitFor(() => expect(screen.getByText("Lifecycle status")).toBeInTheDocument());
+
+    fireEvent.change(screen.getByLabelText("Delete reason"), { target: { value: "Testing blockers" } });
+    fireEvent.click(screen.getByRole("button", { name: "Delete domain" }));
+    await waitFor(() => expect(screen.getByText("DELETE-DOMAIN-1")).toBeInTheDocument());
+    const dialogConfirmButtons = screen.getAllByRole("button", { name: "Delete domain" });
+    fireEvent.change(screen.getByRole("textbox", { name: /Type/i }), { target: { value: "DELETE-DOMAIN-1" } });
+    fireEvent.click(dialogConfirmButtons[dialogConfirmButtons.length - 1]);
+
+    await waitFor(() => expect(screen.getByText("2 mailboxes")).toBeInTheDocument());
+    expect(screen.getByText("1 alias")).toBeInTheDocument();
+    // Blocked deletion must not pretend success — the confirm dialog stays open, not silently closed/succeeded.
+    expect(screen.getByText("DELETE-DOMAIN-1")).toBeInTheDocument();
   });
 
   it("stale-version conflict on DKIM generate does not pretend success and offers a reload of current state", async () => {

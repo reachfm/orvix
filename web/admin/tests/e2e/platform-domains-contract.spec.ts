@@ -163,7 +163,7 @@ test.describe("Platform Domains — lifecycle and danger zone", () => {
 
     const deactivateButton = dangerZone.getByRole("button", { name: "Deactivate domain" });
     await expect(deactivateButton).toBeDisabled();
-    await dangerZone.getByLabel("Reason").fill("Customer offboarding");
+    await dangerZone.getByLabel("Deactivate reason").fill("Customer offboarding");
     await expect(deactivateButton).toBeEnabled();
     await deactivateButton.click();
 
@@ -194,6 +194,74 @@ test.describe("Platform Domains — lifecycle and danger zone", () => {
     // the row must not stay visually Active.
     await expect(drawer).toHaveCount(0);
     await expect(page.getByRole("row", { name: /acme\.example/ }).getByText("Active")).toHaveCount(0);
+  });
+
+  test("blocks permanent delete until the domain is deactivated, then deletes it as a distinct, separately confirmed action", async ({ page }) => {
+    await mockPlatformDomainsAPI(page);
+    await openDomainsPage(page);
+
+    await page.getByRole("cell", { name: "acme.example", exact: true }).click();
+    const drawer = page.getByLabel("acme.example");
+    await drawer.getByRole("tab", { name: "Lifecycle" }).click();
+
+    const dangerZone = drawer.getByRole("region", { name: "Danger zone" });
+    const deleteButton = dangerZone.getByRole("button", { name: "Delete domain" });
+    await expect(deleteButton).toBeVisible();
+    await expect(deleteButton).toBeDisabled();
+
+    // Attempting delete before deactivation must be blocked with the
+    // backend's structured guidance, not a fake client-side removal.
+    await dangerZone.getByLabel("Delete reason").fill("Customer offboarding, fully wound down");
+    await expect(deleteButton).toBeEnabled();
+    await deleteButton.click();
+    const deleteConfirmDialog = page.getByRole("dialog", { name: "Delete domain" });
+    await expect(deleteConfirmDialog).toBeVisible();
+    await deleteConfirmDialog.getByRole("textbox").fill("DELETE-DOMAIN-1");
+    await deleteConfirmDialog.getByRole("button", { name: "Delete domain" }).click();
+
+    await expect(page.getByText(/Deactivate the domain before deleting it permanently/i)).toBeVisible();
+    // The drawer must remain open — a blocked deletion is not a fake success.
+    await expect(drawer).toBeVisible();
+
+    // Close the still-open delete confirmation dialog before continuing.
+    await page.keyboard.press("Escape");
+    await expect(deleteConfirmDialog).toHaveCount(0);
+
+    // Now deactivate first, per the documented policy.
+    await dangerZone.getByLabel("Deactivate reason").fill("Customer offboarding");
+    await dangerZone.getByRole("button", { name: "Deactivate domain" }).click();
+    const deactivateConfirmDialog = page.getByRole("dialog", { name: "Deactivate domain" });
+    await deactivateConfirmDialog.getByRole("textbox").fill("DEACTIVATE-DOMAIN-1");
+    await deactivateConfirmDialog.getByRole("button", { name: "Deactivate domain" }).click();
+    await expect(drawer).toHaveCount(0);
+
+    // Re-open and delete — now permitted.
+    await page.getByRole("cell", { name: "acme.example", exact: true }).click();
+    const drawer2 = page.getByLabel("acme.example");
+    await drawer2.getByRole("tab", { name: "Lifecycle" }).click();
+    const dangerZone2 = drawer2.getByRole("region", { name: "Danger zone" });
+    await dangerZone2.getByLabel("Delete reason").fill("Customer offboarding, fully wound down");
+    await dangerZone2.getByRole("button", { name: "Delete domain" }).click();
+    const deleteConfirmDialog2 = page.getByRole("dialog", { name: "Delete domain" });
+    await deleteConfirmDialog2.getByRole("textbox").fill("DELETE-DOMAIN-1");
+    await deleteConfirmDialog2.getByRole("button", { name: "Delete domain" }).click();
+
+    // Two delete calls total: the earlier blocked attempt (409
+    // DOMAIN_NOT_DEACTIVATED) plus this successful one — assert on the
+    // LAST one, which is the successful, post-deactivation request.
+    await expect
+      .poll(() => domainCalls.filter((c) => /\/platform\/domains\/7\/1\/delete$/.test(c.url)).length)
+      .toBe(2);
+    const deleteCalls = domainCalls.filter((c) => /\/delete$/.test(c.url));
+    const del = deleteCalls[deleteCalls.length - 1];
+    expect(del.method).toBe("POST");
+    const delBody = JSON.parse(del.body);
+    expect(delBody.confirm).toBe("DELETE-DOMAIN-1");
+    expect(delBody.reason).toBe("Customer offboarding, fully wound down");
+    expect(del.headers["idempotency-key"]).toBeTruthy();
+
+    // Successful delete closes the drawer — no fake client-only removal.
+    await expect(drawer2).toHaveCount(0);
   });
 });
 

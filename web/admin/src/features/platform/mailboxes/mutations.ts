@@ -2,12 +2,14 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   createPlatformMailbox,
   deletePlatformMailbox,
+  endMailboxSupportView,
   resetPlatformMailboxPassword,
   setPlatformMailboxAccessMode,
   setPlatformMailboxQuota,
   setPlatformMailboxStatus,
+  startMailboxSupportView,
 } from "./api";
-import type { PlatformCreateMailboxRequest, MailAccessMode } from "./contract";
+import type { PlatformCreateMailboxRequest, MailAccessMode, StartMailboxSupportViewRequest } from "./contract";
 
 export function mailboxInvalidationKeys() {
   return [
@@ -104,5 +106,23 @@ export function useDeleteMailboxMutation(tenantId: number | null) {
     onSuccess: () => {
       for (const key of mailboxInvalidationKeys()) qc.invalidateQueries({ queryKey: key });
     },
+  });
+}
+
+/**
+ * Starts an audited, read-only, time-boxed mailbox support-view
+ * session. Never mints a customer session/JWT and never reads/resets
+ * the mailbox password — see internal/api/handlers/platform_mailbox_support_view.go.
+ */
+export function useStartMailboxSupportViewMutation(tenantId: number | null) {
+  return useMutation({
+    mutationFn: ({ id, body }: { id: number; body: StartMailboxSupportViewRequest }) =>
+      startMailboxSupportView(tenantId as number, id, body),
+  });
+}
+
+export function useEndMailboxSupportViewMutation(tenantId: number | null) {
+  return useMutation({
+    mutationFn: ({ id, sessionId }: { id: number; sessionId: string }) => endMailboxSupportView(tenantId as number, id, sessionId),
   });
 }

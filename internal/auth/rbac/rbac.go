@@ -136,6 +136,22 @@ const (
 	// because deactivation is destructive and warrants its own
 	// authority, same reasoning as PermPlatformUsersWrite above.
 	PermPlatformDomainsDeactivate Permission = "platform.domains.deactivate"
+	// PermPlatformDomainsDelete governs the canonical, audited,
+	// deleted_at-tombstone platform domain delete — permanent removal
+	// from active inventory, distinct from PermPlatformDomainsDeactivate
+	// (reversible-in-principle status change). Deletion warrants its
+	// own authority, same reasoning as PermPlatformDomainsDeactivate.
+	PermPlatformDomainsDelete Permission = "platform.domains.delete"
+	// PermPlatformMailboxSupportView governs the audited, read-only,
+	// time-boxed support session that lets a Platform Super Admin
+	// inspect a customer mailbox's folders/messages/attachments WITHOUT
+	// ever touching the mailbox password, minting a customer JWT, or
+	// creating a normal webmail session — see internal/supportaccess.
+	// Deliberately platform-scoped only: no tenant role — including a
+	// tenant's own admin/operator/support roles — inherits this, because
+	// it is a PLATFORM operator's cross-tenant capability, not a
+	// tenant-internal one.
+	PermPlatformMailboxSupportView Permission = "platform.mailboxes.support_view"
 
 	// Platform mail control (cross-tenant, platform_super_admin only).
 	// These gate the /platform/relays, /platform/suppressions, and
@@ -201,6 +217,8 @@ var AllPermissions = []Permission{
 	PermPlatformSessionsRevoke,
 	PermPlatformUsersWrite,
 	PermPlatformDomainsDeactivate,
+	PermPlatformDomainsDelete,
+	PermPlatformMailboxSupportView,
 	PermRelaysRead,
 	PermRelaysWrite,
 	PermRelaysTest,
@@ -262,9 +280,11 @@ var rolePermissions = map[auth.Role]map[Permission]bool{
 		// account). Deliberately NOT granted to any tenant role, support
 		// operator, or ordinary platform operator role — see the
 		// PermPlatformUsersWrite doc comment above.
-		PermPlatformUsersWrite:        true,
-		PermPlatformDomainsDeactivate: true,
-		PermJobsRead:                  true, PermJobsWrite: true,
+		PermPlatformUsersWrite:         true,
+		PermPlatformDomainsDeactivate:  true,
+		PermPlatformDomainsDelete:      true,
+		PermPlatformMailboxSupportView: true,
+		PermJobsRead:                   true, PermJobsWrite: true,
 		// Platform imports (the /platform/imports surface is platform-scope).
 		PermImportsRead: true, PermImportsWrite: true, PermImportsExecute: true, PermImportsAdmin: true,
 		// Platform mail control: relay administration, suppression
@@ -376,11 +396,13 @@ var rolePermissions = map[auth.Role]map[Permission]bool{
 		PermAPIKeysRead:       true, PermAPIKeysWrite: true,
 		PermBillingRead: true, PermBillingWrite: true,
 		PermPlatformOrganizationsRead: true, PermPlatformOrganizationsWrite: true,
-		PermPlatformSecurityRead:      true,
-		PermPlatformSessionsRevoke:    true,
-		PermPlatformUsersWrite:        true,
-		PermPlatformDomainsDeactivate: true,
-		PermJobsRead:                  true, PermJobsWrite: true,
+		PermPlatformSecurityRead:       true,
+		PermPlatformSessionsRevoke:     true,
+		PermPlatformUsersWrite:         true,
+		PermPlatformDomainsDeactivate:  true,
+		PermPlatformDomainsDelete:      true,
+		PermPlatformMailboxSupportView: true,
+		PermJobsRead:                   true, PermJobsWrite: true,
 		PermImportsRead: true, PermImportsWrite: true, PermImportsExecute: true, PermImportsAdmin: true,
 		// Platform mail control (legacy super-admin mirrors the PSA).
 		PermRelaysRead: true, PermRelaysWrite: true, PermRelaysTest: true,

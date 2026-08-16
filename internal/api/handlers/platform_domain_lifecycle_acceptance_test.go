@@ -806,3 +806,339 @@ func TestGeneratePlatformDomainDKIM_ConcurrentRequestsProduceExactlyOneConfig(t 
 		t.Fatalf("expected exactly one DKIM config row, got %d", count)
 	}
 }
+
+// ── Platform domain DELETE (canonical deleted_at tombstone) ────────────────
+//
+// POST /api/v1/platform/domains/:tenant_id/:id/delete
+//
+// Distinct authority and semantics from deactivate above: PERMANENT,
+// requires deactivate-first, purges the active DKIM config (history
+// preserved), never cascades to mailboxes/aliases/queued mail.
+
+func (e *platformDomainLifecycleEnv) deleteDomain(t *testing.T, tenantID, domainID uint, opts domainDeactivateOpts, body map[string]any) (*http.Response, map[string]interface{}) {
+	t.Helper()
+	b, _ := json.Marshal(body)
+	path := "/api/v1/platform/domains/" + itoa(int64(tenantID)) + "/" + itoa(int64(domainID)) + "/delete"
+	req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(b))
+	req.Header.Set("Content-Type", "application/json")
+	if opts.token != "" {
+		req.Header.Set("Authorization", "Bearer "+opts.token)
+	}
+	if opts.csrf != "" {
+		req.Header.Set("Cookie", "csrf_token="+opts.csrf)
+		req.Header.Set("X-CSRF-Token", opts.csrf)
+	}
+	if opts.idempotencyKey != "" {
+		req.Header.Set("Idempotency-Key", opts.idempotencyKey)
+	}
+	resp, err := e.router.App().Test(req, fiber.TestConfig{Timeout: 0})
+	if err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	raw, _ := io.ReadAll(resp.Body)
+	var out map[string]interface{}
+	_ = json.Unmarshal(raw, &out)
+	return resp, out
+}
+
+func deleteConfirm(id uint) string { return "DELETE-DOMAIN-" + itoa(int64(id)) }
+
+// deactivateForDelete deactivates a freshly-seeded domain (version 1 ->
+// 2) so delete-path tests can exercise the deactivate-then-delete gate
+// without repeating the deactivate call inline. Returns the domain id
+// and its version after deactivation (2).
+func (e *platformDomainLifecycleEnv) deactivateForDelete(t *testing.T, tenantID uint, name string) (domID uint, version int) {
+	t.Helper()
+	domID = e.seedDomain(t, tenantID, name)
+	resp, out := e.deactivate(t, tenantID, domID, domainDeactivateOpts{token: e.psaTok, csrf: e.psaCSRF, idempotencyKey: "deactivate-for-delete-" + name},
+		map[string]any{"confirm": domainConfirm(domID), "reason": "pre-delete deactivation", "expected_version": 1})
+	if resp.StatusCode != fiber.StatusOK {
+		t.Fatalf("pre-delete deactivation failed: %d: %v", resp.StatusCode, out)
+	}
+	return domID, 2
+}
+
+func TestDeletePlatformDomain_TenantAdminDenied(t *testing.T) {
+	env := buildPlatformDomainLifecycleEnv(t)
+	domID, ver := env.deactivateForDelete(t, 1, "del-tenant-denied.example")
+	resp, _ := env.deleteDomain(t, 1, domID, domainDeactivateOpts{token: env.tenantTok, csrf: env.tenantCSRF, idempotencyKey: "k1"},
+		map[string]any{"confirm": deleteConfirm(domID), "reason": "test", "expected_version": ver})
+	if resp.StatusCode != fiber.StatusForbidden {
+		t.Fatalf("expected 403 for tenant admin, got %d", resp.StatusCode)
+	}
+}
+
+func TestDeletePlatformDomain_UnauthenticatedDenied(t *testing.T) {
+	env := buildPlatformDomainLifecycleEnv(t)
+	domID, ver := env.deactivateForDelete(t, 1, "del-unauth.example")
+	resp, _ := env.deleteDomain(t, 1, domID, domainDeactivateOpts{idempotencyKey: "k1"},
+		map[string]any{"confirm": deleteConfirm(domID), "reason": "test", "expected_version": ver})
+	if resp.StatusCode != fiber.StatusUnauthorized && resp.StatusCode != fiber.StatusForbidden {
+		t.Fatalf("expected 401/403, got %d", resp.StatusCode)
+	}
+}
+
+// TestDeletePlatformDomain_CrossTenantPathIsNotFound is the C — "cross-
+// tenant -> 404/403 without leak" requirement: the path names tenant 2
+// but the domain belongs to tenant 1.
+func TestDeletePlatformDomain_CrossTenantPathIsNotFound(t *testing.T) {
+	env := buildPlatformDomainLifecycleEnv(t)
+	domID, ver := env.deactivateForDelete(t, 1, "del-crosstenant.example")
+	resp, _ := env.deleteDomain(t, 2, domID, domainDeactivateOpts{token: env.psaTok, csrf: env.psaCSRF, idempotencyKey: "k1"},
+		map[string]any{"confirm": deleteConfirm(domID), "reason": "test", "expected_version": ver})
+	if resp.StatusCode != fiber.StatusNotFound {
+		t.Fatalf("expected 404 for cross-tenant path, got %d", resp.StatusCode)
+	}
+	var deletedAt sql.NullTime
+	_ = env.db.QueryRow("SELECT deleted_at FROM coremail_domains WHERE id = ?", domID).Scan(&deletedAt)
+	if deletedAt.Valid {
+		t.Fatalf("domain must remain untouched by a cross-tenant path")
+	}
+}
+
+func TestDeletePlatformDomain_WrongConfirmationRejected(t *testing.T) {
+	env := buildPlatformDomainLifecycleEnv(t)
+	domID, ver := env.deactivateForDelete(t, 1, "del-wrongconfirm.example")
+	resp, _ := env.deleteDomain(t, 1, domID, domainDeactivateOpts{token: env.psaTok, csrf: env.psaCSRF, idempotencyKey: "k1"},
+		map[string]any{"confirm": "DELETE-DOMAIN-999999999", "reason": "test", "expected_version": ver})
+	if resp.StatusCode != fiber.StatusPreconditionFailed {
+		t.Fatalf("expected 412, got %d", resp.StatusCode)
+	}
+}
+
+func TestDeletePlatformDomain_ReasonRequired(t *testing.T) {
+	env := buildPlatformDomainLifecycleEnv(t)
+	domID, ver := env.deactivateForDelete(t, 1, "del-noreason.example")
+	resp, _ := env.deleteDomain(t, 1, domID, domainDeactivateOpts{token: env.psaTok, csrf: env.psaCSRF, idempotencyKey: "k1"},
+		map[string]any{"confirm": deleteConfirm(domID), "expected_version": ver})
+	if resp.StatusCode != fiber.StatusBadRequest {
+		t.Fatalf("expected 400 (reason required), got %d", resp.StatusCode)
+	}
+}
+
+func TestDeletePlatformDomain_StaleVersionConflicts(t *testing.T) {
+	env := buildPlatformDomainLifecycleEnv(t)
+	domID, _ := env.deactivateForDelete(t, 1, "del-staleversion.example")
+	resp, out := env.deleteDomain(t, 1, domID, domainDeactivateOpts{token: env.psaTok, csrf: env.psaCSRF, idempotencyKey: "k1"},
+		map[string]any{"confirm": deleteConfirm(domID), "reason": "test", "expected_version": 999})
+	if resp.StatusCode != fiber.StatusConflict {
+		t.Fatalf("expected 409 for stale version, got %d: %v", resp.StatusCode, out)
+	}
+	var deletedAt sql.NullTime
+	_ = env.db.QueryRow("SELECT deleted_at FROM coremail_domains WHERE id = ?", domID).Scan(&deletedAt)
+	if deletedAt.Valid {
+		t.Fatalf("domain must be untouched after a version conflict")
+	}
+}
+
+// TestDeletePlatformDomain_RequiresDeactivationFirst proves the
+// deactivate-then-delete policy gate: a live, never-deactivated domain
+// cannot be deleted directly, even with a correct confirmation/version.
+func TestDeletePlatformDomain_RequiresDeactivationFirst(t *testing.T) {
+	env := buildPlatformDomainLifecycleEnv(t)
+	domID := env.seedDomain(t, 1, "del-notdeactivated.example")
+	resp, out := env.deleteDomain(t, 1, domID, domainDeactivateOpts{token: env.psaTok, csrf: env.psaCSRF, idempotencyKey: "k1"},
+		map[string]any{"confirm": deleteConfirm(domID), "reason": "test", "expected_version": 1})
+	if resp.StatusCode != fiber.StatusConflict {
+		t.Fatalf("expected 409 (not deactivated), got %d: %v", resp.StatusCode, out)
+	}
+	if out["code"] != "DOMAIN_NOT_DEACTIVATED" {
+		t.Fatalf("expected code=DOMAIN_NOT_DEACTIVATED, got %v", out["code"])
+	}
+	var deletedAt sql.NullTime
+	_ = env.db.QueryRow("SELECT deleted_at FROM coremail_domains WHERE id = ?", domID).Scan(&deletedAt)
+	if deletedAt.Valid {
+		t.Fatalf("domain must remain untouched")
+	}
+}
+
+func TestDeletePlatformDomain_RefusesWithActiveMailboxes(t *testing.T) {
+	env := buildPlatformDomainLifecycleEnv(t)
+	domID, ver := env.deactivateForDelete(t, 1, "del-mailboxblocker.example")
+	now := time.Now().UTC()
+	if _, err := env.db.Exec("INSERT INTO coremail_mailboxes (domain_id, tenant_id, local_part, email, password_hash, created_at, updated_at) VALUES (?, 1, 'user1', 'user1@del-mailboxblocker.example', 'h', ?, ?)",
+		domID, now, now); err != nil {
+		t.Fatalf("seed mailbox: %v", err)
+	}
+	resp, out := env.deleteDomain(t, 1, domID, domainDeactivateOpts{token: env.psaTok, csrf: env.psaCSRF, idempotencyKey: "k1"},
+		map[string]any{"confirm": deleteConfirm(domID), "reason": "test", "expected_version": ver})
+	if resp.StatusCode != fiber.StatusConflict {
+		t.Fatalf("expected 409 (active mailboxes), got %d: %v", resp.StatusCode, out)
+	}
+	if out["code"] != "DOMAIN_DELETE_BLOCKED" {
+		t.Fatalf("expected code=DOMAIN_DELETE_BLOCKED, got %v", out["code"])
+	}
+	blockers, _ := out["blockers"].(map[string]interface{})
+	if blockers == nil || blockers["mailboxes"].(float64) != 1 {
+		t.Fatalf("expected blockers.mailboxes=1, got %v", out["blockers"])
+	}
+	var deletedAt sql.NullTime
+	_ = env.db.QueryRow("SELECT deleted_at FROM coremail_domains WHERE id = ?", domID).Scan(&deletedAt)
+	if deletedAt.Valid {
+		t.Fatalf("domain must not be deleted while a live mailbox exists")
+	}
+}
+
+func TestDeletePlatformDomain_RefusesWithActiveAliases(t *testing.T) {
+	env := buildPlatformDomainLifecycleEnv(t)
+	domID, ver := env.deactivateForDelete(t, 1, "del-aliasblocker.example")
+	now := time.Now().UTC()
+	if _, err := env.db.Exec("INSERT INTO coremail_aliases (domain_id, tenant_id, from_addr, to_addr, active, created_at, updated_at) VALUES (?, 1, 'alias1@del-aliasblocker.example', 'target@example.com', 1, ?, ?)",
+		domID, now, now); err != nil {
+		t.Fatalf("seed alias: %v", err)
+	}
+	resp, out := env.deleteDomain(t, 1, domID, domainDeactivateOpts{token: env.psaTok, csrf: env.psaCSRF, idempotencyKey: "k1"},
+		map[string]any{"confirm": deleteConfirm(domID), "reason": "test", "expected_version": ver})
+	if resp.StatusCode != fiber.StatusConflict {
+		t.Fatalf("expected 409 (active aliases), got %d: %v", resp.StatusCode, out)
+	}
+	blockers, _ := out["blockers"].(map[string]interface{})
+	if blockers == nil || blockers["aliases"].(float64) != 1 {
+		t.Fatalf("expected blockers.aliases=1, got %v", out["blockers"])
+	}
+}
+
+func TestDeletePlatformDomain_RefusesWithQueuedMail(t *testing.T) {
+	env := buildPlatformDomainLifecycleEnv(t)
+	domID, ver := env.deactivateForDelete(t, 1, "del-queueblocker.example")
+	now := time.Now().UTC()
+	if _, err := env.db.Exec("INSERT INTO coremail_queue (tenant_id, domain_id, message_id, to_address, status, created_at, updated_at) VALUES (1, ?, 'msg-1', 'x@y.example', 'pending', ?, ?)",
+		domID, now, now); err != nil {
+		t.Fatalf("seed queue entry: %v", err)
+	}
+	resp, out := env.deleteDomain(t, 1, domID, domainDeactivateOpts{token: env.psaTok, csrf: env.psaCSRF, idempotencyKey: "k1"},
+		map[string]any{"confirm": deleteConfirm(domID), "reason": "test", "expected_version": ver})
+	if resp.StatusCode != fiber.StatusConflict {
+		t.Fatalf("expected 409 (queued mail), got %d: %v", resp.StatusCode, out)
+	}
+	blockers, _ := out["blockers"].(map[string]interface{})
+	if blockers == nil || blockers["queued_messages"].(float64) != 1 {
+		t.Fatalf("expected blockers.queued_messages=1, got %v", out["blockers"])
+	}
+}
+
+// TestDeletePlatformDomain_SuccessSetsDeletedAtPurgesDKIMPreservesHistory
+// is the full happy-path proof covering I, J, K, L, M from the mission
+// spec in one deterministic scenario.
+func TestDeletePlatformDomain_SuccessSetsDeletedAtPurgesDKIMPreservesHistory(t *testing.T) {
+	env := buildPlatformDomainLifecycleEnv(t)
+	domID, ver := env.deactivateForDelete(t, 1, "del-success.example")
+	now := time.Now().UTC()
+	if _, err := env.db.Exec("INSERT INTO coremail_dkim_config (domain, selector, private_key_pem, created_at, updated_at) VALUES ('del-success.example', 'sel1', 'priv-pem', ?, ?)",
+		now, now); err != nil {
+		t.Fatalf("seed dkim config: %v", err)
+	}
+	if _, err := env.db.Exec("CREATE TABLE IF NOT EXISTS coremail_dkim_selector_history (id INTEGER PRIMARY KEY AUTOINCREMENT, domain TEXT, tenant_id INTEGER, selector TEXT, action TEXT, created_at DATETIME)"); err != nil {
+		t.Fatalf("ensure dkim history table: %v", err)
+	}
+	if _, err := env.db.Exec("INSERT INTO coremail_dkim_selector_history (domain, tenant_id, selector, action, created_at) VALUES ('del-success.example', 1, 'sel1', 'generate', ?)", now); err != nil {
+		t.Fatalf("seed dkim history: %v", err)
+	}
+
+	resp, out := env.deleteDomain(t, 1, domID, domainDeactivateOpts{token: env.psaTok, csrf: env.psaCSRF, idempotencyKey: "k-success"},
+		map[string]any{"confirm": deleteConfirm(domID), "reason": "permanent removal after offboarding", "expected_version": ver})
+	if resp.StatusCode != fiber.StatusOK {
+		t.Fatalf("expected 200, got %d: %v", resp.StatusCode, out)
+	}
+	if out["deleted"] != true {
+		t.Fatalf("expected deleted=true, got %v", out["deleted"])
+	}
+
+	// I: deleted_at set.
+	var deletedAt sql.NullTime
+	if err := env.db.QueryRow("SELECT deleted_at FROM coremail_domains WHERE id = ?", domID).Scan(&deletedAt); err != nil {
+		t.Fatalf("read domain: %v", err)
+	}
+	if !deletedAt.Valid {
+		t.Fatalf("expected deleted_at to be set")
+	}
+
+	// J: domain disappears from the normal Platform list/detail path
+	// (GetDomain/ListDomains filter deleted_at IS NULL — proven at the
+	// repository layer used by every platform domain read route).
+	var activeCount int
+	_ = env.db.QueryRow("SELECT COUNT(*) FROM coremail_domains WHERE id = ? AND deleted_at IS NULL", domID).Scan(&activeCount)
+	if activeCount != 0 {
+		t.Fatalf("domain must no longer be a live row for active-inventory queries")
+	}
+
+	// K: active DKIM config purged.
+	var dkimCount int
+	_ = env.db.QueryRow("SELECT COUNT(*) FROM coremail_dkim_config WHERE domain = 'del-success.example'").Scan(&dkimCount)
+	if dkimCount != 0 {
+		t.Fatalf("expected active DKIM config purged, got count=%d", dkimCount)
+	}
+
+	// L: DKIM/audit history preserved.
+	var histCount int
+	_ = env.db.QueryRow("SELECT COUNT(*) FROM coremail_dkim_selector_history WHERE domain = 'del-success.example'").Scan(&histCount)
+	if histCount != 1 {
+		t.Fatalf("expected DKIM selector history preserved, got count=%d", histCount)
+	}
+	var auditCount int
+	_ = env.db.QueryRow("SELECT COUNT(*) FROM coremail_audit WHERE action = 'platform_domain.delete'").Scan(&auditCount)
+	if auditCount != 1 {
+		t.Fatalf("expected exactly 1 platform_domain.delete audit entry, got %d", auditCount)
+	}
+	var deactivateAuditCount int
+	_ = env.db.QueryRow("SELECT COUNT(*) FROM coremail_audit WHERE action = 'platform_domain.deactivate'").Scan(&deactivateAuditCount)
+	if deactivateAuditCount != 1 {
+		t.Fatalf("expected the earlier deactivate audit entry to survive, got %d", deactivateAuditCount)
+	}
+}
+
+// TestDeletePlatformDomain_UnauthorizedRolesDenied — N: unauthorized
+// roles denied. tenant admin already covered above; this proves an
+// authenticated PSA token WITHOUT the delete permission specifically
+// (simulated via the tenant-admin token, which never carries
+// PermPlatformDomainsDelete) is denied, matching the deactivate
+// equivalent.
+func TestDeletePlatformDomain_UnauthorizedRolesDenied(t *testing.T) {
+	env := buildPlatformDomainLifecycleEnv(t)
+	domID, ver := env.deactivateForDelete(t, 1, "del-unauthorized.example")
+	resp, _ := env.deleteDomain(t, 1, domID, domainDeactivateOpts{token: env.tenantTok, csrf: env.tenantCSRF, idempotencyKey: "k1"},
+		map[string]any{"confirm": deleteConfirm(domID), "reason": "test", "expected_version": ver})
+	if resp.StatusCode != fiber.StatusForbidden {
+		t.Fatalf("expected 403, got %d", resp.StatusCode)
+	}
+}
+
+// TestDeletePlatformDomain_SameKeyReplayReturnsStoredResponse — O:
+// idempotency behavior.
+func TestDeletePlatformDomain_SameKeyReplayReturnsStoredResponse(t *testing.T) {
+	env := buildPlatformDomainLifecycleEnv(t)
+	domID, ver := env.deactivateForDelete(t, 1, "del-replay.example")
+	body := map[string]any{"confirm": deleteConfirm(domID), "reason": "cleanup", "expected_version": ver}
+
+	resp1, out1 := env.deleteDomain(t, 1, domID, domainDeactivateOpts{token: env.psaTok, csrf: env.psaCSRF, idempotencyKey: "key-replay"}, body)
+	if resp1.StatusCode != fiber.StatusOK {
+		t.Fatalf("first call: expected 200, got %d: %v", resp1.StatusCode, out1)
+	}
+	resp2, out2 := env.deleteDomain(t, 1, domID, domainDeactivateOpts{token: env.psaTok, csrf: env.psaCSRF, idempotencyKey: "key-replay"}, body)
+	if resp2.StatusCode != fiber.StatusOK {
+		t.Fatalf("replay: expected 200, got %d: %v", resp2.StatusCode, out2)
+	}
+	if out1["request_id"] != out2["request_id"] {
+		t.Fatalf("replay must return the exact stored response")
+	}
+}
+
+// TestDeactivatePlatformDomain_RemainsUnchangedAfterDeleteFeatureAdded
+// — P: deactivate remains unchanged. A plain regression proof that
+// adding delete did not alter deactivate's own contract/behavior.
+func TestDeactivatePlatformDomain_RemainsUnchangedAfterDeleteFeatureAdded(t *testing.T) {
+	env := buildPlatformDomainLifecycleEnv(t)
+	domID := env.seedDomain(t, 1, "del-deactivate-unchanged.example")
+	resp, out := env.deactivate(t, 1, domID, domainDeactivateOpts{token: env.psaTok, csrf: env.psaCSRF, idempotencyKey: "k1"},
+		map[string]any{"confirm": domainConfirm(domID), "reason": "still works", "expected_version": 1})
+	if resp.StatusCode != fiber.StatusOK {
+		t.Fatalf("expected 200, got %d: %v", resp.StatusCode, out)
+	}
+	var deletedAt sql.NullTime
+	if err := env.db.QueryRow("SELECT deleted_at FROM coremail_domains WHERE id = ?", domID).Scan(&deletedAt); err != nil {
+		t.Fatalf("read domain: %v", err)
+	}
+	if deletedAt.Valid {
+		t.Fatalf("deactivate must never set deleted_at, even after delete exists as a sibling route")
+	}
+}
