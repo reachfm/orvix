@@ -225,6 +225,121 @@ func (h *Handler) SetPlatformDomainMailAccessMode(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{"status": "ok", "id": id, "mail_access_mode": req.MailAccessMode})
 }
 
+// GetPlatformDomainDNS handles GET
+// /api/v1/platform/domains/:tenant_id/:id/dns — a read-only snapshot
+// of an existing domain's public DNS/DKIM configuration. DKIM fields
+// come from the canonical read path (never generates a key); DNS
+// requirement records reuse the exact same dnsops generator
+// CreatePlatformDomain uses, so this route can never drift into a
+// second, conflicting DNS-requirements implementation.
+func (h *Handler) GetPlatformDomainDNS(c fiber.Ctx) error {
+	svc, err := h.mailControl()
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	tenantID, err := parseTenantParam(c)
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	id, err := parseIDParam(c, "id")
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	out, err := svc.GetDomainDNS(c.Context(), id, tenantID)
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	if dnsSvc := h.dnsOpsService(); dnsSvc != nil {
+		if inputs, inErr := h.dnsOpsInputsForDomain(c.Context(), out.Domain); inErr == nil {
+			if plan, planErr := dnsSvc.Generate(inputs); planErr == nil {
+				out.DNSRequirements = mapDNSPlanRequirements(plan)
+				out.DNSNextStep = "publish_and_verify_dns"
+			}
+		}
+	}
+	return c.JSON(out)
+}
+
+// platformDKIMMutation is the shared body/validation/idempotency path
+// for generate and rotate — the only difference between the two
+// routes is confirmRotation's expected value, matching the existing
+// enterprise DKIM handler's own generate-vs-rotate contract.
+func (h *Handler) platformDKIMMutation(c fiber.Ctx, requireRotationConfirm bool) error {
+	svc, err := h.mailControl()
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	tenantID, err := parseTenantParam(c)
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	id, err := parseIDParam(c, "id")
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	body, err := platformMutationBody(c)
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	var req struct {
+		Selector        string `json:"selector"`
+		ConfirmRotation string `json:"confirm_rotation"`
+		ExpectedVersion int    `json:"expected_version"`
+	}
+	if err := bindStrictJSONBytes(body, &req); err != nil {
+		return strictJSONError(c, err)
+	}
+	selector, err := validateDKIMSelector(req.Selector)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error(), "code": "VALIDATION_FAILED"})
+	}
+	if req.ExpectedVersion < 1 {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "a positive expected_version is required", "code": "VALIDATION_FAILED",
+		})
+	}
+	if requireRotationConfirm && req.ConfirmRotation != "rotate-dkim-key" {
+		return c.Status(fiber.StatusPreconditionFailed).JSON(fiber.Map{
+			"error": `rotation requires confirm_rotation: "rotate-dkim-key"`, "code": "PRECONDITION_FAILED",
+		})
+	}
+	confirmRotation := ""
+	if requireRotationConfirm {
+		confirmRotation = req.ConfirmRotation
+	}
+
+	actorID := h.platformActorID(c)
+	action := "generate"
+	if requireRotationConfirm {
+		action = "rotate"
+	}
+	scope := "platform.domain.dkim." + action + ":POST:/platform/domains/" + strconv.FormatUint(uint64(tenantID), 10) + "/" + strconv.FormatUint(uint64(id), 10) + ":actor:" + strconv.FormatUint(uint64(actorID), 10)
+
+	return h.platformIdempotent(c, scope, func() (int, any, any, error) {
+		result, err := svc.GenerateOrRotateDKIM(c.Context(), id, tenantID, selector, confirmRotation, req.ExpectedVersion, actorID)
+		if err != nil {
+			return 0, nil, nil, err
+		}
+		return fiber.StatusOK, result, result, nil
+	})
+}
+
+// GeneratePlatformDomainDKIM handles POST
+// /api/v1/platform/domains/:tenant_id/:id/dkim/generate — provisions
+// a new DKIM key pair for a domain that does not already have one.
+func (h *Handler) GeneratePlatformDomainDKIM(c fiber.Ctx) error {
+	return h.platformDKIMMutation(c, false)
+}
+
+// RotatePlatformDomainDKIM handles POST
+// /api/v1/platform/domains/:tenant_id/:id/dkim/rotate — replaces an
+// existing DKIM key pair. Requires the explicit typed confirmation
+// confirm_rotation: "rotate-dkim-key", matching the existing
+// enterprise DKIM rotation contract.
+func (h *Handler) RotatePlatformDomainDKIM(c fiber.Ctx) error {
+	return h.platformDKIMMutation(c, true)
+}
+
 // ── Platform mailboxes ─────────────────────────────────────────────
 
 func (h *Handler) ListPlatformMailboxes(c fiber.Ctx) error {

@@ -308,6 +308,94 @@ func (s *Service) GetDomain(ctx context.Context, id, tenantID uint) (*PlatformDo
 	}, nil
 }
 
+// GetDomainDNS reads an existing domain's public DKIM configuration
+// (never generating a new key) through the canonical DKIM read path
+// (admindomain.Service.GetDKIM — the same helper the enterprise admin
+// UI uses). DNS requirement records (MX/SPF/DMARC/autoconfig) are NOT
+// built here: they come from the same dnsops generator
+// CreatePlatformDomain uses, which is a handler-level dependency
+// (config/public-IP inputs) — the handler fills DNSRequirements and
+// DNSNextStep into the returned result after calling this method,
+// exactly mirroring how CreateDomain's handler builds them.
+func (s *Service) GetDomainDNS(ctx context.Context, id, tenantID uint) (*PlatformDomainDNSResult, error) {
+	if err := s.requireTenant(tenantID); err != nil {
+		return nil, err
+	}
+	d, err := s.domains.GetDomain(ctx, id, tenantID)
+	if err != nil {
+		if errors.Is(err, admindomain.ErrDomainNotFound) {
+			return nil, kernel.NotFound("domain")
+		}
+		return nil, kernel.Wrap(kernel.ErrCodeInternal, "get platform domain", err)
+	}
+	if d == nil {
+		return nil, kernel.NotFound("domain")
+	}
+
+	out := &PlatformDomainDNSResult{
+		TenantID: tenantID,
+		DomainID: d.ID,
+		Domain:   d.Name,
+		Version:  d.Version,
+		Status:   d.Status,
+	}
+
+	// GetDKIM ONLY reads the existing config and derives the public
+	// key from the stored private key — it never generates a new key
+	// pair. A nil result (no error) means DKIM is honestly not
+	// configured; the response reflects that rather than a
+	// placeholder value.
+	dkimResult, err := s.domains.GetDKIM(ctx, id, tenantID)
+	if err != nil {
+		return nil, kernel.Wrap(kernel.ErrCodeInternal, "read platform domain dkim", err)
+	}
+	if dkimResult != nil {
+		out.DKIMConfigured = true
+		out.DKIMSelector = dkimResult.Selector
+		out.DKIMDNSRecordName = dkimResult.DNSRecordName
+		out.DKIMPublicDNSTxt = dkimResult.PublicDNSTxt
+	}
+	return out, nil
+}
+
+// GenerateOrRotateDKIM exposes the canonical, version-guarded DKIM
+// generate/rotate transaction (admindomain.Service.PlatformDKIMForTenant)
+// to the Platform Super Admin routes. It never creates a second DKIM
+// subsystem — same repository, same key-generation hook, same
+// operability guard, same audit pattern as every other DKIM entry
+// point in the codebase.
+func (s *Service) GenerateOrRotateDKIM(ctx context.Context, id, tenantID uint, selector, confirmRotation string, expectedVersion int, actorID uint) (*PlatformDKIMResult, error) {
+	if err := s.requireTenant(tenantID); err != nil {
+		return nil, err
+	}
+	result, err := s.domains.PlatformDKIMForTenant(ctx, id, tenantID, selector, confirmRotation, expectedVersion)
+	if err != nil {
+		switch {
+		case errors.Is(err, admindomain.ErrDomainNotFound):
+			return nil, kernel.NotFound("domain")
+		case errors.Is(err, admindomain.ErrDKIMAlreadyConfigured):
+			return nil, kernel.Conflict("dkim already configured for domain; confirm rotation to replace it")
+		case errors.Is(err, admindomain.ErrStaleVersion):
+			return nil, kernel.NewError(kernel.ErrCodeConflict, "domain version is no longer current")
+		case errors.Is(err, admindomain.ErrDomainDisabled), errors.Is(err, admindomain.ErrDomainSuspended),
+			errors.Is(err, admindomain.ErrDomainLocked), errors.Is(err, admindomain.ErrDomainDeleted):
+			return nil, kernel.Conflict("domain is not operable")
+		}
+		return nil, kernel.Wrap(kernel.ErrCodeInternal, "generate or rotate platform domain dkim", err)
+	}
+	action := "platform.domain.dkim.generate"
+	if confirmRotation == "rotate-dkim-key" {
+		action = "platform.domain.dkim.rotate"
+	}
+	s.auditRecord(ctx, actorID, action, fmt.Sprintf("domain:%d", id), tenantID, "success", fmt.Sprintf("selector:%s", selector))
+	return &PlatformDKIMResult{
+		Selector:      result.Selector,
+		PublicDNSTxt:  result.PublicDNSTxt,
+		DNSRecordName: result.DNSRecordName,
+		Version:       result.Version,
+	}, nil
+}
+
 // SetDomainStatus applies an allowed lifecycle transition for an
 // explicit tenant-owned domain through the production admin service.
 // Ownership is verified first: a cross-tenant id yields NOT_FOUND, and

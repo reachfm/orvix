@@ -10,9 +10,12 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -519,5 +522,287 @@ func TestGetPlatformDomain_CrossTenantDoesNotDiscloseVersion(t *testing.T) {
 	}
 	if _, present := out["version"]; present {
 		t.Fatalf("cross-tenant response must never include a version field, got %v", out)
+	}
+}
+
+// ── Read-only DNS/DKIM snapshot + DKIM generate/rotate (API-contract closure, concerns 2/3) ──
+
+func (e *platformDomainLifecycleEnv) getDomainDNS(t *testing.T, tenantID, domainID uint, opts domainDeactivateOpts) (*http.Response, map[string]interface{}) {
+	t.Helper()
+	path := "/api/v1/platform/domains/" + itoa(int64(tenantID)) + "/" + itoa(int64(domainID)) + "/dns"
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	if opts.token != "" {
+		req.Header.Set("Authorization", "Bearer "+opts.token)
+	}
+	resp, err := e.router.App().Test(req, fiber.TestConfig{Timeout: 0})
+	if err != nil {
+		t.Fatalf("get domain dns: %v", err)
+	}
+	raw, _ := io.ReadAll(resp.Body)
+	var out map[string]interface{}
+	_ = json.Unmarshal(raw, &out)
+	return resp, out
+}
+
+func (e *platformDomainLifecycleEnv) dkimMutate(t *testing.T, action string, tenantID, domainID uint, opts domainDeactivateOpts, body map[string]any) (*http.Response, map[string]interface{}) {
+	t.Helper()
+	b, _ := json.Marshal(body)
+	path := "/api/v1/platform/domains/" + itoa(int64(tenantID)) + "/" + itoa(int64(domainID)) + "/dkim/" + action
+	req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(b))
+	req.Header.Set("Content-Type", "application/json")
+	if opts.token != "" {
+		req.Header.Set("Authorization", "Bearer "+opts.token)
+	}
+	if opts.csrf != "" {
+		req.Header.Set("Cookie", "csrf_token="+opts.csrf)
+		req.Header.Set("X-CSRF-Token", opts.csrf)
+	}
+	if opts.idempotencyKey != "" {
+		req.Header.Set("Idempotency-Key", opts.idempotencyKey)
+	}
+	resp, err := e.router.App().Test(req, fiber.TestConfig{Timeout: 0})
+	if err != nil {
+		t.Fatalf("%s dkim: %v", action, err)
+	}
+	raw, _ := io.ReadAll(resp.Body)
+	var out map[string]interface{}
+	_ = json.Unmarshal(raw, &out)
+	return resp, out
+}
+
+func TestGetPlatformDomainDNS_NoDKIMReturnsNotConfiguredWithoutGenerating(t *testing.T) {
+	env := buildPlatformDomainLifecycleEnv(t)
+	domID := env.seedDomain(t, 1, "dns-no-dkim.example")
+
+	resp, out := env.getDomainDNS(t, 1, domID, domainDeactivateOpts{token: env.psaTok})
+	if resp.StatusCode != fiber.StatusOK {
+		t.Fatalf("expected 200, got %d: %v", resp.StatusCode, out)
+	}
+	if configured, _ := out["dkim_configured"].(bool); configured {
+		t.Fatalf("expected dkim_configured=false, got %v", out)
+	}
+	if _, present := out["dkim_public_dns_txt"]; present {
+		t.Fatalf("no DKIM configured must not include a TXT value, got %v", out)
+	}
+	var count int
+	if err := env.db.QueryRow("SELECT COUNT(*) FROM coremail_dkim_config WHERE domain = ?", "dns-no-dkim.example").Scan(&count); err != nil {
+		t.Fatalf("count dkim rows: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("GET must never generate a DKIM key, found %d rows", count)
+	}
+}
+
+func TestGetPlatformDomainDNS_CrossTenantDenied(t *testing.T) {
+	env := buildPlatformDomainLifecycleEnv(t)
+	domID := env.seedDomain(t, 1, "dns-crosstenant.example")
+
+	resp, out := env.getDomainDNS(t, 2, domID, domainDeactivateOpts{token: env.psaTok})
+	if resp.StatusCode != fiber.StatusNotFound {
+		t.Fatalf("expected 404 for a cross-tenant domain id, got %d: %v", resp.StatusCode, out)
+	}
+}
+
+func TestGetPlatformDomainDNS_TenantAdminDenied(t *testing.T) {
+	env := buildPlatformDomainLifecycleEnv(t)
+	domID := env.seedDomain(t, 1, "dns-tenant-denied.example")
+
+	resp, _ := env.getDomainDNS(t, 1, domID, domainDeactivateOpts{token: env.tenantTok})
+	if resp.StatusCode != fiber.StatusForbidden && resp.StatusCode != fiber.StatusNotFound {
+		t.Fatalf("expected tenant-admin denial (403/404), got %d", resp.StatusCode)
+	}
+}
+
+func TestGeneratePlatformDomainDKIM_SucceedsOnceAndReturnsPublicMaterialOnly(t *testing.T) {
+	env := buildPlatformDomainLifecycleEnv(t)
+	domID := env.seedDomain(t, 1, "dkim-generate.example")
+
+	resp, out := env.dkimMutate(t, "generate", 1, domID, domainDeactivateOpts{token: env.psaTok, csrf: env.psaCSRF, idempotencyKey: "k-dkim-gen"},
+		map[string]any{"selector": "mail", "expected_version": 1})
+	if resp.StatusCode != fiber.StatusOK {
+		t.Fatalf("expected 200, got %d: %v", resp.StatusCode, out)
+	}
+	if out["selector"] != "mail" {
+		t.Fatalf("selector=%v", out["selector"])
+	}
+	if _, ok := out["public_dns_txt"].(string); !ok {
+		t.Fatalf("expected a public_dns_txt string, got %v", out)
+	}
+	v, ok := out["version"].(float64)
+	if !ok || v != 2 {
+		t.Fatalf("expected version to advance to 2, got %v", out["version"])
+	}
+	// The response body — serialized JSON, not a Go struct inspection —
+	// must never contain the private key or any PEM material.
+	raw, _ := json.Marshal(out)
+	if strings.Contains(string(raw), "PRIVATE KEY") || strings.Contains(string(raw), "private_key") {
+		t.Fatalf("response leaked private key material: %s", raw)
+	}
+
+	dnsResp, dnsOut := env.getDomainDNS(t, 1, domID, domainDeactivateOpts{token: env.psaTok})
+	if dnsResp.StatusCode != fiber.StatusOK {
+		t.Fatalf("expected 200 from GET dns after generate, got %d: %v", dnsResp.StatusCode, dnsOut)
+	}
+	if configured, _ := dnsOut["dkim_configured"].(bool); !configured {
+		t.Fatalf("expected dkim_configured=true after generate, got %v", dnsOut)
+	}
+}
+
+func TestGeneratePlatformDomainDKIM_DuplicateReturnsTypedConflict(t *testing.T) {
+	env := buildPlatformDomainLifecycleEnv(t)
+	domID := env.seedDomain(t, 1, "dkim-duplicate.example")
+
+	resp1, out1 := env.dkimMutate(t, "generate", 1, domID, domainDeactivateOpts{token: env.psaTok, csrf: env.psaCSRF, idempotencyKey: "k-dup-1"},
+		map[string]any{"selector": "mail", "expected_version": 1})
+	if resp1.StatusCode != fiber.StatusOK {
+		t.Fatalf("expected first generate to succeed, got %d: %v", resp1.StatusCode, out1)
+	}
+
+	resp2, out2 := env.dkimMutate(t, "generate", 1, domID, domainDeactivateOpts{token: env.psaTok, csrf: env.psaCSRF, idempotencyKey: "k-dup-2"},
+		map[string]any{"selector": "mail", "expected_version": 2})
+	if resp2.StatusCode != fiber.StatusConflict {
+		t.Fatalf("expected 409 for a duplicate generate, got %d: %v", resp2.StatusCode, out2)
+	}
+}
+
+func TestRotatePlatformDomainDKIM_WithoutConfirmationRejected(t *testing.T) {
+	env := buildPlatformDomainLifecycleEnv(t)
+	domID := env.seedDomain(t, 1, "dkim-rotate-noconfirm.example")
+
+	genResp, _ := env.dkimMutate(t, "generate", 1, domID, domainDeactivateOpts{token: env.psaTok, csrf: env.psaCSRF, idempotencyKey: "k-rotate-gen"},
+		map[string]any{"selector": "mail", "expected_version": 1})
+	if genResp.StatusCode != fiber.StatusOK {
+		t.Fatalf("setup generate failed: %d", genResp.StatusCode)
+	}
+
+	resp, out := env.dkimMutate(t, "rotate", 1, domID, domainDeactivateOpts{token: env.psaTok, csrf: env.psaCSRF, idempotencyKey: "k-rotate-noconfirm"},
+		map[string]any{"selector": "mail", "expected_version": 2})
+	if resp.StatusCode != fiber.StatusPreconditionFailed {
+		t.Fatalf("expected 412 without confirm_rotation, got %d: %v", resp.StatusCode, out)
+	}
+}
+
+func TestRotatePlatformDomainDKIM_ConfirmedSucceedsAndAdvancesVersion(t *testing.T) {
+	env := buildPlatformDomainLifecycleEnv(t)
+	domID := env.seedDomain(t, 1, "dkim-rotate-confirmed.example")
+
+	genResp, genOut := env.dkimMutate(t, "generate", 1, domID, domainDeactivateOpts{token: env.psaTok, csrf: env.psaCSRF, idempotencyKey: "k-rotate-confirmed-gen"},
+		map[string]any{"selector": "mail", "expected_version": 1})
+	if genResp.StatusCode != fiber.StatusOK {
+		t.Fatalf("setup generate failed: %d: %v", genResp.StatusCode, genOut)
+	}
+	firstTXT := genOut["public_dns_txt"]
+
+	resp, out := env.dkimMutate(t, "rotate", 1, domID, domainDeactivateOpts{token: env.psaTok, csrf: env.psaCSRF, idempotencyKey: "k-rotate-confirmed"},
+		map[string]any{"selector": "mail", "confirm_rotation": "rotate-dkim-key", "expected_version": 2})
+	if resp.StatusCode != fiber.StatusOK {
+		t.Fatalf("expected 200 for confirmed rotation, got %d: %v", resp.StatusCode, out)
+	}
+	v, ok := out["version"].(float64)
+	if !ok || v != 3 {
+		t.Fatalf("expected version to advance to 3, got %v", out["version"])
+	}
+	if out["public_dns_txt"] == firstTXT {
+		t.Fatalf("rotation must produce a different public key, got the same TXT value")
+	}
+}
+
+func TestPlatformDKIM_StaleExpectedVersionRejected(t *testing.T) {
+	env := buildPlatformDomainLifecycleEnv(t)
+	domID := env.seedDomain(t, 1, "dkim-stale-version.example")
+
+	if _, err := env.db.Exec("UPDATE coremail_domains SET version = version + 1 WHERE id = ?", domID); err != nil {
+		t.Fatalf("simulate concurrent bump: %v", err)
+	}
+
+	resp, out := env.dkimMutate(t, "generate", 1, domID, domainDeactivateOpts{token: env.psaTok, csrf: env.psaCSRF, idempotencyKey: "k-stale-dkim"},
+		map[string]any{"selector": "mail", "expected_version": 1})
+	if resp.StatusCode != fiber.StatusConflict {
+		t.Fatalf("expected 409 for a stale expected_version, got %d: %v", resp.StatusCode, out)
+	}
+	var count int
+	if err := env.db.QueryRow("SELECT COUNT(*) FROM coremail_dkim_config WHERE domain = ?", "dkim-stale-version.example").Scan(&count); err != nil {
+		t.Fatalf("count dkim rows: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("a stale version conflict must not create a DKIM row, found %d", count)
+	}
+}
+
+func TestGeneratePlatformDomainDKIM_CrossTenantDenied(t *testing.T) {
+	env := buildPlatformDomainLifecycleEnv(t)
+	domID := env.seedDomain(t, 1, "dkim-crosstenant.example")
+
+	resp, out := env.dkimMutate(t, "generate", 2, domID, domainDeactivateOpts{token: env.psaTok, csrf: env.psaCSRF, idempotencyKey: "k-crosstenant-dkim"},
+		map[string]any{"selector": "mail", "expected_version": 1})
+	if resp.StatusCode != fiber.StatusNotFound {
+		t.Fatalf("expected 404 for a cross-tenant generate, got %d: %v", resp.StatusCode, out)
+	}
+	var count int
+	if err := env.db.QueryRow("SELECT COUNT(*) FROM coremail_dkim_config WHERE domain = ?", "dkim-crosstenant.example").Scan(&count); err != nil {
+		t.Fatalf("count dkim rows: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("a cross-tenant generate must never create a DKIM row, found %d", count)
+	}
+}
+
+func TestGeneratePlatformDomainDKIM_TenantAdminDenied(t *testing.T) {
+	env := buildPlatformDomainLifecycleEnv(t)
+	domID := env.seedDomain(t, 1, "dkim-tenant-denied.example")
+
+	resp, _ := env.dkimMutate(t, "generate", 1, domID, domainDeactivateOpts{token: env.tenantTok, csrf: env.tenantCSRF, idempotencyKey: "k-tenant-denied-dkim"},
+		map[string]any{"selector": "mail", "expected_version": 1})
+	if resp.StatusCode != fiber.StatusForbidden && resp.StatusCode != fiber.StatusNotFound {
+		t.Fatalf("expected tenant-admin denial (403/404), got %d", resp.StatusCode)
+	}
+}
+
+// TestGeneratePlatformDomainDKIM_ConcurrentRequestsProduceExactlyOneConfig
+// races two generate requests carrying the SAME expected_version (both
+// read version=1 before either mutated it) against the same domain.
+// The version-guarded UPDATE inside PlatformDKIMForTenant's locked
+// transaction must allow exactly one to win; the other must observe
+// either a stale-version conflict or an already-configured conflict
+// (never a second DKIM row).
+func TestGeneratePlatformDomainDKIM_ConcurrentRequestsProduceExactlyOneConfig(t *testing.T) {
+	env := buildPlatformDomainLifecycleEnv(t)
+	domID := env.seedDomain(t, 1, "dkim-concurrent.example")
+
+	var wg sync.WaitGroup
+	statuses := make([]int, 2)
+	start := make(chan struct{})
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			resp, _ := env.dkimMutate(t, "generate", 1, domID,
+				domainDeactivateOpts{token: env.psaTok, csrf: env.psaCSRF, idempotencyKey: fmt.Sprintf("k-concurrent-%d", i)},
+				map[string]any{"selector": "mail", "expected_version": 1})
+			statuses[i] = resp.StatusCode
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	successes := 0
+	for _, s := range statuses {
+		if s == fiber.StatusOK {
+			successes++
+		} else if s != fiber.StatusConflict {
+			t.Fatalf("unexpected status %d (want 200 or 409)", s)
+		}
+	}
+	if successes != 1 {
+		t.Fatalf("expected exactly one winner, got %d successes: %v", successes, statuses)
+	}
+
+	var count int
+	if err := env.db.QueryRow("SELECT COUNT(*) FROM coremail_dkim_config WHERE domain = ?", "dkim-concurrent.example").Scan(&count); err != nil {
+		t.Fatalf("count dkim rows: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected exactly one DKIM config row, got %d", count)
 	}
 }

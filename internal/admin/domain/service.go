@@ -643,6 +643,11 @@ type DKIMResult struct {
 	Selector      string `json:"selector"`
 	PublicDNSTxt  string `json:"public_dns_txt"`
 	DNSRecordName string `json:"dns_record_name"`
+	// Version is populated only by tenant-scoped, version-guarded
+	// callers (PlatformDKIMForTenant); zero for the legacy
+	// GetDKIM/PlatformDKIM callers that predate optimistic concurrency
+	// on this route family.
+	Version int `json:"version,omitempty"`
 }
 
 // GenerateDKIM atomically provisions a DKIM key pair for a domain:
@@ -1006,6 +1011,162 @@ func (s *Service) PlatformDKIM(ctx context.Context, domainName, selector, confir
 		Selector:      selector,
 		PublicDNSTxt:  dnsValue,
 		DNSRecordName: fmt.Sprintf("%s._domainkey.%s", selector, d.Name),
+	}, nil
+}
+
+// PlatformDKIMForTenant is the tenant-scoped, version-guarded sibling
+// of PlatformDKIM used by the Platform Super Admin generate/rotate
+// routes. It reuses the exact same DKIM repository, key-generation
+// hook, operability guard, and audit pattern as PlatformDKIM — this
+// is a second ENTRY POINT, not a second DKIM subsystem — but adds two
+// things PlatformDKIM's global-by-name resolution cannot provide:
+//
+//  1. explicit tenant ownership: the domain is resolved by
+//     (id, tenantID) through the same tenant-scoped repository every
+//     other platform route uses, so a foreign tenant's domain id
+//     yields ErrDomainNotFound before any DKIM action runs — never a
+//     cross-tenant generate/rotate;
+//  2. optimistic concurrency: expectedVersion is checked against the
+//     real coremail_domains.version INSIDE the same locked
+//     transaction the operability guard already opens (CheckOperabilityByIDTx
+//     with lock=true takes the row's FOR UPDATE lock on PostgreSQL), and
+//     the domain's version is bumped by exactly one on success — a
+//     stale value is rejected with ErrStaleVersion (409) before any
+//     key material is generated or the existing key is touched.
+//
+// Both PlatformDKIM and this method commit or roll back their DKIM
+// write, domain-state update, version bump, and audit record as one
+// transaction; the private key is never returned, logged, or crosses
+// out of this function.
+func (s *Service) PlatformDKIMForTenant(ctx context.Context, id, tenantID uint, selector, confirmRotation string, expectedVersion int) (*DKIMResult, error) {
+	if s.dkimRepo == nil {
+		return nil, fmt.Errorf("dkim repository unavailable")
+	}
+	if selector == "" {
+		selector = "orvix"
+	}
+	if expectedVersion < 1 {
+		return nil, ErrStaleVersion
+	}
+
+	d, err := s.repo.GetByID(ctx, id, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	if d == nil {
+		return nil, ErrDomainNotFound
+	}
+
+	tx, err := s.repo.BeginTx(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin dkim provision: %w", err)
+	}
+	defer tx.Rollback()
+
+	repo := s.repo.WithTx(tx)
+
+	// Locks the domain row (FOR UPDATE on PostgreSQL) and re-verifies
+	// tenant ownership + operability before anything else — the same
+	// guard PlatformDKIM uses, now scoped to the caller's own tenantID
+	// rather than the resolved row's tenant, so a mismatched tenantID
+	// in the path can never reach this far.
+	if opOut := repo.CheckOperabilityByIDTx(ctx, id, tenantID, true); !opOut.Operational() {
+		return nil, opOut.Err
+	}
+
+	var currentVersion int
+	if err := tx.QueryRow(
+		"SELECT version FROM coremail_domains WHERE id = "+repo.dialect.Placeholder(1)+" AND tenant_id = "+repo.dialect.Placeholder(2),
+		id, tenantID,
+	).Scan(&currentVersion); err != nil {
+		return nil, fmt.Errorf("read domain version: %w", err)
+	}
+	if currentVersion != expectedVersion {
+		return nil, ErrStaleVersion
+	}
+
+	existing, err := s.dkimRepo.GetByDomain(ctx, d.Name, tx)
+	if err != nil {
+		return nil, fmt.Errorf("check dkim config: %w", err)
+	}
+	if existing != nil && confirmRotation != "rotate-dkim-key" {
+		return nil, ErrDKIMAlreadyConfigured
+	}
+
+	privPEM, dnsValue, err := s.dkimKeyGen(selector, d.Name)
+	if err != nil {
+		return nil, fmt.Errorf("dkim keygen: %w", err)
+	}
+
+	action := "domain.dkim.generate"
+	if existing != nil {
+		action = "domain.dkim.rotate"
+		existing.Selector = selector
+		existing.PrivateKeyPEM = privPEM
+		existing.Enabled = true
+		if err := s.dkimRepo.Update(ctx, existing, tx); err != nil {
+			if isUniqueViolation(err) {
+				return nil, ErrDKIMAlreadyConfigured
+			}
+			return nil, fmt.Errorf("update dkim config: %w", err)
+		}
+	} else {
+		cfg := &dkim.DKIMConfig{
+			Domain:        d.Name,
+			Selector:      selector,
+			PrivateKeyPEM: privPEM,
+			Enabled:       true,
+		}
+		if err := s.dkimRepo.Create(ctx, cfg, tx); err != nil {
+			if isUniqueViolation(err) {
+				return nil, ErrDKIMAlreadyConfigured
+			}
+			return nil, fmt.Errorf("save dkim config: %w", err)
+		}
+	}
+
+	if err := repo.UpdateDomainDKIMState(ctx, d.ID, d.TenantID, true, selector); err != nil {
+		return nil, fmt.Errorf("mark domain dkim state: %w", err)
+	}
+
+	newVersion := currentVersion + 1
+	res, err := tx.Exec(
+		"UPDATE coremail_domains SET version = "+repo.dialect.Placeholder(1)+", updated_at = "+repo.dialect.Placeholder(2)+" WHERE id = "+repo.dialect.Placeholder(3)+" AND tenant_id = "+repo.dialect.Placeholder(4)+" AND version = "+repo.dialect.Placeholder(5),
+		newVersion, time.Now().UTC(), id, tenantID, currentVersion,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("bump domain version: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		// A concurrent writer moved the version between the read above
+		// and this guarded UPDATE — reject rather than silently
+		// applying the mutation under a version it no longer matches.
+		return nil, ErrStaleVersion
+	}
+
+	if s.auditStore != nil {
+		entry := &audit.ExtendedEntry{
+			Action:   action,
+			Target:   fmt.Sprintf("domain:%d", d.ID),
+			TargetID: d.ID,
+			TenantID: d.TenantID,
+			Result:   "success",
+			After:    fmt.Sprintf(`{"domain":"%s","selector":"%s"}`, d.Name, selector),
+		}
+		if err := s.auditStore.RecordTx(ctx, tx, entry); err != nil {
+			return nil, err
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit dkim provision: %w", err)
+	}
+
+	return &DKIMResult{
+		Selector:      selector,
+		PublicDNSTxt:  dnsValue,
+		DNSRecordName: fmt.Sprintf("%s._domainkey.%s", selector, d.Name),
+		Version:       newVersion,
 	}, nil
 }
 

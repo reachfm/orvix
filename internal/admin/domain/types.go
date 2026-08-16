@@ -173,6 +173,7 @@ var (
 	ErrInvalidDomainStatus   = fmt.Errorf("unsupported domain status")
 	ErrDKIMAlreadyConfigured = fmt.Errorf("dkim already configured for domain")
 	ErrDKIMNotConfigured     = fmt.Errorf("dkim not configured for domain")
+	ErrStaleVersion          = fmt.Errorf("domain version is stale")
 
 	// Provisioning errors. Each maps to a stable machine-readable code so the
 	// wizard can render an actionable message per field.

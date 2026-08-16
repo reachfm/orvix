@@ -2047,6 +2047,17 @@ func (r *Router) setupRoutes() {
 	protected.Post("/platform/domains/:tenant_id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermDomainsWrite), r.h.CreatePlatformDomain)
 	protected.Post("/platform/domains/:tenant_id/:id/status", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermDomainsWrite), r.h.SetPlatformDomainStatus)
 	protected.Post("/platform/domains/:tenant_id/:id/mail-access-mode", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermDomainsWrite), r.h.SetPlatformDomainMailAccessMode)
+	// Read-only public DNS/DKIM snapshot for an existing domain, and
+	// the canonical DKIM generate/rotate transaction exposed to the
+	// Platform Super Admin surface (API-contract closure, concerns 2/3).
+	// Registered as literal sub-paths of :id — Fiber's router always
+	// prefers a literal segment match over a param match at the same
+	// position, so these can never be shadowed by GetPlatformDomain's
+	// bare ":id" route regardless of declaration order, but they are
+	// still declared immediately alongside it for readability.
+	protected.Get("/platform/domains/:tenant_id/:id/dns", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermDomainsRead), r.h.GetPlatformDomainDNS)
+	protected.Post("/platform/domains/:tenant_id/:id/dkim/generate", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermDomainsWrite), r.h.GeneratePlatformDomainDKIM)
+	protected.Post("/platform/domains/:tenant_id/:id/dkim/rotate", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermDomainsWrite), r.h.RotatePlatformDomainDKIM)
 	// Platform domain lifecycle (Phase 8 production-acceptance
 	// remediation): canonical, audited deactivation/soft-delete. See
 	// platform_domain_lifecycle.go for the full contract.
