@@ -27,6 +27,13 @@ const (
 	EventDKIMSignSuccess EventType = "dkim.sign.success"
 	EventDKIMSignSkipped EventType = "dkim.sign.skipped"
 	EventDKIMSignFailure EventType = "dkim.sign.failure"
+	// EventDKIMConfigError is distinct from EventDKIMSignFailure: it
+	// means the domain IS configured for DKIM but the configuration
+	// could not be read (repository/database error) — as opposed to
+	// EventDKIMSignFailure, where the config was read successfully but
+	// signing itself failed. Both are configured-domain failures that
+	// must fail the delivery attempt closed, never send unsigned.
+	EventDKIMConfigError EventType = "dkim.config.error"
 
 	EventDMARCPass      EventType = "dmarc.pass"
 	EventDMARCFail      EventType = "dmarc.fail"

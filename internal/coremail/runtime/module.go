@@ -17,6 +17,7 @@ import (
 	"github.com/orvix/orvix/internal/coremail"
 	"github.com/orvix/orvix/internal/coremail/antispam"
 	"github.com/orvix/orvix/internal/coremail/delivery"
+	"github.com/orvix/orvix/internal/coremail/dkim"
 	"github.com/orvix/orvix/internal/coremail/imap"
 	"github.com/orvix/orvix/internal/coremail/jmap"
 	"github.com/orvix/orvix/internal/coremail/mailpolicy"
@@ -726,6 +727,16 @@ func (m *Module) initCore(cfg *config.Config, sqlDB *sql.DB) error {
 		m.securitySvc = security.NewService(securityRepo, nil)
 	}
 
+	// Canonical DKIM signer + repository, bound to the SAME sqlDB used by
+	// the admin/platform DKIM lifecycle (router.go's dkimRepo). Every
+	// delivery worker reads through this repository, so a
+	// generate/rotate change becomes visible to outbound signing
+	// immediately, without a server rebuild — and, critically, the
+	// worker's signWithDKIM nil-guard no longer fails open for every
+	// message in production (the root cause of unsigned outbound mail).
+	dkimRepo := dkim.NewSQLRepo(sqlDB)
+	dkimSigner := dkim.NewSigner()
+
 	m.workers = make([]*delivery.DeliveryWorker, 0, workerCount)
 	for i := 0; i < workerCount; i++ {
 		worker := delivery.NewDeliveryWorker(
@@ -738,6 +749,8 @@ func (m *Module) initCore(cfg *config.Config, sqlDB *sql.DB) error {
 		)
 		worker.Observability = m.obs
 		worker.PreferIPv4 = cfg.Outbound.PreferIPv4
+		worker.DKIMSigner = dkimSigner
+		worker.DKIMConfigs = dkimRepo
 		// Canonical mail-access policy on the worker: every outbound
 		// delivery (initial, relay, retry) is policy-checked before
 		// any network I/O.
