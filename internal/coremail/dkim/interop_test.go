@@ -13,8 +13,12 @@ package dkim
 // in one is unlikely to be reproduced identically in the other.
 
 import (
+	"crypto"
+	"crypto/rsa"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/base64"
+	"encoding/pem"
 	"regexp"
 	"strings"
 	"testing"
@@ -94,4 +98,103 @@ func TestDKIM_Interop_SignedMessageBodyHashMatchesIndependentOracle(t *testing.T
 			}
 		})
 	}
+}
+
+var interopHeaderLineRe = regexp.MustCompile(`(?m)^([^:\r\n]+):[ \t]?(.*)$`)
+
+// independentRelaxedHeaderCanon re-derives RFC 6376 §3.4.2 relaxed
+// header-value canonicalization independently of
+// canonicalizeHeaderValue: unfold via regex, collapse WSP via regex,
+// trim — a different code path from the byte-scanner production uses.
+func independentRelaxedHeaderCanon(value string) string {
+	unfolded := interopLineSplitRe.ReplaceAllString(value, " ")
+	collapsed := interopWSPRunRe.ReplaceAllString(unfolded, " ")
+	return strings.TrimSpace(collapsed)
+}
+
+// verifyRSASignatureIndependently re-derives the entire DKIM header
+// hash input from scratch — independent header/value extraction
+// (regex, not splitMessage/parseHeaders), independent relaxed
+// canonicalization (independentRelaxedHeaderCanon, not
+// canonicalizeHeaderValue), and an independently-constructed
+// DKIM-Signature hashing field (built inline here, NOT via
+// dkimSignatureFieldForHashing) — then verifies the RSA signature
+// against the given private key's own public half. This is the
+// mandatory "does not call production canonicalization" oracle: a
+// signer and verifier that only ever check themselves proved
+// insufficient once already (the live e790ac5 failure).
+func verifyRSASignatureIndependently(t *testing.T, rfc822 []byte, sigValue string, privateKeyPEM string) bool {
+	t.Helper()
+
+	headerBlockEnd := strings.Index(string(rfc822), "\r\n\r\n")
+	if headerBlockEnd < 0 {
+		t.Fatal("no header/body separator found")
+	}
+	headerBlock := string(rfc822[:headerBlockEnd])
+
+	type hv struct{ name, value string }
+	var all []hv
+	for _, m := range interopHeaderLineRe.FindAllStringSubmatch(headerBlock, -1) {
+		all = append(all, hv{name: m[1], value: m[2]})
+	}
+
+	hlist := strings.Split(extractTag(sigValue, "h"), ":")
+	// Bottom-up instance selection, independently re-derived (not a
+	// call into canonicalizeHeaders).
+	byName := map[string][]hv{}
+	for _, h := range all {
+		key := strings.ToLower(h.name)
+		byName[key] = append(byName[key], h)
+	}
+	nextIdx := map[string]int{}
+	for k, v := range byName {
+		nextIdx[k] = len(v) - 1
+	}
+
+	var sb strings.Builder
+	for _, name := range hlist {
+		key := strings.ToLower(name)
+		idx, ok := nextIdx[key]
+		if !ok || idx < 0 {
+			continue
+		}
+		h := byName[key][idx]
+		nextIdx[key] = idx - 1
+		sb.WriteString(key)
+		sb.WriteString(":")
+		sb.WriteString(independentRelaxedHeaderCanon(h.value))
+		sb.WriteString("\r\n")
+	}
+
+	// The DKIM-Signature field itself, b= emptied, relaxed-canonicalized,
+	// NO trailing CRLF — constructed independently here rather than via
+	// dkimSignatureFieldForHashing.
+	bTag := "b=" + extractTag(sigValue, "b")
+	sigWithoutB := strings.TrimSuffix(sigValue, bTag) + "b="
+	sb.WriteString("dkim-signature:")
+	sb.WriteString(independentRelaxedHeaderCanon(sigWithoutB))
+
+	sigData := sb.String()
+
+	block, _ := pem.Decode([]byte(privateKeyPEM))
+	if block == nil {
+		t.Fatal("decode private key PEM")
+	}
+	key, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	if err != nil {
+		t.Fatalf("parse private key: %v", err)
+	}
+	rsaKey, ok := key.(*rsa.PrivateKey)
+	if !ok {
+		t.Fatal("key is not RSA")
+	}
+
+	sigBytes, err := base64.StdEncoding.DecodeString(extractTag(sigValue, "b"))
+	if err != nil {
+		t.Fatalf("decode b= signature: %v", err)
+	}
+
+	hash := sha256.Sum256([]byte(sigData))
+	err = rsa.VerifyPKCS1v15(&rsaKey.PublicKey, crypto.SHA256, hash[:], sigBytes)
+	return err == nil
 }

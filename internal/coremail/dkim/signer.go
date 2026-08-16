@@ -190,31 +190,51 @@ func relaxWSP(line []byte) []byte {
 	return out
 }
 
-// canonicalizeHeaders applies the header canonicalization algorithm to selected headers.
-// relaxed: reduces whitespace, unfolds, lowercases.
+// canonicalizeHeaders applies the header canonicalization algorithm to
+// selected headers, per RFC 6376 §3.5/§3.7 header-field selection:
+//
+//   - Output order follows h= (selectedHeaders) order, NOT the order
+//     the headers appear in the message. These usually coincide for a
+//     freshly-composed message, which is how this previously masked
+//     a real spec violation — a message with headers in any other
+//     order would sign the wrong canonical byte sequence.
+//   - When a header name is listed N times in h=, the N SIGNED
+//     instances are the message's own instances of that name taken
+//     from the BOTTOM upward, one per listing, each instance used at
+//     most once (RFC 6376 §3.5: "each ... listing refers to the next
+//     occurrence, working from the bottom of the header field block
+//     to the top").
+//   - A name listed in h= with no (or no more) matching instances in
+//     the message contributes nothing to the canonical output — it is
+//     never treated as an empty/absent header, it is simply skipped.
 func canonicalizeHeaders(headers []header, selectedHeaders []string, canon CanonAlgo) []header {
-	// Build a map for O(1) lookup.
-	selected := make(map[string]bool)
-	for _, h := range selectedHeaders {
-		selected[strings.ToLower(h)] = true
+	byName := make(map[string][]header)
+	for _, h := range headers {
+		key := strings.ToLower(h.Name)
+		byName[key] = append(byName[key], h)
+	}
+	// Countdown index per name: the next unused instance, searching
+	// from the bottom (highest index) of that name's occurrences.
+	nextIdx := make(map[string]int, len(byName))
+	for k, v := range byName {
+		nextIdx[k] = len(v) - 1
 	}
 
-	// Collect selected headers in order.
 	var result []header
-	for _, h := range headers {
-		if selected[strings.ToLower(h.Name)] {
-			if canon == CanonRelaxed {
-				// RFC 6376 §3.4.2: "Convert all header field names
-				// ... to lowercase." Name was previously passed
-				// through unchanged despite a comment claiming this
-				// was "already done via Name field" — it was not.
-				result = append(result, header{
-					Name:  strings.ToLower(h.Name),
-					Value: canonicalizeHeaderValue(h.Value),
-				})
-			} else {
-				result = append(result, h)
-			}
+	for _, name := range selectedHeaders {
+		key := strings.ToLower(name)
+		idx, ok := nextIdx[key]
+		if !ok || idx < 0 {
+			continue
+		}
+		h := byName[key][idx]
+		nextIdx[key] = idx - 1
+		if canon == CanonRelaxed {
+			// RFC 6376 §3.4.2: "Convert all header field names ... to
+			// lowercase."
+			result = append(result, header{Name: strings.ToLower(h.Name), Value: canonicalizeHeaderValue(h.Value)})
+		} else {
+			result = append(result, h)
 		}
 	}
 	return result
@@ -262,8 +282,32 @@ func buildSignatureData(canonHeaders []header, hs HeaderSet, bh, b64sig string) 
 	sigWithoutB := fmt.Sprintf("v=1; a=%s; c=%s/%s; d=%s; s=%s; h=%s; bh=%s; b=",
 		alg, hs.HeaderCanon, hs.BodyCanon, hs.Domain, hs.Selector, hlist, bh)
 
-	hdrText.WriteString(fmt.Sprintf("DKIM-Signature:%s\r\n", sigWithoutB))
+	hdrText.WriteString(dkimSignatureFieldForHashing(sigWithoutB, hs.HeaderCanon))
 	return hdrText.String()
+}
+
+// dkimSignatureFieldForHashing renders the DKIM-Signature header field
+// that participates in the second DKIM hash step, per RFC 6376 §3.7:
+// the field being created — with its b= tag value treated as empty —
+// is canonicalized using the SAME algorithm declared in c= for every
+// other signed header, but unlike every other header this field is
+// the LAST thing hashed and MUST NOT be followed by a trailing CRLF.
+//
+// This function is the single source of truth for that field's bytes
+// so the signer and verifier can never again independently reimplement
+// it and silently drift apart from each other (as they previously did:
+// both wrote "DKIM-Signature:<value>\r\n" — wrong case, wrong
+// canonicalization, and a trailing CRLF that RFC 6376 forbids — and
+// happily verified each other's output while a standards-compliant
+// verifier like Gmail correctly rejected it).
+func dkimSignatureFieldForHashing(sigWithoutB string, canon CanonAlgo) string {
+	name := "DKIM-Signature"
+	value := sigWithoutB
+	if canon == CanonRelaxed {
+		name = strings.ToLower(name)
+		value = canonicalizeHeaderValue(value)
+	}
+	return name + ":" + value
 }
 
 // ── Message Parsing ──────────────────────────────────────────
