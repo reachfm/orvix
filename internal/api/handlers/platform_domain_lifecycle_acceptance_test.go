@@ -377,3 +377,147 @@ func TestDeactivatePlatformDomain_ThenGuardRejectsIt(t *testing.T) {
 		t.Fatalf("expected ErrDomainDisabled from the guard, got %v", out.Err)
 	}
 }
+
+// ── Real domain version projection (API-contract closure, concern 1) ──
+
+func (e *platformDomainLifecycleEnv) getDomain(t *testing.T, tenantID, domainID uint, opts domainDeactivateOpts) (*http.Response, map[string]interface{}) {
+	t.Helper()
+	path := "/api/v1/platform/domains/" + itoa(int64(tenantID)) + "/" + itoa(int64(domainID))
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	if opts.token != "" {
+		req.Header.Set("Authorization", "Bearer "+opts.token)
+	}
+	resp, err := e.router.App().Test(req, fiber.TestConfig{Timeout: 0})
+	if err != nil {
+		t.Fatalf("get domain: %v", err)
+	}
+	raw, _ := io.ReadAll(resp.Body)
+	var out map[string]interface{}
+	_ = json.Unmarshal(raw, &out)
+	return resp, out
+}
+
+func (e *platformDomainLifecycleEnv) listDomains(t *testing.T, tenantID uint, opts domainDeactivateOpts) map[string]interface{} {
+	t.Helper()
+	path := "/api/v1/platform/domains/" + itoa(int64(tenantID))
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	if opts.token != "" {
+		req.Header.Set("Authorization", "Bearer "+opts.token)
+	}
+	resp, err := e.router.App().Test(req, fiber.TestConfig{Timeout: 0})
+	if err != nil {
+		t.Fatalf("list domains: %v", err)
+	}
+	raw, _ := io.ReadAll(resp.Body)
+	var out map[string]interface{}
+	_ = json.Unmarshal(raw, &out)
+	if resp.StatusCode != fiber.StatusOK {
+		t.Fatalf("list domains: expected 200, got %d: %v", resp.StatusCode, out)
+	}
+	return out
+}
+
+func TestGetPlatformDomain_ReturnsRealVersion(t *testing.T) {
+	env := buildPlatformDomainLifecycleEnv(t)
+	domID := env.seedDomain(t, 1, "version-detail.example")
+
+	resp, out := env.getDomain(t, 1, domID, domainDeactivateOpts{token: env.psaTok})
+	if resp.StatusCode != fiber.StatusOK {
+		t.Fatalf("expected 200, got %d: %v", resp.StatusCode, out)
+	}
+	v, ok := out["version"].(float64)
+	if !ok || v != 1 {
+		t.Fatalf("expected version=1 from the real column, got %v", out["version"])
+	}
+}
+
+func TestListPlatformDomains_ReturnsRealVersion(t *testing.T) {
+	env := buildPlatformDomainLifecycleEnv(t)
+	env.seedDomain(t, 1, "version-list.example")
+
+	out := env.listDomains(t, 1, domainDeactivateOpts{token: env.psaTok})
+	domains, ok := out["domains"].([]interface{})
+	if !ok || len(domains) == 0 {
+		t.Fatalf("expected at least one domain, got %v", out)
+	}
+	row := domains[0].(map[string]interface{})
+	v, ok := row["version"].(float64)
+	if !ok || v != 1 {
+		t.Fatalf("expected version=1 in list projection, got %v", row["version"])
+	}
+}
+
+// TestPlatformDomainVersion_RoundTripsThroughGuardedMutation is the
+// decisive test for concern 1: the version GET returns is the exact
+// value the guarded deactivate mutation accepts as expected_version —
+// no separate query, no guessed value, no synthetic counter.
+func TestPlatformDomainVersion_RoundTripsThroughGuardedMutation(t *testing.T) {
+	env := buildPlatformDomainLifecycleEnv(t)
+	domID := env.seedDomain(t, 1, "version-roundtrip.example")
+
+	_, getOut := env.getDomain(t, 1, domID, domainDeactivateOpts{token: env.psaTok})
+	version, ok := getOut["version"].(float64)
+	if !ok {
+		t.Fatalf("GET domain did not return a numeric version: %v", getOut)
+	}
+
+	resp, out := env.deactivate(t, 1, domID, domainDeactivateOpts{token: env.psaTok, csrf: env.psaCSRF, idempotencyKey: "k-version-roundtrip"},
+		map[string]any{"confirm": domainConfirm(domID), "reason": "prove version round-trip", "expected_version": int(version)})
+	if resp.StatusCode != fiber.StatusOK {
+		t.Fatalf("expected 200 using the GET-returned version as expected_version, got %d: %v", resp.StatusCode, out)
+	}
+	newVersion, ok := out["version"].(float64)
+	if !ok || newVersion != version+1 {
+		t.Fatalf("expected version to advance from %v to %v, got %v", version, version+1, out["version"])
+	}
+}
+
+// TestPlatformDomainVersion_StaleValueRejected proves the version this
+// concern adds is actually load-bearing for optimistic concurrency,
+// not just a display field: a version read before a concurrent
+// mutation elsewhere bumped it must be rejected, not silently applied
+// (the already-deactivated-is-idempotent path is a separate, correct
+// behavior covered by TestDeactivatePlatformDomain_AlreadyDeactivatedIsIdempotentNotAnError
+// and deliberately not what this test exercises).
+func TestPlatformDomainVersion_StaleValueRejected(t *testing.T) {
+	env := buildPlatformDomainLifecycleEnv(t)
+	domID := env.seedDomain(t, 1, "version-stale.example")
+
+	_, getOut := env.getDomain(t, 1, domID, domainDeactivateOpts{token: env.psaTok})
+	staleVersion := int(getOut["version"].(float64))
+
+	// Simulate a concurrent mutation elsewhere bumping the real version
+	// out from under the value already read above.
+	if _, err := env.db.Exec("UPDATE coremail_domains SET version = version + 1 WHERE id = ?", domID); err != nil {
+		t.Fatalf("simulate concurrent bump: %v", err)
+	}
+
+	resp, out := env.deactivate(t, 1, domID, domainDeactivateOpts{token: env.psaTok, csrf: env.psaCSRF, idempotencyKey: "k-version-stale"},
+		map[string]any{"confirm": domainConfirm(domID), "reason": "stale retry", "expected_version": staleVersion})
+	if resp.StatusCode != fiber.StatusConflict {
+		t.Fatalf("expected 409 for a stale expected_version, got %d: %v", resp.StatusCode, out)
+	}
+	var status string
+	_ = env.db.QueryRow("SELECT status FROM coremail_domains WHERE id = ?", domID).Scan(&status)
+	if status != "active" {
+		t.Fatalf("domain must be untouched after a version conflict, status=%s", status)
+	}
+}
+
+// TestGetPlatformDomain_CrossTenantDoesNotDiscloseVersion proves the
+// version field added by this concern does not create a new
+// cross-tenant disclosure path — a foreign tenant's domain id must
+// still resolve to the existing non-disclosing not-found response,
+// never a partial body containing the real version.
+func TestGetPlatformDomain_CrossTenantDoesNotDiscloseVersion(t *testing.T) {
+	env := buildPlatformDomainLifecycleEnv(t)
+	domID := env.seedDomain(t, 1, "version-crosstenant.example")
+
+	resp, out := env.getDomain(t, 2, domID, domainDeactivateOpts{token: env.psaTok})
+	if resp.StatusCode != fiber.StatusNotFound {
+		t.Fatalf("expected 404 for a cross-tenant domain id, got %d: %v", resp.StatusCode, out)
+	}
+	if _, present := out["version"]; present {
+		t.Fatalf("cross-tenant response must never include a version field, got %v", out)
+	}
+}

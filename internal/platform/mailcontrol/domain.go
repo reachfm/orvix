@@ -39,6 +39,11 @@ type PlatformDomain struct {
 	MailAccessMode string    `json:"mail_access_mode"`
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at"`
+	// Version is the real optimistic-concurrency counter from
+	// coremail_domains.version. Callers pass this value back as
+	// expected_version on guarded mutations (e.g. .../deactivate); a
+	// stale value is rejected with the existing typed conflict.
+	Version int `json:"version"`
 }
 
 // PlatformDomainList is the stable list envelope.

@@ -239,7 +239,7 @@ func (s *Service) mapPlatformDomain(ctx context.Context, d admindomain.AdminDoma
 		ID: d.ID, TenantID: tenantID, Name: d.Name, Status: d.Status, Plan: d.Plan,
 		Description: d.Description, MailboxCount: d.MailboxCount, AliasCount: d.AliasCount,
 		DKIMEnabled: d.DKIMEnabled, DKIMSelector: d.DKIMSelector, DMARCEnabled: d.DMARCEnabled,
-		MailAccessMode: string(mode), CreatedAt: d.CreatedAt, UpdatedAt: d.UpdatedAt,
+		MailAccessMode: string(mode), CreatedAt: d.CreatedAt, UpdatedAt: d.UpdatedAt, Version: d.Version,
 	}
 }
 
@@ -278,7 +278,7 @@ func (s *Service) ListDomains(ctx context.Context, f PlatformDomainFilter) (*Pla
 			ID: d.ID, TenantID: f.TenantID, Name: d.Name, Status: d.Status, Plan: d.Plan,
 			Description: d.Description, MailboxCount: d.MailboxCount, AliasCount: d.AliasCount,
 			DKIMEnabled: d.DKIMEnabled, DKIMSelector: d.DKIMSelector, DMARCEnabled: d.DMARCEnabled,
-			MailAccessMode: string(mode), CreatedAt: d.CreatedAt, UpdatedAt: d.UpdatedAt,
+			MailAccessMode: string(mode), CreatedAt: d.CreatedAt, UpdatedAt: d.UpdatedAt, Version: d.Version,
 		})
 	}
 	return &PlatformDomainList{Domains: out, Total: total, Limit: sanitizeLimit(f.Limit), Offset: f.Offset}, nil
@@ -304,7 +304,7 @@ func (s *Service) GetDomain(ctx context.Context, id, tenantID uint) (*PlatformDo
 		ID: d.ID, TenantID: tenantID, Name: d.Name, Status: d.Status, Plan: d.Plan,
 		Description: d.Description, MailboxCount: d.MailboxCount, AliasCount: int(aliases),
 		DKIMEnabled: d.DKIMEnabled, DKIMSelector: d.DKIMSelector, DMARCEnabled: d.DMARCEnabled,
-		MailAccessMode: string(mode), CreatedAt: d.CreatedAt, UpdatedAt: d.UpdatedAt,
+		MailAccessMode: string(mode), CreatedAt: d.CreatedAt, UpdatedAt: d.UpdatedAt, Version: d.Version,
 	}, nil
 }
 

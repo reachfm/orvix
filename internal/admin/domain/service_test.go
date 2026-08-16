@@ -42,6 +42,7 @@ func newDomainTestDB(t *testing.T) *sql.DB {
 		dkim_selector TEXT,
 		dmarc_enabled INTEGER DEFAULT 0,
 		mail_access_mode TEXT NOT NULL DEFAULT 'internal_external',
+		version INTEGER NOT NULL DEFAULT 1,
 		created_at DATETIME,
 		updated_at DATETIME,
 		deleted_at DATETIME
@@ -251,6 +252,7 @@ func TestDomainMutationRollsBackWhenAuditWriteFails(t *testing.T) {
 		dkim_selector TEXT,
 		dmarc_enabled INTEGER DEFAULT 0,
 		mail_access_mode TEXT NOT NULL DEFAULT 'internal_external',
+		version INTEGER NOT NULL DEFAULT 1,
 		created_at DATETIME,
 		updated_at DATETIME,
 		deleted_at DATETIME

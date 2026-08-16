@@ -24,6 +24,12 @@ type AdminDomain struct {
 	DMARCEnabled bool   `json:"dmarc_enabled"`
 	MailboxCount int    `json:"mailbox_count"`
 	AliasCount   int    `json:"alias_count"`
+	// Version is the real optimistic-concurrency counter from
+	// coremail_domains.version (added for the deactivate workflow —
+	// see internal/api/handlers/platform_domain_lifecycle.go). Every
+	// guarded UPDATE bumps it; callers must pass the value read here
+	// back as expected_version on the next guarded mutation.
+	Version int `json:"version"`
 	// StorageUsedBytes/MessageCount are real aggregates over
 	// coremail_mailboxes.used_bytes/msg_count, computed in the same
 	// batched list query as MailboxCount/AliasCount above (correlated

@@ -93,7 +93,7 @@ func (r *DomainAdminRepo) List(ctx context.Context, filter DomainFilter) ([]Admi
 		(SELECT v.status FROM customer_domain_verifications v WHERE v.domain_id=d.id ORDER BY v.created_at DESC LIMIT 1),
 		COALESCE((SELECT v.score FROM customer_domain_verifications v WHERE v.domain_id=d.id ORDER BY v.created_at DESC LIMIT 1),0),
 		(SELECT v.checked_at FROM customer_domain_verifications v WHERE v.domain_id=d.id ORDER BY v.created_at DESC LIMIT 1),
-		d.created_at, d.updated_at
+		d.created_at, d.updated_at, COALESCE(d.version,1)
 		FROM coremail_domains d WHERE ` + clause + ` ORDER BY d.name ASC LIMIT ` + r.dialect.Placeholder(len(args)+1) + ` OFFSET ` + r.dialect.Placeholder(len(args)+2)
 	args = append(args, filter.Limit, filter.Offset)
 
@@ -115,7 +115,7 @@ func (r *DomainAdminRepo) List(ctx context.Context, filter DomainFilter) ([]Admi
 			&d.MailboxCount, &d.AliasCount,
 			&d.StorageUsedBytes, &d.MessageCount,
 			&dnsHealth, &d.DNSScore, &dnsCheckedAt,
-			&d.CreatedAt, &d.UpdatedAt); err != nil {
+			&d.CreatedAt, &d.UpdatedAt, &d.Version); err != nil {
 			return nil, 0, err
 		}
 		d.DKIMEnabled = dkimEnabled != 0
@@ -143,7 +143,7 @@ func (r *DomainAdminRepo) GetByID(ctx context.Context, id, tenantID uint) (*Admi
 			d.dkim_enabled, COALESCE(d.dkim_selector,'mail'), d.dmarc_enabled,
 			COALESCE((SELECT COUNT(*) FROM coremail_mailboxes m WHERE m.domain_id=d.id AND m.deleted_at IS NULL),0),
 			COALESCE((SELECT COUNT(*) FROM coremail_aliases a WHERE a.domain_id=d.id AND a.deleted_at IS NULL),0),
-			d.created_at, d.updated_at
+			d.created_at, d.updated_at, COALESCE(d.version,1)
 		FROM coremail_domains d WHERE d.id = `+r.dialect.Placeholder(1)+` AND d.tenant_id = `+r.dialect.Placeholder(2)+` AND d.deleted_at IS NULL`, id, tenantID)
 	return scanAdminDomain(row)
 }
@@ -167,9 +167,14 @@ func (r *DomainAdminRepo) Create(ctx context.Context, d *AdminDomain) (*AdminDom
 	// unchanged. The legacy CreateDomain entrypoint applies the historic
 	// 500/50/10240 defaults itself so its behaviour is untouched.
 
-	insert := "INSERT INTO coremail_domains (tenant_id, name, status, plan, description, max_mailboxes, max_aliases, max_quota_mb, dkim_enabled, dkim_selector, dmarc_enabled, created_at, updated_at) VALUES (" + r.dialect.Placeholders(13) + ")"
+	// version is explicitly inserted as 1 (matching the column's own
+	// DEFAULT 1) rather than left to the default so the freshly
+	// created row's real starting version is unambiguous — the same
+	// value the row would get anyway, not a fabricated one.
+	d.Version = 1
+	insert := "INSERT INTO coremail_domains (tenant_id, name, status, plan, description, max_mailboxes, max_aliases, max_quota_mb, dkim_enabled, dkim_selector, dmarc_enabled, created_at, updated_at, version) VALUES (" + r.dialect.Placeholders(14) + ")"
 	args := []any{d.TenantID, d.Name, d.Status, d.Plan, d.Description, d.MaxMailboxes, d.MaxAliases, d.MaxQuotaMB,
-		r.databaseBool(d.DKIMEnabled), d.DKIMSelector, r.databaseBool(d.DMARCEnabled), d.CreatedAt, d.UpdatedAt}
+		r.databaseBool(d.DKIMEnabled), d.DKIMSelector, r.databaseBool(d.DMARCEnabled), d.CreatedAt, d.UpdatedAt, d.Version}
 	if r.dialect.IsPostgres() {
 		// PostgreSQL has no LastInsertId: the id is returned by the
 		// INSERT itself. This is the same dialect-aware pattern the
@@ -227,7 +232,7 @@ func (r *DomainAdminRepo) GetByName(ctx context.Context, name string, tenantID u
 			d.dkim_enabled, COALESCE(d.dkim_selector,'mail'), d.dmarc_enabled,
 			COALESCE((SELECT COUNT(*) FROM coremail_mailboxes m WHERE m.domain_id=d.id AND m.deleted_at IS NULL),0),
 			COALESCE((SELECT COUNT(*) FROM coremail_aliases a WHERE a.domain_id=d.id AND a.deleted_at IS NULL),0),
-			d.created_at, d.updated_at
+			d.created_at, d.updated_at, COALESCE(d.version,1)
 		FROM coremail_domains d WHERE d.name = `+r.dialect.Placeholder(1)+` AND d.tenant_id = `+r.dialect.Placeholder(2)+` AND d.deleted_at IS NULL`, name, tenantID)
 	return scanAdminDomain(row)
 }
@@ -271,7 +276,7 @@ func (r *DomainAdminRepo) GetDomainForVerification(ctx context.Context, domainID
 			d.dkim_enabled, COALESCE(d.dkim_selector,'mail'), d.dmarc_enabled,
 			COALESCE((SELECT COUNT(*) FROM coremail_mailboxes m WHERE m.domain_id=d.id AND m.deleted_at IS NULL),0),
 			COALESCE((SELECT COUNT(*) FROM coremail_aliases a WHERE a.domain_id=d.id AND a.deleted_at IS NULL),0),
-			d.created_at, d.updated_at
+			d.created_at, d.updated_at, COALESCE(d.version,1)
 		FROM coremail_domains d WHERE d.id = `+r.dialect.Placeholder(1)+` AND d.tenant_id = `+r.dialect.Placeholder(2)+` AND d.deleted_at IS NULL`, domainID, tenantID)
 	return scanAdminDomain(row)
 }
@@ -318,7 +323,7 @@ func (r *DomainAdminRepo) GetByNameGlobalDomain(ctx context.Context, name string
 			d.dkim_enabled, COALESCE(d.dkim_selector,'mail'), d.dmarc_enabled,
 			COALESCE((SELECT COUNT(*) FROM coremail_mailboxes m WHERE m.domain_id=d.id AND m.deleted_at IS NULL),0),
 			COALESCE((SELECT COUNT(*) FROM coremail_aliases a WHERE a.domain_id=d.id AND a.deleted_at IS NULL),0),
-			d.created_at, d.updated_at
+			d.created_at, d.updated_at, COALESCE(d.version,1)
 		FROM coremail_domains d WHERE d.name = `+r.dialect.Placeholder(1)+` AND d.deleted_at IS NULL`, name)
 	return scanAdminDomain(row)
 }
@@ -1082,7 +1087,7 @@ func scanAdminDomain(row interface {
 	err := row.Scan(&d.ID, &d.TenantID, &d.Name, &d.Status, &d.Plan, &d.Description,
 		&d.MaxMailboxes, &d.MaxAliases, &d.MaxQuotaMB, &d.DefaultMailboxQuotaMB,
 		&dkimEnabled, &d.DKIMSelector, &dmarcEnabled,
-		&d.MailboxCount, &d.AliasCount, &d.CreatedAt, &d.UpdatedAt)
+		&d.MailboxCount, &d.AliasCount, &d.CreatedAt, &d.UpdatedAt, &d.Version)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
