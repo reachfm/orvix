@@ -20,7 +20,25 @@ export function resetCreatedCalls() {
   createdCalls.length = 0;
 }
 
-export async function mockProvisioningAPI(page: Page) {
+/**
+ * Test-controlled gate for the bulk-import job's "running" -> "completed"
+ * transition. Replaces a wall-clock/poll-count race (the mocked job used
+ * to flip to "completed" on exactly the 2nd poll, which could race ahead
+ * of Playwright observing the "running" state under full-suite CPU load)
+ * with an explicit, deterministic switch: the job stays "running" on
+ * every automatic poll until the test flips `allowCompletion = true`,
+ * so the test can first PROVE the polling loop is genuinely alive (via
+ * real request-level evidence) before ever allowing the terminal state.
+ */
+export interface BulkJobPollController {
+  allowCompletion: boolean;
+}
+
+export function createBulkJobPollController(): BulkJobPollController {
+  return { allowCompletion: false };
+}
+
+export async function mockProvisioningAPI(page: Page, opts: { bulkJobController?: BulkJobPollController } = {}) {
   const json = (route: Route, body: unknown, status = 200) =>
     route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
 
@@ -178,8 +196,21 @@ export async function mockProvisioningAPI(page: Page) {
   });
 
   await page.route("**/api/v1/platform/mailboxes/bulk/7/jobs/501", async (r) => {
+    const req = r.request();
     pollCount += 1;
-    const status = executeCallCount === 0 ? "ready" : pollCount < 2 ? "running" : "completed";
+    createdCalls.push({ url: req.url(), method: req.method(), headers: await req.headers(), body: `poll-#${pollCount}` });
+    let status: "ready" | "running" | "completed";
+    if (executeCallCount === 0) {
+      status = "ready";
+    } else if (opts.bulkJobController) {
+      // Deterministic, test-controlled transition — never completes
+      // until the test explicitly says so, however many polls occur.
+      status = opts.bulkJobController.allowCompletion ? "completed" : "running";
+    } else {
+      // Default behaviour for tests that don't care about the terminal
+      // transition's exact timing.
+      status = pollCount < 2 ? "running" : "completed";
+    }
     return json(r, {
       job: {
         id: 501, tenant_id: 7, domain_id: 1, status, strategy: "partial", conflict_policy: "fail",

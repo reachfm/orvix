@@ -32,6 +32,14 @@ export interface DomainsContractOptions {
    * so the stale-version UX can be exercised in the browser.
    */
   conflictOnFirstMutation?: boolean;
+  /**
+   * Per-domain-id sequence of POST .../dns/verify responses, consumed
+   * in order across successive calls (so a test can prove "Re-check
+   * DNS" moves from e.g. mismatch to matched). The last entry repeats
+   * for any call beyond the array length. Domains with no entry get a
+   * default "everything matches dns_requirements" response.
+   */
+  verifyResponses?: Record<number, unknown[]>;
 }
 
 export async function mockPlatformDomainsAPI(page: Page, opts: DomainsContractOptions = {}) {
@@ -83,9 +91,12 @@ export async function mockPlatformDomainsAPI(page: Page, opts: DomainsContractOp
     version: state.beta.version,
   });
 
-  const DNS_REQUIREMENTS = (name: string) => [
+  const DNS_REQUIREMENTS = (name: string, dkim?: { selector: string; txt: string }) => [
     { name, type: "MX", value: "mail.orvix.email", ttl: 3600, priority: 10, required: true, purpose: "inbound mail routing" },
     { name, type: "TXT", value: "v=spf1 include:orvix.email ~all", ttl: 3600, required: true, purpose: "SPF" },
+    ...(dkim
+      ? [{ name: `${dkim.selector}._domainkey.${name}`, type: "TXT", value: dkim.txt, ttl: 3600, required: true, purpose: "dkim" }]
+      : []),
   ];
 
   const record = async (r: Route) => {
@@ -166,7 +177,7 @@ export async function mockPlatformDomainsAPI(page: Page, opts: DomainsContractOp
       dkim_selector: state.acme.dkimSelector || undefined,
       dkim_dns_record_name: state.acme.dkimConfigured ? `${state.acme.dkimSelector}._domainkey.acme.example` : undefined,
       dkim_public_dns_txt: state.acme.dkimConfigured ? state.acme.dkimTxt : undefined,
-      dns_requirements: DNS_REQUIREMENTS("acme.example"),
+      dns_requirements: DNS_REQUIREMENTS("acme.example", state.acme.dkimConfigured ? { selector: state.acme.dkimSelector, txt: state.acme.dkimTxt } : undefined),
       dns_next_step: "publish_and_verify_dns",
     });
   });
@@ -180,9 +191,34 @@ export async function mockPlatformDomainsAPI(page: Page, opts: DomainsContractOp
       dkim_selector: state.beta.dkimSelector || undefined,
       dkim_dns_record_name: state.beta.dkimConfigured ? `${state.beta.dkimSelector}._domainkey.beta.example` : undefined,
       dkim_public_dns_txt: state.beta.dkimConfigured ? state.beta.dkimTxt : undefined,
-      dns_requirements: DNS_REQUIREMENTS("beta.example"),
+      dns_requirements: DNS_REQUIREMENTS("beta.example", state.beta.dkimConfigured ? { selector: state.beta.dkimSelector, txt: state.beta.dkimTxt } : undefined),
       dns_next_step: "publish_and_verify_dns",
     });
+  });
+
+  // ── Live public-DNS verification ─────────────────────────────────
+  const verifyCallCounts: Record<number, number> = {};
+  const defaultVerifyResponse = (domainId: number, name: string) => {
+    const st = domainId === 1 ? state.acme : state.beta;
+    const reqs = DNS_REQUIREMENTS(name, st.dkimConfigured ? { selector: st.dkimSelector, txt: st.dkimTxt } : undefined);
+    const records = reqs.map((rec) => ({ ...rec, status: "verified", verified: true, observed: rec.type === "MX" ? "10 mail.orvix.email" : rec.value }));
+    return {
+      tenant_id: 7, domain_id: domainId, domain: name, checked_at: "2026-01-05T08:55:00Z",
+      records, total_count: records.length, matched_count: records.length, issue_count: 0, all_verified: true,
+    };
+  };
+  await page.route(/\/api\/v1\/platform\/domains\/7\/(1|2)\/dns\/verify$/, async (r) => {
+    await record(r);
+    const match = r.request().url().match(/\/platform\/domains\/7\/(\d+)\/dns\/verify$/);
+    const domainId = match ? Number(match[1]) : 0;
+    const name = domainId === 1 ? "acme.example" : "beta.example";
+    verifyCallCounts[domainId] = (verifyCallCounts[domainId] ?? 0) + 1;
+    const sequence = opts.verifyResponses?.[domainId];
+    if (sequence && sequence.length > 0) {
+      const idx = Math.min(verifyCallCounts[domainId] - 1, sequence.length - 1);
+      return json(r, sequence[idx]);
+    }
+    return json(r, defaultVerifyResponse(domainId, name));
   });
 
   // ── Domain detail / list ─────────────────────────────────────────

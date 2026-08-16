@@ -7,6 +7,7 @@ import {
   applyTenantScope,
   createdCalls,
   resetCreatedCalls,
+  createBulkJobPollController,
 } from "./domain-mailbox-provisioning-fixtures";
 import { mockMailControlAPI } from "./mail-control-fixtures";
 
@@ -177,7 +178,14 @@ test.describe("Platform Bulk Mailbox Provisioning (CSV/XLSX import)", () => {
   });
 
   test("runs the full stage -> validate -> create job -> execute -> poll -> terminal workflow, preventing duplicate submits", async ({ page }) => {
-    await mockProvisioningAPI(page);
+    // Deterministic job-completion gate: the mocked job stays "running"
+    // on every automatic poll until this test explicitly releases it —
+    // see createBulkJobPollController's doc comment for why (this
+    // replaces a poll-count/wall-clock race that could let "completed"
+    // arrive before Playwright observed the "running" state under
+    // full-suite CPU load).
+    const jobController = createBulkJobPollController();
+    await mockProvisioningAPI(page, { bulkJobController: jobController });
     await openPlatformShell(page);
     await page.getByRole("button", { name: "Bulk Import", exact: true }).click();
     await applyTenantScope(page);
@@ -198,8 +206,29 @@ test.describe("Platform Bulk Mailbox Provisioning (CSV/XLSX import)", () => {
     const jobCreateCalls = createdCalls.filter((c) => c.method === "POST" && c.url.endsWith("/platform/mailboxes/bulk/7/jobs"));
     expect(jobCreateCalls.length).toBe(1);
 
+    const pollCallCount = () =>
+      createdCalls.filter((c) => c.method === "GET" && c.url.endsWith("/platform/mailboxes/bulk/7/jobs/501")).length;
+
     await page.getByRole("button", { name: "Execute job" }).click();
     await expect(page.getByText(/Refreshing automatically/)).toBeVisible();
+
+    // Prove the automatic polling loop is genuinely alive with
+    // request-level evidence — not a wall-clock wait. The job stays
+    // "running" for as long as we hold allowCompletion=false, so any
+    // increase in the GET .../jobs/501 count is a REAL follow-up poll
+    // the frontend issued on its own refetch interval, deterministically
+    // observed rather than raced against.
+    const pollCountAtRunning = pollCallCount();
+    await expect
+      .poll(pollCallCount, { message: "waiting for an automatic follow-up status poll", timeout: 10000 })
+      .toBeGreaterThan(pollCountAtRunning);
+    // Still rendered as running/refreshing — the extra poll did not
+    // secretly complete the job (it can't: allowCompletion is false).
+    await expect(page.getByText(/Refreshing automatically/)).toBeVisible();
+
+    // Only now release the fixture — the NEXT automatic poll (or the
+    // one after) returns completed, and the terminal state renders.
+    jobController.allowCompletion = true;
     await expect(page.getByText("Completed")).toBeVisible({ timeout: 15000 });
 
     const executeCalls = createdCalls.filter((c) => c.url.includes("/execute"));

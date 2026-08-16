@@ -224,3 +224,145 @@ test.describe("Platform Domains — stale-version conflict", () => {
     await expect(drawer.getByRole("button", { name: "Reload current state" })).toBeVisible();
   });
 });
+
+test.describe("Platform Domains — live DNS verification", () => {
+  test.beforeEach(() => resetDomainCalls());
+
+  test("matching records render a green Matched state with visible text, not color alone", async ({ page }) => {
+    await mockPlatformDomainsAPI(page);
+    await openDomainsPage(page);
+
+    await page.getByRole("cell", { name: "acme.example", exact: true }).click();
+    const drawer = page.getByLabel("acme.example");
+    await drawer.getByRole("tab", { name: "DNS Setup" }).click();
+
+    await expect(drawer.getByText("All DNS records match")).toBeVisible();
+    await expect(drawer.getByText(/3 of 3 matched/)).toBeVisible();
+    await expect(drawer.getByText("Matched").first()).toBeVisible();
+
+    await expect
+      .poll(() => domainCalls.filter((c) => /\/platform\/domains\/7\/1\/dns\/verify$/.test(c.url) && c.method === "POST").length)
+      .toBeGreaterThan(0);
+  });
+
+  test("mismatching records render a red Mismatch state with the actual published value visible", async ({ page }) => {
+    await mockPlatformDomainsAPI(page, {
+      verifyResponses: {
+        1: [{
+          tenant_id: 7, domain_id: 1, domain: "acme.example", checked_at: "2026-01-05T08:55:00Z",
+          records: [
+            { name: "acme.example", type: "MX", value: "mail.orvix.email", ttl: 3600, priority: 10, required: true, purpose: "inbound mail routing", status: "verified", verified: true, observed: "10 mail.orvix.email" },
+            { name: "acme.example", type: "TXT", value: "v=spf1 include:orvix.email ~all", ttl: 3600, required: true, purpose: "SPF", status: "mismatch", verified: false, observed: "v=spf1 include:wrongvendor.example ~all", reason: "SPF exists but differs from generated plan" },
+          ],
+          total_count: 2, matched_count: 1, issue_count: 1, all_verified: false,
+        }],
+      },
+    });
+    await openDomainsPage(page);
+
+    await page.getByRole("cell", { name: "acme.example", exact: true }).click();
+    const drawer = page.getByLabel("acme.example");
+    await drawer.getByRole("tab", { name: "DNS Setup" }).click();
+
+    await expect(drawer.getByText("DNS configuration needs attention")).toBeVisible();
+    await expect(drawer.getByText("Mismatch")).toBeVisible();
+    await expect(drawer.getByText("v=spf1 include:orvix.email ~all")).toBeVisible();
+    await expect(drawer.getByText("v=spf1 include:wrongvendor.example ~all")).toBeVisible();
+  });
+
+  test("missing records render a red Missing state with Actual: Not found", async ({ page }) => {
+    await mockPlatformDomainsAPI(page, {
+      verifyResponses: {
+        2: [{
+          tenant_id: 7, domain_id: 2, domain: "beta.example", checked_at: "2026-01-05T08:55:00Z",
+          records: [
+            { name: "beta.example", type: "MX", value: "mail.orvix.email", ttl: 3600, priority: 10, required: true, purpose: "inbound mail routing", status: "missing", verified: false, reason: "no MX records found" },
+            { name: "beta.example", type: "TXT", value: "v=spf1 include:orvix.email ~all", ttl: 3600, required: true, purpose: "SPF", status: "missing", verified: false, reason: "no SPF TXT record found" },
+          ],
+          total_count: 2, matched_count: 0, issue_count: 2, all_verified: false,
+        }],
+      },
+    });
+    await openDomainsPage(page);
+
+    await page.getByRole("cell", { name: "beta.example", exact: true }).click();
+    const drawer = page.getByLabel("beta.example");
+    await drawer.getByRole("tab", { name: "DNS Setup" }).click();
+
+    await expect(drawer.getByText("Missing").first()).toBeVisible();
+    await expect(drawer.getByText("Not found").first()).toBeVisible();
+  });
+
+  test("DKIM is never falsely green for a wrong/old public key — the DKIM row in DNS Setup shows Mismatch", async ({ page }) => {
+    await mockPlatformDomainsAPI(page, {
+      verifyResponses: {
+        1: [{
+          tenant_id: 7, domain_id: 1, domain: "acme.example", checked_at: "2026-01-05T08:55:00Z",
+          records: [
+            { name: "mail._domainkey.acme.example", type: "TXT", value: "v=DKIM1; k=rsa; p=CURRENTPUBLICKEYDATA", ttl: 3600, required: true, purpose: "dkim", status: "mismatch", verified: false, observed: "v=DKIM1; k=rsa; p=OLDROTATEDOUTKEY", reason: "DKIM record exists but public key differs" },
+          ],
+          total_count: 1, matched_count: 0, issue_count: 1, all_verified: false,
+        }],
+      },
+    });
+    await openDomainsPage(page);
+
+    await page.getByRole("cell", { name: "acme.example", exact: true }).click();
+    const drawer = page.getByLabel("acme.example");
+    await drawer.getByRole("tab", { name: "DNS Setup" }).click();
+
+    await expect(drawer.getByText("Mismatch")).toBeVisible();
+    await expect(drawer.getByText(/OLDROTATEDOUTKEY/)).toBeVisible();
+    // The DKIM row specifically must never read as Matched.
+    const dkimRow = drawer.locator("li", { has: page.getByText("dkim") });
+    await expect(dkimRow.getByText("Matched")).toHaveCount(0);
+  });
+
+  test("Re-check DNS re-issues verification and updates the rendered status from Missing to Matched", async ({ page }) => {
+    await mockPlatformDomainsAPI(page, {
+      verifyResponses: {
+        2: [
+          {
+            tenant_id: 7, domain_id: 2, domain: "beta.example", checked_at: "2026-01-05T08:00:00Z",
+            records: [{ name: "beta.example", type: "MX", value: "mail.orvix.email", ttl: 3600, priority: 10, required: true, purpose: "inbound mail routing", status: "missing", verified: false, reason: "no MX records found" }],
+            total_count: 1, matched_count: 0, issue_count: 1, all_verified: false,
+          },
+          {
+            tenant_id: 7, domain_id: 2, domain: "beta.example", checked_at: "2026-01-05T08:10:00Z",
+            records: [{ name: "beta.example", type: "MX", value: "mail.orvix.email", ttl: 3600, priority: 10, required: true, purpose: "inbound mail routing", status: "verified", verified: true, observed: "10 mail.orvix.email" }],
+            total_count: 1, matched_count: 1, issue_count: 0, all_verified: true,
+          },
+        ],
+      },
+    });
+    await openDomainsPage(page);
+
+    await page.getByRole("cell", { name: "beta.example", exact: true }).click();
+    const drawer = page.getByLabel("beta.example");
+    await drawer.getByRole("tab", { name: "DNS Setup" }).click();
+
+    await expect(drawer.getByText("Missing").first()).toBeVisible();
+
+    await drawer.getByRole("button", { name: "Re-check DNS" }).click();
+
+    await expect(drawer.getByText("All DNS records match")).toBeVisible();
+    await expect(drawer.getByText("Matched").first()).toBeVisible();
+    await expect
+      .poll(() => domainCalls.filter((c) => /\/platform\/domains\/7\/2\/dns\/verify$/.test(c.url)).length)
+      .toBe(2);
+  });
+
+  test("desktop and mobile viewports both render the verification summary and per-record status usably", async ({ page }, testInfo) => {
+    await mockPlatformDomainsAPI(page);
+    await openDomainsPage(page);
+
+    await page.getByRole("cell", { name: "acme.example", exact: true }).click();
+    const drawer = page.getByLabel("acme.example");
+    await drawer.getByRole("tab", { name: "DNS Setup" }).click();
+
+    await expect(drawer.getByText("All DNS records match")).toBeVisible();
+    await expect(drawer.getByRole("button", { name: "Re-check DNS" })).toBeVisible();
+    // Sanity: the project actually varies viewport (desktop-chrome vs mobile-chromium).
+    expect(testInfo.project.name).toMatch(/desktop-chrome|mobile-chromium/);
+  });
+});

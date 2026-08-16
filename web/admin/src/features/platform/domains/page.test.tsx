@@ -80,6 +80,21 @@ describe("features/platform/domains (platform routes)", () => {
           dns_next_step: "publish_and_verify_dns",
         });
       }
+      if (path === "/platform/domains/7/2/dns/verify") {
+        return Promise.resolve({
+          tenant_id: 7, domain_id: 2, domain: "beta.example", checked_at: "2026-01-05T08:55:00Z",
+          records: [
+            { name: "relay.orvix.email", type: "MX", value: "relay.orvix.email", ttl: 3600, priority: 10, required: true, purpose: "Mail relay", status: "verified", verified: true, observed: "10 relay.orvix.email" },
+          ],
+          total_count: 1, matched_count: 1, issue_count: 0, all_verified: true,
+        });
+      }
+      if (path === "/platform/domains/7/1/dns/verify") {
+        return Promise.resolve({
+          tenant_id: 7, domain_id: 1, domain: "acme.example", checked_at: "2026-01-05T08:55:00Z",
+          records: [], total_count: 0, matched_count: 0, issue_count: 0, all_verified: true,
+        });
+      }
       if (path.startsWith("/platform/domains/7/1")) {
         return Promise.resolve(DOMAINS.domains[0]);
       }
@@ -468,5 +483,240 @@ describe("features/platform/domains (platform routes)", () => {
     await waitFor(() => expect(screen.getByRole("alert")).toBeInTheDocument());
     expect(screen.getByText("Not configured")).toBeInTheDocument(); // no fabricated success state
     expect(screen.getByRole("button", { name: "Reload current state" })).toBeInTheDocument();
+  });
+
+  // ── DKIM canonicalization + live DNS verification regression barrier ──
+
+  it("DNS Setup auto-verifies once on open, calling the exact POST .../dns/verify route with tenant/domain ids", async () => {
+    renderPage(7);
+    await waitFor(() => expect(screen.getByText("beta.example")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("beta.example"));
+    await waitFor(() => expect(screen.getByRole("tab", { name: "DNS Setup" })).toBeInTheDocument());
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "DNS Setup" }));
+
+    await waitFor(() => {
+      const calls = mockedRequest.mock.calls.filter((c) => c[0] === "/platform/domains/7/2/dns/verify");
+      expect(calls.length).toBe(1);
+      expect((calls[0][1] as any)?.method).toBe("POST");
+    });
+  });
+
+  it("does NOT auto-fire DNS verification when the DNS Setup tab is never visited (Overview/Lifecycle only)", async () => {
+    renderPage(7);
+    await waitFor(() => expect(screen.getByText("beta.example")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("beta.example"));
+    // Drawer opens on Overview by default; the live DNS snapshot query
+    // still fires (it's needed for the DKIM Overview summary), but the
+    // verify MUTATION must not fire until DNS Setup is actually opened.
+    await waitFor(() => expect(screen.getByRole("tab", { name: "Overview" })).toBeInTheDocument());
+    expect(screen.queryByText("Lifecycle status")).not.toBeInTheDocument(); // sanity: still on overview
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "Lifecycle" }));
+    await waitFor(() => expect(screen.getByText("Lifecycle status")).toBeInTheDocument());
+
+    expect(mockedRequest.mock.calls.filter((c) => c[0] === "/platform/domains/7/2/dns/verify")).toHaveLength(0);
+
+    // Now visit DNS Setup — exactly then does verification fire, exactly once.
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "DNS Setup" }));
+    await waitFor(() => {
+      expect(mockedRequest.mock.calls.filter((c) => c[0] === "/platform/domains/7/2/dns/verify")).toHaveLength(1);
+    });
+
+    // Switching away and back must not re-fire it a second time.
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "Overview" }));
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "DNS Setup" }));
+    await new Promise((r) => setTimeout(r, 50));
+    expect(mockedRequest.mock.calls.filter((c) => c[0] === "/platform/domains/7/2/dns/verify")).toHaveLength(1);
+  });
+
+  it("shows a 'Checking…' state while verification is in flight, then Matched with visible text and no color-only signal", async () => {
+    renderPage(7);
+    let resolveVerify!: (v: unknown) => void;
+    mockedRequest.mockImplementation((path: string) => {
+      if (path === "/platform/domains/7/2/dns/verify") {
+        return new Promise((resolve) => { resolveVerify = resolve; });
+      }
+      if (path === "/platform/domains/7/2/dns") {
+        return Promise.resolve({
+          tenant_id: 7, domain_id: 2, domain: "beta.example", version: 1, status: "suspended", dkim_configured: false,
+          dns_requirements: [{ name: "relay.orvix.email", type: "MX", value: "relay.orvix.email", ttl: 3600, priority: 10, required: true, purpose: "Mail relay" }],
+          dns_next_step: "publish_and_verify_dns",
+        });
+      }
+      if (path.startsWith("/platform/organizations")) return Promise.resolve({ organizations: [{ id: 7, name: "Acme", slug: "acme", domain: "acme.example", plan: "business", active: true, mailbox_count: 12, domain_count: 1, created_at: "2026-01-01T00:00:00Z" }], total: 1 });
+      if (path.startsWith("/platform/domains/7/2")) return Promise.resolve(DOMAINS.domains[1]);
+      if (path.startsWith("/platform/domains/7")) return Promise.resolve(DOMAINS);
+      return Promise.resolve({});
+    });
+
+    await waitFor(() => expect(screen.getByText("beta.example")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("beta.example"));
+    await waitFor(() => expect(screen.getByRole("tab", { name: "DNS Setup" })).toBeInTheDocument());
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "DNS Setup" }));
+
+    await waitFor(() => expect(screen.getByText("Checking DNS records…")).toBeInTheDocument());
+    // Individual record badge is also "Checking…" while pending — not color-only.
+    expect(screen.getAllByText("Checking…").length).toBeGreaterThan(0);
+
+    resolveVerify({
+      tenant_id: 7, domain_id: 2, domain: "beta.example", checked_at: "2026-01-05T08:55:00Z",
+      records: [{ name: "relay.orvix.email", type: "MX", value: "relay.orvix.email", ttl: 3600, priority: 10, required: true, purpose: "Mail relay", status: "verified", verified: true, observed: "10 relay.orvix.email" }],
+      total_count: 1, matched_count: 1, issue_count: 0, all_verified: true,
+    });
+
+    await waitFor(() => expect(screen.getByText("All DNS records match")).toBeInTheDocument());
+    expect(screen.getByText(/1 of 1 matched/)).toBeInTheDocument();
+    expect(screen.getByText("Matched")).toBeInTheDocument();
+  });
+
+  it("Missing record renders a red Missing badge with Actual: Not found", async () => {
+    renderPage(7);
+    mockedRequest.mockImplementation((path: string) => {
+      if (path === "/platform/domains/7/2/dns/verify") {
+        return Promise.resolve({
+          tenant_id: 7, domain_id: 2, domain: "beta.example", checked_at: "2026-01-05T08:55:00Z",
+          records: [{ name: "relay.orvix.email", type: "MX", value: "relay.orvix.email", ttl: 3600, priority: 10, required: true, purpose: "Mail relay", status: "missing", verified: false, reason: "no MX records found" }],
+          total_count: 1, matched_count: 0, issue_count: 1, all_verified: false,
+        });
+      }
+      if (path === "/platform/domains/7/2/dns") {
+        return Promise.resolve({
+          tenant_id: 7, domain_id: 2, domain: "beta.example", version: 1, status: "suspended", dkim_configured: false,
+          dns_requirements: [{ name: "relay.orvix.email", type: "MX", value: "relay.orvix.email", ttl: 3600, priority: 10, required: true, purpose: "Mail relay" }],
+          dns_next_step: "publish_and_verify_dns",
+        });
+      }
+      if (path.startsWith("/platform/organizations")) return Promise.resolve({ organizations: [{ id: 7, name: "Acme", slug: "acme", domain: "acme.example", plan: "business", active: true, mailbox_count: 12, domain_count: 1, created_at: "2026-01-01T00:00:00Z" }], total: 1 });
+      if (path.startsWith("/platform/domains/7/2")) return Promise.resolve(DOMAINS.domains[1]);
+      if (path.startsWith("/platform/domains/7")) return Promise.resolve(DOMAINS);
+      return Promise.resolve({});
+    });
+
+    await waitFor(() => expect(screen.getByText("beta.example")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("beta.example"));
+    await waitFor(() => expect(screen.getByRole("tab", { name: "DNS Setup" })).toBeInTheDocument());
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "DNS Setup" }));
+
+    await waitFor(() => expect(screen.getByText("Missing")).toBeInTheDocument());
+    expect(screen.getByText("Not found")).toBeInTheDocument();
+    expect(screen.getByText("DNS configuration needs attention")).toBeInTheDocument();
+  });
+
+  it("Mismatch record renders a red Mismatch badge with both Expected and Actual values visible", async () => {
+    renderPage(7);
+    mockedRequest.mockImplementation((path: string) => {
+      if (path === "/platform/domains/7/2/dns/verify") {
+        return Promise.resolve({
+          tenant_id: 7, domain_id: 2, domain: "beta.example", checked_at: "2026-01-05T08:55:00Z",
+          records: [{ name: "beta.example", type: "TXT", value: "v=spf1 mx -all", ttl: 3600, required: true, purpose: "SPF", status: "mismatch", verified: false, observed: "v=spf1 include:someoneelse.example -all", reason: "SPF exists but differs from generated plan" }],
+          total_count: 1, matched_count: 0, issue_count: 1, all_verified: false,
+        });
+      }
+      if (path === "/platform/domains/7/2/dns") {
+        return Promise.resolve({
+          tenant_id: 7, domain_id: 2, domain: "beta.example", version: 1, status: "suspended", dkim_configured: false,
+          dns_requirements: [{ name: "beta.example", type: "TXT", value: "v=spf1 mx -all", ttl: 3600, required: true, purpose: "SPF" }],
+          dns_next_step: "publish_and_verify_dns",
+        });
+      }
+      if (path.startsWith("/platform/organizations")) return Promise.resolve({ organizations: [{ id: 7, name: "Acme", slug: "acme", domain: "acme.example", plan: "business", active: true, mailbox_count: 12, domain_count: 1, created_at: "2026-01-01T00:00:00Z" }], total: 1 });
+      if (path.startsWith("/platform/domains/7/2")) return Promise.resolve(DOMAINS.domains[1]);
+      if (path.startsWith("/platform/domains/7")) return Promise.resolve(DOMAINS);
+      return Promise.resolve({});
+    });
+
+    await waitFor(() => expect(screen.getByText("beta.example")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("beta.example"));
+    await waitFor(() => expect(screen.getByRole("tab", { name: "DNS Setup" })).toBeInTheDocument());
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "DNS Setup" }));
+
+    await waitFor(() => expect(screen.getByText("Mismatch")).toBeInTheDocument());
+    expect(screen.getByText("v=spf1 mx -all")).toBeInTheDocument();
+    expect(screen.getByText("v=spf1 include:someoneelse.example -all")).toBeInTheDocument();
+  });
+
+  it("resolver error renders an amber 'Check failed' state — never treated as mismatch/missing/verified", async () => {
+    renderPage(7);
+    mockedRequest.mockImplementation((path: string) => {
+      if (path === "/platform/domains/7/2/dns/verify") {
+        return Promise.resolve({
+          tenant_id: 7, domain_id: 2, domain: "beta.example", checked_at: "2026-01-05T08:55:00Z",
+          records: [{ name: "relay.orvix.email", type: "MX", value: "relay.orvix.email", ttl: 3600, priority: 10, required: true, purpose: "Mail relay", status: "error", verified: false, reason: "MX lookup failed: timeout" }],
+          total_count: 1, matched_count: 0, issue_count: 1, all_verified: false,
+        });
+      }
+      if (path === "/platform/domains/7/2/dns") {
+        return Promise.resolve({
+          tenant_id: 7, domain_id: 2, domain: "beta.example", version: 1, status: "suspended", dkim_configured: false,
+          dns_requirements: [{ name: "relay.orvix.email", type: "MX", value: "relay.orvix.email", ttl: 3600, priority: 10, required: true, purpose: "Mail relay" }],
+          dns_next_step: "publish_and_verify_dns",
+        });
+      }
+      if (path.startsWith("/platform/organizations")) return Promise.resolve({ organizations: [{ id: 7, name: "Acme", slug: "acme", domain: "acme.example", plan: "business", active: true, mailbox_count: 12, domain_count: 1, created_at: "2026-01-01T00:00:00Z" }], total: 1 });
+      if (path.startsWith("/platform/domains/7/2")) return Promise.resolve(DOMAINS.domains[1]);
+      if (path.startsWith("/platform/domains/7")) return Promise.resolve(DOMAINS);
+      return Promise.resolve({});
+    });
+
+    await waitFor(() => expect(screen.getByText("beta.example")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("beta.example"));
+    await waitFor(() => expect(screen.getByRole("tab", { name: "DNS Setup" })).toBeInTheDocument());
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "DNS Setup" }));
+
+    await waitFor(() => expect(screen.getByText("Check failed")).toBeInTheDocument());
+    expect(screen.getByText("MX lookup failed: timeout")).toBeInTheDocument();
+    expect(screen.queryByText("Mismatch")).not.toBeInTheDocument();
+    expect(screen.queryByText("Missing")).not.toBeInTheDocument();
+    expect(screen.queryByText("Matched")).not.toBeInTheDocument();
+  });
+
+  it("Re-check DNS issues a second POST to the exact verify route and updates the rendered status", async () => {
+    renderPage(7);
+    let verifyCallCount = 0;
+    mockedRequest.mockImplementation((path: string) => {
+      if (path === "/platform/domains/7/2/dns/verify") {
+        verifyCallCount += 1;
+        if (verifyCallCount === 1) {
+          return Promise.resolve({
+            tenant_id: 7, domain_id: 2, domain: "beta.example", checked_at: "2026-01-05T08:00:00Z",
+            records: [{ name: "relay.orvix.email", type: "MX", value: "relay.orvix.email", ttl: 3600, priority: 10, required: true, purpose: "Mail relay", status: "missing", verified: false, reason: "no MX records found" }],
+            total_count: 1, matched_count: 0, issue_count: 1, all_verified: false,
+          });
+        }
+        return Promise.resolve({
+          tenant_id: 7, domain_id: 2, domain: "beta.example", checked_at: "2026-01-05T08:10:00Z",
+          records: [{ name: "relay.orvix.email", type: "MX", value: "relay.orvix.email", ttl: 3600, priority: 10, required: true, purpose: "Mail relay", status: "verified", verified: true, observed: "10 relay.orvix.email" }],
+          total_count: 1, matched_count: 1, issue_count: 0, all_verified: true,
+        });
+      }
+      if (path === "/platform/domains/7/2/dns") {
+        return Promise.resolve({
+          tenant_id: 7, domain_id: 2, domain: "beta.example", version: 1, status: "suspended", dkim_configured: false,
+          dns_requirements: [{ name: "relay.orvix.email", type: "MX", value: "relay.orvix.email", ttl: 3600, priority: 10, required: true, purpose: "Mail relay" }],
+          dns_next_step: "publish_and_verify_dns",
+        });
+      }
+      if (path.startsWith("/platform/organizations")) return Promise.resolve({ organizations: [{ id: 7, name: "Acme", slug: "acme", domain: "acme.example", plan: "business", active: true, mailbox_count: 12, domain_count: 1, created_at: "2026-01-01T00:00:00Z" }], total: 1 });
+      if (path.startsWith("/platform/domains/7/2")) return Promise.resolve(DOMAINS.domains[1]);
+      if (path.startsWith("/platform/domains/7")) return Promise.resolve(DOMAINS);
+      return Promise.resolve({});
+    });
+
+    await waitFor(() => expect(screen.getByText("beta.example")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("beta.example"));
+    await waitFor(() => expect(screen.getByRole("tab", { name: "DNS Setup" })).toBeInTheDocument());
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "DNS Setup" }));
+
+    await waitFor(() => expect(screen.getByText("Missing")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: "Re-check DNS" }));
+
+    await waitFor(() => expect(screen.getByText("Matched")).toBeInTheDocument());
+    await waitFor(() => {
+      const calls = mockedRequest.mock.calls.filter((c) => c[0] === "/platform/domains/7/2/dns/verify");
+      expect(calls.length).toBe(2);
+    });
+    // Read-only: never mutates the domain, DKIM, or public DNS.
+    expect(mockedRequest.mock.calls.some((c) => String(c[0]).includes("/dkim/"))).toBe(false);
+    expect(mockedRequest.mock.calls.some((c) => String(c[0]).includes("/deactivate"))).toBe(false);
   });
 });

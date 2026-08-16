@@ -9,6 +9,7 @@ import type {
   PlatformCreateDomainResult,
   PlatformDKIMMutationRequest,
   PlatformDKIMMutationResult,
+  PlatformDNSVerifyResult,
   PlatformDomain,
   PlatformDomainDNSResult,
   PlatformDomainFilter,
@@ -97,6 +98,19 @@ export function rotatePlatformDomainDKIM(
     method: "POST",
     body: JSON.stringify(body),
     headers: { "Idempotency-Key": idempotencyKey },
+  });
+}
+
+/**
+ * Live, read-only public-DNS verification: POST .../dns/verify.
+ * External DNS lookups only — never mutates public DNS, never
+ * generates/rotates DKIM, never modifies the domain. No idempotency
+ * key: the backend does not gate this route through the platform
+ * mutation-idempotency path (it performs no write of any kind).
+ */
+export function verifyPlatformDomainDNS(tenantId: number, id: number): Promise<PlatformDNSVerifyResult> {
+  return request<PlatformDNSVerifyResult>(`/platform/domains/${tenantId}/${id}/dns/verify`, {
+    method: "POST",
   });
 }
 

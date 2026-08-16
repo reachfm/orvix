@@ -260,6 +260,111 @@ func (h *Handler) GetPlatformDomainDNS(c fiber.Ctx) error {
 	return c.JSON(out)
 }
 
+// VerifyPlatformDomainDNS handles POST
+// /api/v1/platform/domains/:tenant_id/:id/dns/verify — a READ-ONLY
+// verification pass that looks up every record the canonical
+// dnsops.Generate() plan requires against REAL public DNS (via
+// dnsops.Service.Verify, the same Verifier the existing admin DNS
+// verify route uses) and reports per-record matched/mismatch/missing/
+// error. Tenant ownership is re-verified through GetDomainDNS exactly
+// like GetPlatformDomainDNS above, so a cross-tenant id can never
+// leak another tenant's domain into a verification result.
+//
+// This route:
+//   - performs external DNS lookups only — it never mutates public
+//     DNS, never generates or rotates DKIM, and never modifies the
+//     domain (status, mail-access-mode, deactivation) in any way;
+//   - compares DKIM against the CURRENT configured public key, read
+//     fresh via dnsOpsInputsForDomain on every call — an old or
+//     unrelated DKIM record at the same selector name is a genuine
+//     mismatch, never a false positive;
+//   - never returns private key material (dnsOpsInputsForDomain's
+//     DKIMPubKey is already public-only, matching every other DKIM
+//     read path in the codebase).
+func (h *Handler) VerifyPlatformDomainDNS(c fiber.Ctx) error {
+	svc, err := h.mailControl()
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	tenantID, err := parseTenantParam(c)
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	id, err := parseIDParam(c, "id")
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	// Ownership + domain name resolution: identical tenant-scoped path
+	// GetPlatformDomainDNS uses. A cross-tenant id yields NOT_FOUND
+	// here exactly as it does there.
+	out, err := svc.GetDomainDNS(c.Context(), id, tenantID)
+	if err != nil {
+		return errorResponse(c, err)
+	}
+
+	dnsSvc := h.dnsOpsService()
+	if dnsSvc == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+			"error": "dns ops service unavailable", "code": string(kernel.ErrCodeUnavailable),
+		})
+	}
+	inputs, err := h.dnsOpsInputsForDomain(c.Context(), out.Domain)
+	if err != nil {
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{
+			"error": err.Error(), "code": string(kernel.ErrCodeValidation),
+		})
+	}
+	if inputs.ServerIPv4 == "" {
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{
+			"error": "public mail IPv4 is not configured; set dns.public_ipv4 in the server config",
+			"code":  string(kernel.ErrCodeValidation),
+		})
+	}
+	plan, err := dnsSvc.Generate(inputs)
+	if err != nil {
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{
+			"error": err.Error(), "code": string(kernel.ErrCodeValidation),
+		})
+	}
+
+	// Bounded external DNS lookups — never let a slow/hung resolver
+	// block the request indefinitely.
+	ctx, cancel := context.WithTimeout(c.Context(), 8*time.Second)
+	defer cancel()
+	report, err := dnsSvc.Verify(ctx, plan)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "dns verification failed", "code": string(kernel.ErrCodeInternal),
+		})
+	}
+
+	records := mapDNSVerifyReport(report)
+	total, matched := 0, 0
+	for _, r := range records {
+		if !r.Required {
+			continue
+		}
+		total++
+		if r.Status == "verified" {
+			matched++
+		}
+	}
+
+	c.Set("Cache-Control", "no-store")
+	return c.JSON(mailcontrol.PlatformDNSVerifyResult{
+		TenantID:     tenantID,
+		DomainID:     id,
+		Domain:       out.Domain,
+		CheckedAt:    report.CheckedAt,
+		Records:      records,
+		TotalCount:   total,
+		MatchedCount: matched,
+		IssueCount:   total - matched,
+		AllVerified:  report.Verified,
+		Warnings:     report.Warnings,
+	})
+}
+
 // platformDKIMMutation is the shared body/validation/idempotency path
 // for generate and rotate — the only difference between the two
 // routes is confirmRotation's expected value, matching the existing

@@ -6,6 +6,7 @@ import {
   rotatePlatformDomainDKIM,
   setPlatformDomainMailAccessMode,
   setPlatformDomainStatus,
+  verifyPlatformDomainDNS,
 } from "./api";
 import { domainKeys } from "./queries";
 import type {
@@ -123,5 +124,18 @@ export function useDeactivateDomainMutation(tenantId: number | null) {
       qc.invalidateQueries({ queryKey: domainKeys.dns(tenantId, id) });
       for (const key of domainInvalidationKeys()) qc.invalidateQueries({ queryKey: key });
     },
+  });
+}
+
+/**
+ * Live, read-only public-DNS verification. Modelled as a mutation
+ * (not a query) so it never auto-fires on render/refetch focus — the
+ * DNS Setup tab triggers it exactly once on open, and the "Re-check
+ * DNS" button reuses the same call. Performs external DNS lookups
+ * only; never mutates public DNS, DKIM, or the domain.
+ */
+export function useVerifyDomainDNSMutation(tenantId: number | null) {
+  return useMutation({
+    mutationFn: ({ id }: { id: number }) => verifyPlatformDomainDNS(tenantId as number, id),
   });
 }

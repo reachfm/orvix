@@ -2,10 +2,7 @@ package domain
 
 import (
 	"context"
-	"crypto/rsa"
-	"crypto/x509"
 	"database/sql"
-	"encoding/pem"
 	"fmt"
 	"strings"
 	"time"
@@ -883,12 +880,21 @@ func (s *Service) GetDKIM(ctx context.Context, id, tenantID uint) (*DKIMResult, 
 		return nil, nil
 	}
 
-	pubKey, ok := deriveDKIMPublicKey(cfg.PrivateKeyPEM)
+	// Single canonical PEM -> public-key-TXT derivation, matching every
+	// other DKIM read path in the codebase. The prior implementation
+	// derived the p= value via deriveDKIMPublicKey and then piped that
+	// ALREADY-base64 string back through dkim.GenerateDNSRecord, which
+	// base64-encodes its input again — a real double-encoding bug
+	// (production symptom: DNS Setup and the DKIM tab disagreed on the
+	// same domain/selector's public TXT value). DerivePublicKeyRecordValue
+	// returns the complete "v=DKIM1; k=rsa; p=..." string directly, so
+	// there is no second encoding pass and no separate hostname builder
+	// call needed here.
+	dnsValue, ok := dkim.DerivePublicKeyRecordValue(cfg.PrivateKeyPEM)
 	if !ok {
 		return nil, fmt.Errorf("public key derivation failed")
 	}
-
-	dnsName, dnsValue := dkim.GenerateDNSRecord(cfg.Selector, d.Name, pubKey)
+	dnsName := fmt.Sprintf("%s._domainkey.%s", cfg.Selector, d.Name)
 
 	return &DKIMResult{
 		Selector:      cfg.Selector,
@@ -1258,35 +1264,6 @@ func scanAdminDomain(row interface {
 	d.DKIMEnabled = dkimEnabled != 0
 	d.DMARCEnabled = dmarcEnabled != 0
 	return &d, nil
-}
-
-func deriveDKIMPublicKey(privPEM string) (string, bool) {
-	block, _ := pem.Decode([]byte(privPEM))
-	if block == nil {
-		return "", false
-	}
-	keyAny, err := x509.ParsePKCS8PrivateKey(block.Bytes)
-	if err != nil {
-		if k1, err1 := x509.ParsePKCS1PrivateKey(block.Bytes); err1 == nil {
-			keyAny = k1
-		} else {
-			return "", false
-		}
-	}
-	rsaKey, ok := keyAny.(*rsa.PrivateKey)
-	if !ok {
-		return "", false
-	}
-	pubBytes, err := x509.MarshalPKIXPublicKey(&rsaKey.PublicKey)
-	if err != nil {
-		return "", false
-	}
-	recordName, recordValue := dkim.GenerateDNSRecord("ignored", "ignored", string(pubBytes))
-	_ = recordName
-	if i := strings.Index(recordValue, "p="); i >= 0 {
-		return recordValue[i+2:], true
-	}
-	return "", false
 }
 
 func boolToInt(b bool) int {

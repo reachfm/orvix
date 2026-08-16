@@ -247,3 +247,54 @@ export interface DeactivatePlatformDomainResponse {
 export function deactivateDomainConfirmation(domainId: number): string {
   return `DEACTIVATE-DOMAIN-${domainId}`;
 }
+
+// ── Live public-DNS verification (POST .../dns/verify) ──────────────
+// Field-for-field match of mailcontrol.PlatformDNSVerifyRecord /
+// PlatformDNSVerifyResult. READ-ONLY: performs external DNS lookups
+// only — never mutates public DNS, never generates/rotates DKIM,
+// never modifies the domain. The expected fields (name/type/value/
+// priority/purpose/required) are the SAME values dns_requirements
+// carries; this is not a second, independent expected-record model.
+//
+// status is the backend's own vocabulary (verified | missing |
+// mismatch | conflict | multiple_spf | not_checked | unsupported |
+// error | not_found) — the UI maps "verified" to the operator-facing
+// label "Matched" rather than the backend inventing a parallel enum.
+export type PlatformDNSVerifyStatus =
+  | "verified"
+  | "missing"
+  | "mismatch"
+  | "conflict"
+  | "multiple_spf"
+  | "not_checked"
+  | "unsupported"
+  | "error"
+  | "not_found";
+
+export interface PlatformDNSVerifyRecord {
+  name: string;
+  type: string;
+  value: string;
+  ttl: number;
+  priority?: number;
+  required: boolean;
+  purpose?: string;
+  status: PlatformDNSVerifyStatus;
+  verified: boolean;
+  reason?: string;
+  /** Actual live value(s) found in public DNS. Absent on error/missing — render an honest "not found" state, never an empty value. */
+  observed?: string;
+}
+
+export interface PlatformDNSVerifyResult {
+  tenant_id: number;
+  domain_id: number;
+  domain: string;
+  checked_at: string;
+  records: PlatformDNSVerifyRecord[];
+  total_count: number;
+  matched_count: number;
+  issue_count: number;
+  all_verified: boolean;
+  warnings?: string[];
+}

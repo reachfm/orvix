@@ -2056,6 +2056,12 @@ func (r *Router) setupRoutes() {
 	// bare ":id" route regardless of declaration order, but they are
 	// still declared immediately alongside it for readability.
 	protected.Get("/platform/domains/:tenant_id/:id/dns", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermDomainsRead), r.h.GetPlatformDomainDNS)
+	// Read-only live public-DNS verification against the same
+	// canonical requirements .../dns exposes. External DNS lookups
+	// only — never mutates public DNS, DKIM, or the domain. Gated on
+	// the same PermDomainsRead as the read route above (not
+	// PermDomainsWrite): this route performs no write of any kind.
+	protected.Post("/platform/domains/:tenant_id/:id/dns/verify", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermDomainsRead), r.h.VerifyPlatformDomainDNS)
 	protected.Post("/platform/domains/:tenant_id/:id/dkim/generate", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermDomainsWrite), r.h.GeneratePlatformDomainDKIM)
 	protected.Post("/platform/domains/:tenant_id/:id/dkim/rotate", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermDomainsWrite), r.h.RotatePlatformDomainDKIM)
 	// Platform domain lifecycle (Phase 8 production-acceptance

@@ -120,6 +120,13 @@ type Record struct {
 	Status   Status `json:"status"`
 	Verified bool   `json:"verified"`
 	Reason   string `json:"reason,omitempty"`
+	// Observed is the actual live value(s) found in public DNS for
+	// this record, when a lookup succeeded (populated even on
+	// StatusMismatch, so callers can render Expected vs Actual side
+	// by side). Empty when the lookup failed (StatusError) or found
+	// nothing (StatusMissing) — callers must render "not found" in
+	// that case rather than an empty string standing in for a value.
+	Observed string `json:"observed,omitempty"`
 }
 
 // Plan is the desired DNS state for a domain.

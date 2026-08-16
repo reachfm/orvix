@@ -360,6 +360,59 @@ type PlatformDomainDNSResult struct {
 	DNSNextStep       string                   `json:"dns_next_step,omitempty"`
 }
 
+// PlatformDNSVerifyRecord mirrors PlatformDNSRequirement's expected-
+// record fields (name/type/value/priority/purpose/required) — the SAME
+// per-record shape dns_requirements uses — extended with the live
+// verification outcome. There is deliberately no second, independent
+// expected-record model: the expected fields here come from the exact
+// same canonical dnsops.Generate() plan dns_requirements is built from.
+type PlatformDNSVerifyRecord struct {
+	Name     string `json:"name"`
+	Type     string `json:"type"`
+	Value    string `json:"value"`
+	TTL      int    `json:"ttl"`
+	Priority int    `json:"priority,omitempty"`
+	Required bool   `json:"required"`
+	Purpose  string `json:"purpose,omitempty"`
+	// Status is one of dnsops.Status's values: verified | missing |
+	// mismatch | conflict | multiple_spf | not_checked | unsupported |
+	// error | not_found. The backend enum is intentionally NOT
+	// renamed to "matched" — the UI maps "verified" to the
+	// operator-facing text "Matched" rather than the backend
+	// inventing a second parallel vocabulary.
+	Status   string `json:"status"`
+	Verified bool   `json:"verified"`
+	Reason   string `json:"reason,omitempty"`
+	// Observed is the actual live value(s) found in public DNS.
+	// Empty when the lookup failed or found nothing — the UI must
+	// render an honest "not found" / "check failed" state rather
+	// than treating an empty string as a value.
+	Observed string `json:"observed,omitempty"`
+}
+
+// PlatformDNSVerifyResult is the response for
+// POST /platform/domains/:tenant_id/:id/dns/verify — a read-only pass
+// that looks up EVERY record dns_requirements presents against real
+// public DNS and reports per-record match/mismatch/missing/error.
+// This route never mutates public DNS, never generates or rotates
+// DKIM, and never modifies the domain in any way — verification only.
+type PlatformDNSVerifyResult struct {
+	TenantID  uint                      `json:"tenant_id"`
+	DomainID  uint                      `json:"domain_id"`
+	Domain    string                    `json:"domain"`
+	CheckedAt string                    `json:"checked_at"`
+	Records   []PlatformDNSVerifyRecord `json:"records"`
+	// TotalCount / MatchedCount / IssueCount are computed over the
+	// REQUIRED records only (the same set dns_requirements marks
+	// required=true) — optional readiness rows (e.g. CAA, PTR, BIMI)
+	// are still returned in Records but do not move these counts.
+	TotalCount   int      `json:"total_count"`
+	MatchedCount int      `json:"matched_count"`
+	IssueCount   int      `json:"issue_count"`
+	AllVerified  bool     `json:"all_verified"`
+	Warnings     []string `json:"warnings,omitempty"`
+}
+
 // PlatformPlanSummary is the post-create plan/usage view.
 type PlatformPlanSummary struct {
 	Plan                  string `json:"plan"`

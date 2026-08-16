@@ -1,7 +1,7 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import * as Tabs from "@radix-ui/react-tabs";
-import { X, Loader2, AlertCircle, Copy, Check, AlertTriangle, ShieldAlert } from "lucide-react";
+import { X, Loader2, AlertCircle, Copy, Check, AlertTriangle, ShieldAlert, CheckCircle2, XCircle, RefreshCw } from "lucide-react";
 import StatusBadge from "../../components/StatusBadge";
 import ConfirmDialog from "../../../../components/ConfirmDialog";
 import { usePlatformDomain, useDomainDNSCache, usePlatformDomainDNS } from "../queries";
@@ -10,10 +10,53 @@ import {
   useGenerateDKIMMutation,
   useRotateDKIMMutation,
   useDeactivateDomainMutation,
+  useVerifyDomainDNSMutation,
 } from "../mutations";
 import { domainStatusLabel, domainStatusTone, formatTimestamp } from "../formatters";
-import { DOMAIN_STATUSES, deactivateDomainConfirmation, type PlatformDomainDNSResult } from "../contract";
+import {
+  DOMAIN_STATUSES,
+  deactivateDomainConfirmation,
+  type PlatformDomainDNSResult,
+  type PlatformDNSVerifyRecord,
+  type PlatformDNSVerifyStatus,
+} from "../contract";
 import { safeErrorInfo } from "../../errors";
+
+/**
+ * Maps a verify status to operator-facing text/icon/tone. Color is
+ * never the only signal — every state carries text and an icon, and
+ * StatusBadge renders an accessible status role.
+ */
+function verifyStatusPresentation(status: PlatformDNSVerifyStatus | undefined, pending: boolean): {
+  label: string;
+  tone: "success" | "danger" | "warning" | "neutral";
+  icon: React.ReactNode;
+} {
+  if (pending) return { label: "Checking…", tone: "neutral", icon: <Loader2 size={12} className="animate-spin" /> };
+  switch (status) {
+    case "verified":
+      return { label: "Matched", tone: "success", icon: <CheckCircle2 size={12} /> };
+    case "missing":
+      return { label: "Missing", tone: "danger", icon: <XCircle size={12} /> };
+    case "mismatch":
+    case "conflict":
+    case "multiple_spf":
+      return { label: "Mismatch", tone: "danger", icon: <XCircle size={12} /> };
+    case "error":
+    case "not_found":
+      return { label: "Check failed", tone: "warning", icon: <AlertTriangle size={12} /> };
+    case "unsupported":
+      return { label: "Not checked", tone: "neutral", icon: <AlertTriangle size={12} /> };
+    case "not_checked":
+    case undefined:
+    default:
+      return { label: "Not checked", tone: "neutral", icon: <AlertTriangle size={12} /> };
+  }
+}
+
+function verifyRecordKey(name: string, type: string, purpose?: string): string {
+  return `${purpose ?? ""}|${type}|${name}`;
+}
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
@@ -106,6 +149,9 @@ export default function DomainDetailDrawer({
   const generateDKIMMut = useGenerateDKIMMutation(tenantId);
   const rotateDKIMMut = useRotateDKIMMutation(tenantId);
   const deactivateMut = useDeactivateDomainMutation(tenantId);
+  const verifyMut = useVerifyDomainDNSMutation(tenantId);
+  const [autoVerifiedFor, setAutoVerifiedFor] = useState<number | null>(null);
+  const [activeTab, setActiveTab] = useState<"overview" | "dns" | "dkim" | "lifecycle">(initialTab ?? "overview");
   const [statusDraft, setStatusDraft] = useState("");
   const [mutationError, setMutationError] = useState<unknown>(null);
   const [dkimError, setDkimError] = useState<unknown>(null);
@@ -141,12 +187,43 @@ export default function DomainDetailDrawer({
   // while it hasn't loaded yet.
   const dns = dnsQuery.data ?? cacheAsDNSResult;
 
+  // Trigger live DNS verification exactly once per opened domain, and
+  // ONLY once the operator has actually visited the DNS Setup tab —
+  // never merely because the drawer opened. This keeps verification
+  // requests from firing on every domain-drawer interaction across the
+  // whole app (Overview/DKIM/Lifecycle users never trigger a DNS
+  // lookup), matching "when DNS Setup is opened" from spec and
+  // avoiding needless network load. "Re-check DNS" reuses the same
+  // mutate call and is unaffected by this gate (it's a direct button
+  // click, not the auto-trigger).
+  useEffect(() => {
+    if (
+      activeTab === "dns" &&
+      domain &&
+      dns?.dns_requirements &&
+      dns.dns_requirements.length > 0 &&
+      autoVerifiedFor !== domain.id
+    ) {
+      setAutoVerifiedFor(domain.id);
+      verifyMut.mutate({ id: domain.id });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, domain?.id, dns?.dns_requirements, autoVerifiedFor]);
+
+  const verifyByKey = new Map<string, PlatformDNSVerifyRecord>();
+  verifyMut.data?.records?.forEach((r) => verifyByKey.set(verifyRecordKey(r.name, r.type, r.purpose), r));
+
   const allRecordsText = dns?.dns_requirements
     ? dns.dns_requirements.map((r) => `${r.name} ${r.type} ${r.priority ? r.priority + " " : ""}${r.value}`).join("\n") +
       (dns.dkim_configured && dns.dkim_dns_record_name && dns.dkim_public_dns_txt
         ? `\n${dns.dkim_dns_record_name} TXT ${dns.dkim_public_dns_txt}`
         : "")
     : "";
+
+  function submitVerifyDNS() {
+    if (!domain) return;
+    verifyMut.mutate({ id: domain.id });
+  }
 
   function submitGenerateDKIM() {
     if (!domain) return;
@@ -237,7 +314,11 @@ export default function DomainDetailDrawer({
               </div>
             </div>
           ) : (
-            <Tabs.Root defaultValue={initialTab ?? "overview"} className="flex flex-col flex-1 min-h-0">
+            <Tabs.Root
+              value={activeTab}
+              onValueChange={(v) => setActiveTab(v as "overview" | "dns" | "dkim" | "lifecycle")}
+              className="flex flex-col flex-1 min-h-0"
+            >
               <Tabs.List className="flex gap-1 px-6 pt-3 border-b border-[var(--border)] shrink-0 overflow-x-auto" aria-label="Domain detail sections">
                 {[
                   { value: "overview", label: "Overview" },
@@ -297,10 +378,71 @@ export default function DomainDetailDrawer({
                     </div>
                   ) : dns?.dns_requirements && dns.dns_requirements.length > 0 ? (
                     <>
+                      {/* Overall DNS health summary — compact, not a dashboard redesign. */}
+                      <div
+                        role="status"
+                        className={`border rounded-lg p-3 flex items-start justify-between gap-3 ${
+                          verifyMut.isPending && !verifyMut.data
+                            ? "border-[var(--border)]"
+                            : verifyMut.data?.all_verified
+                              ? "border-[var(--success)]/30"
+                              : verifyMut.isError
+                                ? "border-[var(--warning)]/30"
+                                : verifyMut.data
+                                  ? "border-[var(--danger)]/30"
+                                  : "border-[var(--border)]"
+                        }`}
+                      >
+                        <div>
+                          {verifyMut.isPending && !verifyMut.data ? (
+                            <p className="text-sm font-medium text-[var(--text-primary)] flex items-center gap-1.5">
+                              <Loader2 size={14} className="animate-spin" /> Checking DNS records…
+                            </p>
+                          ) : verifyMut.data ? (
+                            <>
+                              <p
+                                className={`text-sm font-medium flex items-center gap-1.5 ${
+                                  verifyMut.data.all_verified ? "text-[var(--success)]" : "text-[var(--danger)]"
+                                }`}
+                              >
+                                {verifyMut.data.all_verified ? <CheckCircle2 size={14} /> : <XCircle size={14} />}
+                                {verifyMut.data.all_verified ? "All DNS records match" : "DNS configuration needs attention"}
+                              </p>
+                              <p className="text-xs text-[var(--text-secondary)] mt-0.5">
+                                {verifyMut.data.matched_count} of {verifyMut.data.total_count} matched
+                                {verifyMut.data.issue_count > 0 ? ` · ${verifyMut.data.issue_count} issue${verifyMut.data.issue_count === 1 ? "" : "s"}` : ""}
+                                {" · Checked "}
+                                {formatTimestamp(verifyMut.data.checked_at)}
+                              </p>
+                            </>
+                          ) : verifyMut.isError ? (
+                            <>
+                              <p className="text-sm font-medium text-[var(--warning)] flex items-center gap-1.5">
+                                <AlertTriangle size={14} /> DNS verification incomplete
+                              </p>
+                              <p className="text-xs text-[var(--text-secondary)] mt-0.5">
+                                Some records could not be checked: {safeErrorInfo(verifyMut.error).detail}
+                              </p>
+                            </>
+                          ) : (
+                            <p className="text-sm font-medium text-[var(--text-secondary)]">Not checked</p>
+                          )}
+                        </div>
+                        <button
+                          type="button"
+                          disabled={verifyMut.isPending}
+                          onClick={submitVerifyDNS}
+                          className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs rounded border border-[var(--border)] text-[var(--text-primary)] hover:bg-[var(--bg-elevated)] shrink-0 disabled:opacity-40"
+                        >
+                          <RefreshCw size={12} className={verifyMut.isPending ? "animate-spin" : ""} />
+                          Re-check DNS
+                        </button>
+                      </div>
+
                       <div className="flex items-center justify-between gap-2">
                         <p className="text-xs text-[var(--text-secondary)]">
-                          Live DNS records for this domain. The platform does not perform DNS verification from the
-                          browser — publish these with your DNS provider and verify with standard DNS tools.
+                          Live DNS records for this domain, checked against real public DNS. Publish any record
+                          flagged below with your DNS provider.
                         </p>
                         <button
                           type="button"
@@ -314,6 +456,11 @@ export default function DomainDetailDrawer({
                       <ul className="space-y-2">
                         {dns.dns_requirements.map((rec, i) => {
                           const field = `dns-${i}`;
+                          const verifyRec = verifyByKey.get(verifyRecordKey(rec.name, rec.type, rec.purpose));
+                          const presentation = verifyStatusPresentation(verifyRec?.status, verifyMut.isPending);
+                          const showExpectedActual = verifyRec && (verifyRec.status === "mismatch" || verifyRec.status === "conflict" || verifyRec.status === "multiple_spf");
+                          const showMissingActual = verifyRec && (verifyRec.status === "missing" || verifyRec.status === "not_found");
+                          const showCheckFailedReason = verifyRec && (verifyRec.status === "error");
                           return (
                             <li key={field} className="border border-[var(--border)] rounded-lg p-3">
                               <div className="flex flex-wrap items-center gap-2 mb-1.5">
@@ -322,6 +469,12 @@ export default function DomainDetailDrawer({
                                 )}
                                 <StatusBadge tone={rec.required ? "warning" : "neutral"}>
                                   {rec.required ? "Required" : "Optional"}
+                                </StatusBadge>
+                                <StatusBadge tone={presentation.tone} label={`Verification ${presentation.label}`}>
+                                  <span className="inline-flex items-center gap-1">
+                                    {presentation.icon}
+                                    {presentation.label}
+                                  </span>
                                 </StatusBadge>
                               </div>
                               <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
@@ -335,11 +488,31 @@ export default function DomainDetailDrawer({
                                   <span className="break-all">{rec.name}</span>
                                   <CopyButton field={`${field}-name`} value={rec.name} copiedField={copiedField} onCopy={copy} label={`${rec.purpose ?? rec.type} record host`} />
                                 </dd>
-                                <dt className="text-[var(--text-secondary)]">Value</dt>
+                                <dt className="text-[var(--text-secondary)]">{showExpectedActual || showMissingActual ? "Expected" : "Value"}</dt>
                                 <dd className="text-[var(--text-primary)] font-mono break-all flex items-start gap-2">
                                   <span className="break-all whitespace-pre-wrap">{rec.value}</span>
                                   <CopyButton field={`${field}-value`} value={rec.value} copiedField={copiedField} onCopy={copy} label={`${rec.purpose ?? rec.type} record value`} />
                                 </dd>
+                                {showExpectedActual && (
+                                  <>
+                                    <dt className="text-[var(--danger)]">Actual</dt>
+                                    <dd className="text-[var(--danger)] font-mono break-all whitespace-pre-wrap">
+                                      {verifyRec!.observed || "—"}
+                                    </dd>
+                                  </>
+                                )}
+                                {showMissingActual && (
+                                  <>
+                                    <dt className="text-[var(--danger)]">Actual</dt>
+                                    <dd className="text-[var(--danger)]">Not found</dd>
+                                  </>
+                                )}
+                                {showCheckFailedReason && (
+                                  <>
+                                    <dt className="text-[var(--warning)]">Reason</dt>
+                                    <dd className="text-[var(--warning)]">{verifyRec!.reason || "DNS lookup failed"}</dd>
+                                  </>
+                                )}
                                 {rec.priority !== undefined && (
                                   <>
                                     <dt className="text-[var(--text-secondary)]">Priority</dt>
