@@ -6,6 +6,8 @@ import { request } from "../../../api";
 import type {
   ListOrganizationsResponse,
   OrganizationDetail,
+  ScheduleOrganizationDeletionRequest,
+  ScheduleOrganizationDeletionResponse,
   SetOrganizationActiveRequest,
   SetOrganizationActiveResponse,
   UpdateOrganizationRequest,
@@ -35,6 +37,16 @@ export function setOrganizationActive(id: number, body: SetOrganizationActiveReq
 export function updateOrganization(id: number, body: UpdateOrganizationRequest): Promise<UpdateOrganizationResponse> {
   return request<UpdateOrganizationResponse>(`/platform/organizations/${id}`, {
     method: "PATCH",
+    body: JSON.stringify(body),
+  });
+}
+
+export function scheduleOrganizationDeletion(
+  id: number,
+  body: ScheduleOrganizationDeletionRequest,
+): Promise<ScheduleOrganizationDeletionResponse> {
+  return request<ScheduleOrganizationDeletionResponse>(`/platform/organizations/${id}/deletion`, {
+    method: "POST",
     body: JSON.stringify(body),
   });
 }

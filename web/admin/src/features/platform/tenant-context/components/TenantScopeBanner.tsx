@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Filter } from "lucide-react";
 import { useClearTenantScope, useSetTenantScope, useTenantOptions, useTenantScope } from "../queries";
 
@@ -21,6 +21,24 @@ export default function TenantScopeBanner() {
   const tenantName = scope?.tenantName;
   const options = orgs?.organizations ?? [];
 
+  // Diagnosis (Phase H): the <select> below used to be a controlled
+  // component whose `value` was bound to the APPLIED scope (`tenantId`)
+  // while `onChange` only wrote to a separate `draft` state. Since `value`
+  // never changed until "Apply scope" was clicked and its mutation
+  // resolved, React re-rendered the <select> back to the old `tenantId` on
+  // every keystroke/selection — an operator picking a tenant would watch
+  // the dropdown immediately snap back to "— Select a tenant —" (or the
+  // previous scope), making every tenant-scoped platform page (Platform
+  // Billing foremost, since it renders nothing at all until a tenant is
+  // applied) look like it silently refused to respond. This effect keeps
+  // `draft` — the value the <select> is now actually bound to — in sync
+  // with the authoritative applied scope on load and after Clear/Apply,
+  // while still letting onChange update it immediately for in-progress
+  // picks.
+  useEffect(() => {
+    setDraft(tenantId === null ? "" : String(tenantId));
+  }, [tenantId]);
+
   return (
     <div className="border border-[var(--border)] rounded-lg p-4 bg-[var(--bg-surface)]" role="region" aria-label="Tenant scope">
       <div className="flex flex-wrap items-center gap-3">
@@ -30,7 +48,7 @@ export default function TenantScopeBanner() {
         </div>
         <select
           aria-label="Select tenant"
-          value={tenantId === null ? "" : String(tenantId)}
+          value={draft}
           onChange={(e) => setDraft(e.target.value)}
           className="px-3 py-1.5 bg-[var(--bg-elevated)] border border-[var(--border)] rounded text-sm text-[var(--text-primary)]"
         >

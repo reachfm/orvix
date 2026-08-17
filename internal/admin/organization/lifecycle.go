@@ -4,7 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
+	"strings"
 	"time"
+
+	"github.com/orvix/orvix/internal/audit"
 )
 
 type SuspensionState string
@@ -209,4 +213,111 @@ func (r *OrganizationRepo) CompleteDeletion(ctx context.Context, orgID uint, at 
 	// Hard-delete tenant data after retention period
 	_, err = r.db.ExecContext(ctx, `UPDATE tenants SET deleted_at = `+r.dialect.Placeholder(1)+` WHERE id = `+r.dialect.Placeholder(2), at, orgID)
 	return err
+}
+
+// DeletionBlockedError is returned by PlatformScheduleDeletion when the
+// organization still has dependencies that must be removed first. Callers
+// (the HTTP handler) surface Blockers verbatim to the caller so the
+// platform admin knows exactly what to clean up.
+type DeletionBlockedError struct {
+	Blockers []string
+}
+
+func (e *DeletionBlockedError) Error() string {
+	return "organization has blocking dependencies: " + strings.Join(e.Blockers, "; ")
+}
+
+// ErrDeletionConfirmationMismatch is returned when the caller's typed
+// confirmation string does not exactly match the organization's domain.
+var ErrDeletionConfirmationMismatch = errors.New("confirmation does not match organization domain")
+
+// ErrDeletionReasonRequired is returned when no reason was supplied.
+var ErrDeletionReasonRequired = errors.New("reason is required")
+
+// PlatformScheduleDeletion is the Platform-Admin-only entry point for
+// scheduling an organization's deletion (Phase G). Unlike RequestDeletion
+// above (a tenant's own self-service request, reachable only by a caller
+// already scoped to that tenant), this is invoked by platform staff acting
+// on ANY organization, so it enforces additional platform-side guardrails
+// the self-service path doesn't need:
+//
+//   - a typed confirmation string that must exactly match the org's domain
+//     (case-insensitive, trimmed) — guards against a misclick on the wrong
+//     row in a list of organizations;
+//   - a mandatory reason, recorded in the audit trail;
+//   - a dependency check: the organization must have zero active domains
+//     and zero active mailboxes, otherwise the caller gets back the exact
+//     list of what's blocking it instead of a generic error;
+//   - idempotency: calling this twice on an already-scheduled organization
+//     is a no-op (reports idempotent=true) rather than erroring or creating
+//     a second deletion record.
+//
+// This reuses the exact same underlying state machine as the self-service
+// path (org_deletions table, 30-day retention window, soft state
+// transitions) — see RequestDeletion/CancelDeletion/ConfirmDeletion above.
+// It deliberately never issues a raw DELETE: CompleteDeletion (run later,
+// after the retention window, by a separate confirm step) only flips
+// tenants.deleted_at, preserving billing/audit history.
+func (s *Service) PlatformScheduleDeletion(ctx context.Context, orgID, actorID uint, confirmDomain, reason string) (idempotent bool, err error) {
+	org, err := s.repo.GetByID(ctx, orgID)
+	if err != nil {
+		return false, err
+	}
+	if org == nil {
+		return false, ErrOrganizationNotFound
+	}
+
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		return false, ErrDeletionReasonRequired
+	}
+	if !strings.EqualFold(strings.TrimSpace(confirmDomain), org.Domain) {
+		return false, ErrDeletionConfirmationMismatch
+	}
+
+	// Idempotency: an already-scheduled (and not cancelled/completed)
+	// deletion is a success no-op, not an error — a platform admin double
+	// clicking "Schedule Deletion" (or a retried request) must not create
+	// a second deletion record or fail loudly.
+	exists, err := s.repo.HasActiveDeletionRequest(ctx, orgID)
+	if err != nil {
+		return false, err
+	}
+	if exists {
+		return true, nil
+	}
+
+	var blockers []string
+	activeDomains, err := s.repo.CountActiveDomains(ctx, orgID)
+	if err != nil {
+		return false, err
+	}
+	if activeDomains > 0 {
+		blockers = append(blockers, fmt.Sprintf("%d active domain(s)", activeDomains))
+	}
+	activeMailboxes, err := s.repo.CountActiveMailboxes(ctx, orgID)
+	if err != nil {
+		return false, err
+	}
+	if activeMailboxes > 0 {
+		blockers = append(blockers, fmt.Sprintf("%d active mailbox(es)", activeMailboxes))
+	}
+	if len(blockers) > 0 {
+		return false, &DeletionBlockedError{Blockers: blockers}
+	}
+
+	now := time.Now().UTC()
+	retentionUntil := now.AddDate(0, 0, 30)
+	entry := &audit.ExtendedEntry{
+		Action:   "organization.deletion_scheduled",
+		Target:   fmt.Sprintf("tenant:%d", orgID),
+		TargetID: orgID,
+		TenantID: orgID,
+		Result:   "success",
+		Reason:   reason,
+	}
+	err = s.mutateWithAudit(ctx, entry, func(repo *OrganizationRepo) error {
+		return repo.CreateDeletionRequest(ctx, orgID, actorID, now, retentionUntil)
+	})
+	return false, err
 }

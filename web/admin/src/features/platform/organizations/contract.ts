@@ -99,3 +99,19 @@ export interface UpdateOrganizationResponse {
     updated_at: string;
   };
 }
+
+// Phase G: POST /platform/organizations/:id/deletion
+// (PlatformScheduleOrganizationDeletion, organization_admin.go). Requires a
+// typed confirmation matching the org's exact domain and a reason; blocked
+// by a dependency check (active domains/mailboxes) that comes back as a 409
+// with a `blockers` list, and is idempotent (a repeat call while a deletion
+// is already scheduled returns status "deletion_already_scheduled" rather
+// than erroring).
+export interface ScheduleOrganizationDeletionRequest {
+  confirm_domain: string;
+  reason: string;
+}
+
+export interface ScheduleOrganizationDeletionResponse {
+  status: "deletion_scheduled" | "deletion_already_scheduled";
+}

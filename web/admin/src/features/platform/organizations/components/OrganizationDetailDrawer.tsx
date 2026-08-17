@@ -1,7 +1,7 @@
 import { useState } from "react";
 import ConfirmDialog from "../../../../components/ConfirmDialog";
 import { useOrganizationDetailQuery } from "../queries";
-import { useSetOrganizationActiveMutation } from "../mutations";
+import { useScheduleOrganizationDeletionMutation, useSetOrganizationActiveMutation } from "../mutations";
 import OrganizationEditForm from "./OrganizationEditForm";
 
 function formatBytes(n: number): string {
@@ -13,9 +13,16 @@ function formatBytes(n: number): string {
 
 export default function OrganizationDetailDrawer({ id, onClose }: { id: number; onClose: () => void }) {
   const [confirmToggle, setConfirmToggle] = useState<{ active: boolean } | null>(null);
+  // Deletion is a two-step flow: first capture the required reason (a plain
+  // inline card, not a modal — ConfirmDialog only supports a typed-name
+  // confirmation, not an arbitrary text field), then hand off to
+  // ConfirmDialog for the typed-domain confirmation that actually submits.
+  const [deleteStep, setDeleteStep] = useState<"idle" | "reason" | "confirm">("idle");
+  const [deleteReason, setDeleteReason] = useState("");
   const [editing, setEditing] = useState(false);
   const detailQ = useOrganizationDetailQuery(id);
   const toggleMut = useSetOrganizationActiveMutation(id);
+  const deleteMut = useScheduleOrganizationDeletionMutation(id);
 
   return (
     <div className="fixed inset-0 z-40 flex justify-end bg-black/50" onClick={onClose}>
@@ -57,7 +64,7 @@ export default function OrganizationDetailDrawer({ id, onClose }: { id: number; 
               </button>
             )}
 
-            <div>
+            <div className="flex flex-wrap gap-2">
               <button
                 onClick={() => setConfirmToggle({ active: !detailQ.data!.active })}
                 disabled={toggleMut.isPending}
@@ -65,9 +72,63 @@ export default function OrganizationDetailDrawer({ id, onClose }: { id: number; 
               >
                 {toggleMut.isPending ? "Working…" : detailQ.data.active ? "Suspend organization" : "Activate organization"}
               </button>
-              {toggleMut.isSuccess && <p className="text-[var(--success)] text-sm mt-2">Updated.</p>}
-              {toggleMut.error && <p className="text-[var(--danger)] text-sm mt-2">{(toggleMut.error as Error).message}</p>}
+              <button
+                onClick={() => {
+                  setDeleteReason("");
+                  setDeleteStep("reason");
+                }}
+                disabled={deleteMut.isPending}
+                className="px-3 py-2 text-sm rounded disabled:opacity-50 border border-[var(--danger)] text-[var(--danger)] hover:bg-[var(--danger)]/10"
+              >
+                {deleteMut.isPending ? "Working…" : "Schedule Deletion"}
+              </button>
             </div>
+            {toggleMut.isSuccess && <p className="text-[var(--success)] text-sm mt-2">Updated.</p>}
+            {toggleMut.error && <p className="text-[var(--danger)] text-sm mt-2">{(toggleMut.error as Error).message}</p>}
+            {deleteMut.isSuccess && (
+              <p className="text-[var(--success)] text-sm mt-2">
+                {deleteMut.data?.status === "deletion_already_scheduled"
+                  ? "Deletion was already scheduled for this organization."
+                  : "Deletion scheduled — a 30-day retention window has started."}
+              </p>
+            )}
+            {deleteMut.error && (
+              <p className="text-[var(--danger)] text-sm mt-2">
+                {(deleteMut.error as any).body?.blockers
+                  ? `Cannot schedule deletion: ${(deleteMut.error as any).body.blockers.join(", ")}`
+                  : (deleteMut.error as Error).message}
+              </p>
+            )}
+
+            {deleteStep === "reason" && (
+              <div className="mt-3 p-3 border border-[var(--danger)]/40 rounded-lg bg-[var(--danger)]/5">
+                <label className="block text-xs text-[var(--text-secondary)] mb-1">
+                  Reason for scheduling deletion (required)
+                </label>
+                <textarea
+                  autoFocus
+                  value={deleteReason}
+                  onChange={(e) => setDeleteReason(e.target.value)}
+                  className="w-full px-3 py-2 bg-[var(--bg-elevated)] border border-[var(--border)] rounded text-sm text-[var(--text-primary)]"
+                  rows={2}
+                />
+                <div className="flex justify-end gap-2 mt-2">
+                  <button
+                    onClick={() => setDeleteStep("idle")}
+                    className="px-3 py-1.5 text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={() => setDeleteStep("confirm")}
+                    disabled={!deleteReason.trim()}
+                    className="px-3 py-1.5 text-xs rounded bg-[var(--danger)] text-black disabled:opacity-40"
+                  >
+                    Continue
+                  </button>
+                </div>
+              </div>
+            )}
           </>
         )}
 
@@ -82,6 +143,24 @@ export default function OrganizationDetailDrawer({ id, onClose }: { id: number; 
           onConfirm={() => {
             if (!confirmToggle) return;
             toggleMut.mutate(confirmToggle.active, { onSuccess: () => setConfirmToggle(null) });
+          }}
+        />
+
+        <ConfirmDialog
+          open={deleteStep === "confirm"}
+          onOpenChange={(o) => !o && setDeleteStep("idle")}
+          title="Schedule organization deletion"
+          description={`This schedules "${detailQ.data?.name ?? id}" for deletion after a 30-day retention window. The organization must have zero active domains and zero active mailboxes. This does not immediately delete billing or audit history.`}
+          requireTypedName={detailQ.data?.domain || ""}
+          confirmLabel="Schedule Deletion"
+          danger
+          pending={deleteMut.isPending}
+          onConfirm={() => {
+            if (!detailQ.data) return;
+            deleteMut.mutate(
+              { confirm_domain: detailQ.data.domain, reason: deleteReason.trim() },
+              { onSuccess: () => setDeleteStep("idle") },
+            );
           }}
         />
       </div>

@@ -1,12 +1,14 @@
 package handlers
 
 import (
+	"errors"
+	"strconv"
+
 	"github.com/gofiber/fiber/v3"
 	"github.com/orvix/orvix/internal/admin/organization"
 	"github.com/orvix/orvix/internal/auth"
 	"github.com/orvix/orvix/internal/billing"
 	"go.uber.org/zap"
-	"strconv"
 )
 
 func (h *Handler) ListOrganizations(c fiber.Ctx) error {
@@ -164,6 +166,58 @@ func (h *Handler) SetOrganizationActive(c fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}
 	return c.JSON(fiber.Map{"status": "ok"})
+}
+
+// PlatformScheduleOrganizationDeletion is the Platform-Admin-only endpoint
+// for Phase G safe organization deletion. It is distinct from the tenant
+// self-service RequestDeletion in customer_org.go: this one is reachable by
+// platform staff for ANY organization (route is gated by platformMW, not
+// tenant scoping), requires a typed confirmation matching the org's exact
+// domain plus a reason, is blocked by a dependency check (active domains /
+// mailboxes), and is idempotent — see organization.Service.PlatformScheduleDeletion
+// for the full contract.
+func (h *Handler) PlatformScheduleOrganizationDeletion(c fiber.Ctx) error {
+	if h.orgAdminSvc == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "organization admin service not available"})
+	}
+	idVal, err := strconv.ParseUint(c.Params("id"), 10, 64)
+	if err != nil || idVal == 0 {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid organization id"})
+	}
+	id := uint(idVal)
+
+	var req struct {
+		ConfirmDomain string `json:"confirm_domain"`
+		Reason        string `json:"reason"`
+	}
+	if err := c.Bind().JSON(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request"})
+	}
+
+	actorID, _ := c.Locals("user_id").(uint)
+	idempotent, err := h.orgAdminSvc.PlatformScheduleDeletion(c.Context(), id, actorID, req.ConfirmDomain, req.Reason)
+	if err != nil {
+		var blocked *organization.DeletionBlockedError
+		switch {
+		case err == organization.ErrOrganizationNotFound:
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "organization not found"})
+		case err == organization.ErrDeletionReasonRequired, err == organization.ErrDeletionConfirmationMismatch:
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+		case errors.As(err, &blocked):
+			return c.Status(fiber.StatusConflict).JSON(fiber.Map{
+				"error":    "organization has blocking dependencies",
+				"blockers": blocked.Blockers,
+			})
+		default:
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "internal error"})
+		}
+	}
+
+	status := "deletion_scheduled"
+	if idempotent {
+		status = "deletion_already_scheduled"
+	}
+	return c.JSON(fiber.Map{"status": status})
 }
 
 func (h *Handler) GetOrganizationDetail(c fiber.Ctx) error {
