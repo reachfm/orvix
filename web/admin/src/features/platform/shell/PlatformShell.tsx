@@ -84,6 +84,7 @@ export default function PlatformShell<TId extends string>({
       {/* Sidebar — collapsible on small viewports via sidebarOpen; a
           fixed overlay below lg, a static column at lg+. */}
       <aside
+        data-sidebar-open={sidebarOpen}
         className={`fixed inset-y-0 left-0 z-40 w-64 bg-[var(--bg-surface)] border-r border-[var(--border)] flex flex-col transition-transform lg:static lg:translate-x-0 ${
           sidebarOpen ? "translate-x-0" : "-translate-x-full"
         }`}
@@ -158,7 +159,7 @@ export default function PlatformShell<TId extends string>({
 
       <div className="flex-1 flex flex-col overflow-hidden">
         {/* Top bar */}
-        <header className="h-16 flex-shrink-0 border-b border-[var(--border)] bg-[var(--bg-surface)] flex items-center gap-3 px-4 lg:px-6">
+        <header className="relative z-50 h-16 flex-shrink-0 border-b border-[var(--border)] bg-[var(--bg-surface)] flex items-center gap-3 px-4 lg:px-6">
           <button
             onClick={() => setSidebarOpen((v) => !v)}
             className="lg:hidden p-2 -ml-2 rounded-lg text-[var(--text-secondary)] hover:bg-[var(--bg-subtle)]"

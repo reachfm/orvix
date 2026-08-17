@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { mockMailControlAPI, openPlatformShell, applyTenantScope, platformCalls, resetPlatformCalls } from "./mail-control-fixtures";
+import { mockMailControlAPI, openPlatformShell, applyTenantScope, platformCalls, resetPlatformCalls, ensurePlatformSidebarOpen } from "./mail-control-fixtures";
 
 async function noConsoleErrors(page: Page) {
   const errors: string[] = [];
@@ -64,6 +64,7 @@ test.describe("Platform Super Admin Mail Control", () => {
   test("mailbox inventory and detail load via the platform route", async ({ page }) => {
     await mockMailControlAPI(page, { portal: "platform" });
     await openPlatformShell(page);
+    await ensurePlatformSidebarOpen(page);
     await page.getByRole("button", { name: "Mailboxes", exact: true }).click();
     await expect(page.getByRole("heading", { name: /Platform Mailboxes/i })).toBeVisible();
     await applyTenantScope(page, "Acme");
@@ -76,6 +77,7 @@ test.describe("Platform Super Admin Mail Control", () => {
   test("aliases inventory loads via the platform route", async ({ page }) => {
     await mockMailControlAPI(page, { portal: "platform" });
     await openPlatformShell(page);
+    await ensurePlatformSidebarOpen(page);
     await page.getByRole("button", { name: "Aliases", exact: true }).click();
     await expect(page.getByRole("heading", { name: /Platform Aliases/i })).toBeVisible();
     await applyTenantScope(page, "Acme");
@@ -86,6 +88,7 @@ test.describe("Platform Super Admin Mail Control", () => {
   test("groups inventory and memberships load via the platform route", async ({ page }) => {
     await mockMailControlAPI(page, { portal: "platform" });
     await openPlatformShell(page);
+    await ensurePlatformSidebarOpen(page);
     await page.getByRole("button", { name: "Groups", exact: true }).click();
     await expect(page.getByRole("heading", { name: /Platform Groups/i })).toBeVisible();
     await applyTenantScope(page, "Acme");
@@ -111,6 +114,7 @@ test.describe("Platform Super Admin Mail Control", () => {
   test("suppression lifecycle renders with impact copy and history", async ({ page }) => {
     await mockMailControlAPI(page, { portal: "platform" });
     await openPlatformShell(page);
+    await ensurePlatformSidebarOpen(page);
     await page.getByRole("button", { name: "Suppressions", exact: true }).click();
     await expect(page.getByRole("heading", { name: /Suppression Management/i })).toBeVisible();
     await applyTenantScope(page, "Acme");
@@ -125,6 +129,7 @@ test.describe("Platform Super Admin Mail Control", () => {
   test("deliverability metrics, breakdowns and events render from real data", async ({ page }) => {
     await mockMailControlAPI(page, { portal: "platform" });
     await openPlatformShell(page);
+    await ensurePlatformSidebarOpen(page);
     await page.getByRole("button", { name: "Deliverability", exact: true }).click();
     await expect(page.getByRole("heading", { name: /Deliverability/i })).toBeVisible();
     await applyTenantScope(page, "Acme");
@@ -172,10 +177,13 @@ test.describe("Platform Super Admin Mail Control", () => {
     await openPlatformShell(page);
     await page.getByRole("button", { name: "Domains", exact: true }).click();
     await applyTenantScope(page, "Acme");
+    await ensurePlatformSidebarOpen(page);
     await page.getByRole("button", { name: "Mailboxes", exact: true }).click();
     await applyTenantScope(page, "Acme");
+    await ensurePlatformSidebarOpen(page);
     await page.getByRole("button", { name: "Suppressions", exact: true }).click();
     await applyTenantScope(page, "Acme");
+    await ensurePlatformSidebarOpen(page);
     await page.getByRole("button", { name: "Deliverability", exact: true }).click();
     await applyTenantScope(page, "Acme");
 
@@ -198,10 +206,13 @@ test.describe("Platform Super Admin Mail Control", () => {
     await openPlatformShell(page);
     await page.getByRole("button", { name: "Domains", exact: true }).click();
     await applyTenantScope(page, "Acme");
+    await ensurePlatformSidebarOpen(page);
     await page.getByRole("button", { name: "Mailboxes", exact: true }).click();
     await applyTenantScope(page, "Acme");
+    await ensurePlatformSidebarOpen(page);
     await page.getByRole("button", { name: "Aliases", exact: true }).click();
     await applyTenantScope(page, "Acme");
+    await ensurePlatformSidebarOpen(page);
     await page.getByRole("button", { name: "Groups", exact: true }).click();
     await applyTenantScope(page, "Acme");
     expect(tenantCalls).toEqual([]);
@@ -212,6 +223,7 @@ test.describe("Platform Super Admin Mail Control", () => {
     await mockMailControlAPI(page, { portal: "platform" });
     await openPlatformShell(page);
     for (const label of ["Domains", "Mailboxes", "Aliases", "Groups", "Relays", "Mail Queue", "Suppressions", "Deliverability", "Bulk Mailboxes"]) {
+      await ensurePlatformSidebarOpen(page);
       await page.getByRole("button", { name: label, exact: true }).click();
       if (["Domains", "Mailboxes", "Aliases", "Groups", "Suppressions", "Deliverability", "Bulk Mailboxes"].includes(label)) {
         await applyTenantScope(page, "Acme");
@@ -235,7 +247,8 @@ test.describe("Platform Super Admin Mail Control", () => {
     await openPlatformShell(page);
     await page.evaluate(() => window.localStorage.setItem("orvix-admin-theme", "dark"));
     await page.reload({ waitUntil: "domcontentloaded" });
-    await page.getByRole("heading", { name: /Orvix Admin/i }).waitFor();
+    await page.getByRole("heading", { name: "Orvix", exact: true }).waitFor();
+    await ensurePlatformSidebarOpen(page);
     const html = page.locator("html");
     await expect(html).toHaveClass(/dark/);
     await page.getByRole("button", { name: "Domains", exact: true }).click();
@@ -246,13 +259,15 @@ test.describe("Platform Super Admin Mail Control", () => {
   test("mail control pages render in both light and dark modes", async ({ page }) => {
     await mockMailControlAPI(page, { portal: "platform" });
     await openPlatformShell(page);
+    await ensurePlatformSidebarOpen(page);
     await page.getByRole("button", { name: "Deliverability", exact: true }).click();
     await applyTenantScope(page, "Acme");
     await expect(page.getByRole("heading", { name: /Deliverability/i })).toBeVisible();
     // Switch to dark via the toggle and confirm pages still render.
     await page.evaluate(() => window.localStorage.setItem("orvix-admin-theme", "dark"));
     await page.reload({ waitUntil: "domcontentloaded" });
-    await page.getByRole("heading", { name: /Orvix Admin/i }).waitFor();
+    await page.getByRole("heading", { name: "Orvix", exact: true }).waitFor();
+    await ensurePlatformSidebarOpen(page);
     await page.getByRole("button", { name: "Suppressions", exact: true }).click();
     await applyTenantScope(page, "Acme");
     await expect(page.getByText("bounce@example.net")).toBeVisible();

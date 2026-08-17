@@ -1,4 +1,4 @@
-import { type Page, type Route } from "@playwright/test";
+import { type Page, type Route, expect } from "@playwright/test";
 
 /**
  * End-to-end coverage for the Platform Super Admin Mail Control pages,
@@ -309,7 +309,30 @@ export async function mockMailControlAPI(page: Page, opts: { portal: "platform" 
 
 export async function openPlatformShell(page: Page) {
   await page.goto("/admin", { waitUntil: "domcontentloaded" });
-  await page.getByRole("heading", { name: /Orvix Admin/i }).waitFor();
+  await page.getByRole("heading", { name: "Orvix", exact: true }).waitFor();
+  await ensurePlatformSidebarOpen(page);
+}
+
+/**
+ * PlatformShell collapses its sidebar off-screen below the `lg`
+ * breakpoint (per the mission's "small viewport: sidebar becomes
+ * usable/collapsible" requirement) — at narrow test viewports the nav
+ * buttons are not clickable until the mobile menu toggle opens it.
+ * Idempotent: does nothing if the sidebar is already visible (e.g.
+ * desktop-width tests).
+ */
+export async function ensurePlatformSidebarOpen(page: Page) {
+  const toggle = page.getByRole("button", { name: /toggle sidebar/i });
+  if (!(await toggle.isVisible().catch(() => false))) return; // desktop: static sidebar, no toggle
+  // PlatformShell reflects its open/closed state on the aside via
+  // data-sidebar-open — reading that directly avoids racing the CSS
+  // slide-in transition (isVisible()/boundingBox() during the
+  // transition can report a stale/partial position).
+  const aside = page.locator('aside[data-sidebar-open="true"]');
+  if (await aside.count() > 0) return;
+  await toggle.click();
+  await expect(page.locator('aside[data-sidebar-open="true"]')).toHaveCount(1, { timeout: 5000 });
+  await expect(page.getByRole("navigation", { name: /platform navigation/i })).toBeInViewport({ timeout: 5000 });
 }
 
 /** Applies the tenant scope selector to tenant 7 (idempotent). */

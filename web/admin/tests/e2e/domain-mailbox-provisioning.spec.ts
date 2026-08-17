@@ -8,6 +8,7 @@ import {
   createdCalls,
   resetCreatedCalls,
   createBulkJobPollController,
+  ensurePlatformSidebarOpen,
 } from "./domain-mailbox-provisioning-fixtures";
 import { mockMailControlAPI } from "./mail-control-fixtures";
 
@@ -280,8 +281,10 @@ test.describe("Provisioning portal and tenant isolation", () => {
     await openPlatformShell(page);
     await page.getByRole("button", { name: "Domains", exact: true }).click();
     await applyTenantScope(page);
+    await ensurePlatformSidebarOpen(page);
     await page.getByRole("button", { name: "Mailboxes", exact: true }).click();
     await applyTenantScope(page);
+    await ensurePlatformSidebarOpen(page);
     await page.getByRole("button", { name: "Bulk Import", exact: true }).click();
     await applyTenantScope(page);
 
@@ -305,6 +308,7 @@ test.describe("Provisioning portal and tenant isolation", () => {
     await mockProvisioningAPI(page);
     await openPlatformShell(page);
     for (const label of ["Domains", "Mailboxes", "Bulk Import"]) {
+      await ensurePlatformSidebarOpen(page);
       await page.getByRole("button", { name: label, exact: true }).click();
       await applyTenantScope(page);
     }

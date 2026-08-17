@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { mockProvisioningAPI, openPlatformShell, applyTenantScope, resetCreatedCalls } from "./domain-mailbox-provisioning-fixtures";
+import { mockProvisioningAPI, openPlatformShell, applyTenantScope, resetCreatedCalls, ensurePlatformSidebarOpen } from "./domain-mailbox-provisioning-fixtures";
 
 const VIEWPORTS = [
   { name: "iphone-375x812", width: 375, height: 812 },
@@ -21,6 +21,7 @@ test.describe("Domain/Mailbox/Bulk provisioning responsive sweep", () => {
       await openPlatformShell(page);
 
       for (const label of ["Domains", "Mailboxes", "Bulk Import"]) {
+        await ensurePlatformSidebarOpen(page);
         await page.getByRole("button", { name: label, exact: true }).click();
         await applyTenantScope(page);
       }
@@ -49,7 +50,8 @@ test.describe("Domain/Mailbox/Bulk provisioning responsive sweep", () => {
     page.on("console", (msg) => { if (msg.type() === "error") errors.push(msg.text()); });
     await page.evaluate(() => window.localStorage.setItem("orvix-admin-theme", "dark"));
     await page.reload({ waitUntil: "domcontentloaded" });
-    await page.getByRole("heading", { name: /Orvix Admin/i }).waitFor();
+    await page.getByRole("heading", { name: "Orvix", exact: true }).waitFor();
+    await ensurePlatformSidebarOpen(page);
     await expect(page.locator("html")).toHaveClass(/dark/);
     await page.getByRole("button", { name: "Mailboxes", exact: true }).click();
     await applyTenantScope(page);

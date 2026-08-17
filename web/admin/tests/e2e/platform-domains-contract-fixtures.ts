@@ -1,4 +1,4 @@
-import { type Page, type Route } from "@playwright/test";
+import { type Page, type Route, expect } from "@playwright/test";
 import { PSA_ME, ORGANIZATIONS_FIXTURE } from "./mail-control-fixtures";
 
 /**
@@ -264,9 +264,29 @@ export async function mockPlatformDomainsAPI(page: Page, opts: DomainsContractOp
   await page.route("**/api/v1/enterprise/**", (r) => json(r, { error: "forbidden", code: "FORBIDDEN" }, 403));
 }
 
+/**
+ * PlatformShell collapses its sidebar off-screen below the `lg`
+ * breakpoint — at narrow test viewports the nav buttons are not
+ * clickable until the mobile menu toggle opens it. Idempotent.
+ */
+export async function ensurePlatformSidebarOpen(page: Page) {
+  const toggle = page.getByRole("button", { name: /toggle sidebar/i });
+  if (!(await toggle.isVisible().catch(() => false))) return; // desktop: static sidebar, no toggle
+  // PlatformShell reflects its open/closed state on the aside via
+  // data-sidebar-open — reading that directly avoids racing the CSS
+  // slide-in transition (isVisible()/boundingBox() during the
+  // transition can report a stale/partial position).
+  const aside = page.locator('aside[data-sidebar-open="true"]');
+  if (await aside.count() > 0) return;
+  await toggle.click();
+  await expect(page.locator('aside[data-sidebar-open="true"]')).toHaveCount(1, { timeout: 5000 });
+  await expect(page.getByRole("navigation", { name: /platform navigation/i })).toBeInViewport({ timeout: 5000 });
+}
+
 export async function openDomainsPage(page: Page) {
   await page.goto("/admin", { waitUntil: "domcontentloaded" });
-  await page.getByRole("heading", { name: /Orvix Admin/i }).waitFor();
+  await page.getByRole("heading", { name: "Orvix", exact: true }).waitFor();
+  await ensurePlatformSidebarOpen(page);
   await page.getByRole("button", { name: "Domains", exact: true }).click();
   const scoped = page.getByText(/Scoped to tenant 7/i);
   if (!(await scoped.isVisible().catch(() => false))) {
