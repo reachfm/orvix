@@ -3144,7 +3144,28 @@ IPFAIL
     fi
 
     set_step "verification" "Enterprise health verification" 95
-    run_quiet sleep 5
+    # Deterministic readiness wait: the previous fixed `sleep 5` raced the
+    # service boot (SQLite migrations alone can take ~5s on a cold runner,
+    # and the bootstrap admin insert adds an Argon2id hash after that), so
+    # verify_install occasionally ran before seedAdminUser had persisted
+    # the admin row and failed with "bootstrapped admin user row was not
+    # created". Poll for the row with a bounded deadline instead of
+    # sleeping a fixed amount — the verification can only ever run against
+    # a fully bootstrapped database.
+    verify_admin_row_ready() {
+        local deadline=$((SECONDS + 90))
+        while [ $SECONDS -lt $deadline ]; do
+            local ready_count
+            ready_count="$(_orvix_db_scalar "SELECT COUNT(*) FROM users WHERE email = '$sql_email' AND role IN ('admin','superadmin','super_admin','platform_super_admin') AND active = $(_orvix_db_true);" || true)"
+            if [ "$ready_count" = "1" ]; then
+                return 0
+            fi
+            sleep 1
+        done
+        fail "timed out waiting for the bootstrap admin row for $admin_email (see $INSTALL_LOG for journalctl dumps)"
+    }
+    sql_email="$(sqlite_escape "$admin_email")"
+    verify_admin_row_ready
     verify_install "$admin_email" "$admin_password" "$admin_mode"
     smoke_tests "$admin_email" "$admin_password" "$admin_mode"
     validate_https_config || true
