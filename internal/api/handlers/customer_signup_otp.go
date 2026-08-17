@@ -181,6 +181,16 @@ func (h *Handler) SignupStart(c fiber.Ctx) error {
 	now := time.Now().UTC()
 	expiresAt := now.Add(otpValidityWindow)
 
+	// Attempt delivery BEFORE persisting anything. A failed send must not
+	// start/reset the resend cooldown, and must not leave a half-issued OTP
+	// behind — so on failure we simply don't touch pending_registrations at
+	// all, leaving any prior (still-valid) pending row untouched and letting
+	// the customer retry immediately with no artificial wait.
+	if err := h.sendOTPEmail(email, code); err != nil {
+		h.logger.Error("signup/start: send otp email", zap.Error(err), zap.String("email", email))
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "temporarily unable to send verification email, please try again shortly"})
+	}
+
 	// Resend invalidates the prior OTP: this upsert overwrites otp_hash,
 	// otp_expires_at, otp_attempts (reset to 0) and otp_created_at.
 	upsertSQL := dial.Upsert(
@@ -194,8 +204,6 @@ func (h *Handler) SignupStart(c fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "internal error"})
 	}
 
-	h.sendOTPEmail(email, code)
-
 	// Never log the OTP plaintext.
 	h.logger.Info("signup/start: pending registration issued", zap.String("email", email))
 
@@ -207,17 +215,20 @@ func (h *Handler) SignupStart(c fiber.Ctx) error {
 
 // sendOTPEmail sends the OTP via the existing transactional mail pipeline.
 // Follows the same from-address / logging conventions as ForgotPassword.
-func (h *Handler) sendOTPEmail(email, code string) {
+// Returns an error on any synchronous delivery failure (nil sender or
+// Send() error) so callers can avoid falsely reporting success — the raw
+// error is only ever logged server-side, never surfaced to the caller.
+func (h *Handler) sendOTPEmail(email, code string) error {
 	if h.mailSender == nil {
 		h.logger.Warn("signup: no mail sender configured — verification email not delivered", zap.String("email", email))
-		return
+		return fmt.Errorf("no mail sender configured")
 	}
 	body := fmt.Sprintf("Your Orvix verification code is: %s\n\nThis code expires in %d minutes. If you didn't request this, you can safely ignore this email.", code, int(otpValidityWindow.Minutes()))
 	if err := h.mailSender.Send(email, "Your Orvix verification code", body); err != nil {
-		h.logger.Error("signup: send otp email", zap.Error(err))
-		return
+		return err
 	}
 	h.logger.Info("signup: otp email sent", zap.String("email", email))
+	return nil
 }
 
 type signupResendRequest struct {
@@ -284,6 +295,15 @@ func (h *Handler) SignupResend(c fiber.Ctx) error {
 	now := time.Now().UTC()
 	expiresAt := now.Add(otpValidityWindow)
 
+	// As in SignupStart: attempt delivery BEFORE mutating the pending row.
+	// A failed send leaves the previous (still-valid, still-usable) OTP and
+	// its cooldown clock untouched, and does not start a new cooldown for a
+	// code that never arrived — so the customer can retry promptly.
+	if err := h.sendOTPEmail(email, code); err != nil {
+		h.logger.Error("signup/resend: send otp email", zap.Error(err), zap.String("email", email))
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "temporarily unable to send verification email, please try again shortly"})
+	}
+
 	if _, err := sqlDB.Exec(
 		fmt.Sprintf("UPDATE pending_registrations SET otp_hash = %s, otp_expires_at = %s, otp_attempts = 0, otp_created_at = %s WHERE normalized_email = %s",
 			dial.Placeholder(1), dial.Placeholder(2), dial.Placeholder(3), dial.Placeholder(4)),
@@ -293,7 +313,6 @@ func (h *Handler) SignupResend(c fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "internal error"})
 	}
 
-	h.sendOTPEmail(email, code)
 	h.logger.Info("signup/resend: pending registration re-issued", zap.String("email", email))
 
 	return c.Status(fiber.StatusOK).JSON(fiber.Map{"message": "if a pending signup exists, a new code has been sent"})

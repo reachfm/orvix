@@ -41,16 +41,65 @@ func otpTestSecret() string {
 	return "test-secret-64-bytes-signup-otp-fixture-XXXXXXXXXXXXXXXXXXXXXXXX"
 }
 
+// fakeMailSender is a deterministic, in-memory handlers.MailSender for
+// tests. The router's default sender (initTransactionalMailSender) dials
+// real SMTP based on cfg.CoreMail.SMTPHost/Port (0.0.0.0:25 by default),
+// which — now that sendOTPEmail's synchronous failures are surfaced to the
+// caller instead of being swallowed — would make every OTP test dependent
+// on real network conditions. Router.SetMailSender lets tests swap in this
+// fake instead.
+type fakeMailSender struct {
+	mu   sync.Mutex
+	fail bool
+	sent []fakeSentMail
+}
+
+type fakeSentMail struct {
+	To, Subject, Body string
+}
+
+func newFakeMailSender(fail bool) *fakeMailSender {
+	return &fakeMailSender{fail: fail}
+}
+
+func (f *fakeMailSender) Send(to, subject, body string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.fail {
+		return fmt.Errorf("fake smtp: simulated delivery failure")
+	}
+	f.sent = append(f.sent, fakeSentMail{To: to, Subject: subject, Body: body})
+	return nil
+}
+
+func (f *fakeMailSender) setFail(v bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.fail = v
+}
+
+func (f *fakeMailSender) sentCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.sent)
+}
+
 // newSignupTxEnvSQLiteWithSecret is newSignupTxEnvSQLite (customer_signup_transaction_test.go)
 // with a fixed JWTSecret, so tests can independently recover the OTP
 // plaintext by brute-forcing the known-keyed HMAC (see bruteForceOTP above).
+// It wires a default SUCCEEDING fakeMailSender so existing tests exercise
+// real send-success behavior without touching the network; tests that need
+// to exercise delivery failure should override via
+// env.router.SetMailSender(newFakeMailSender(true)).
 func newSignupTxEnvSQLiteWithSecret(t *testing.T, secret string) *signupTxEnv {
 	t.Helper()
 	cfg := config.Defaults()
 	cfg.Database.Driver = "sqlite"
 	cfg.Database.DSN = t.TempDir() + "/signup-otp.db?_loc=auto&_busy_timeout=5000&_txlock=immediate"
 	cfg.Auth.JWTSecret = secret
-	return newSignupTxEnv(t, cfg)
+	env := newSignupTxEnv(t, cfg)
+	env.router.SetMailSender(newFakeMailSender(false))
+	return env
 }
 
 func bruteForceOTP(t *testing.T, secret, wantHash string) string {
@@ -412,6 +461,7 @@ func TestSignupOTP_NeverLogsPlaintextCode(t *testing.T) {
 	}
 	router := api.NewRouter(cfg, authenticator, logger, gdb, modules.NewRegistry(logger), license.NewFeatureFlags(logger), nil)
 	t.Cleanup(func() { _ = router.App().Shutdown() })
+	router.SetMailSender(newFakeMailSender(false))
 
 	env := &signupTxEnv{router: router, sqlDB: sqlDB}
 	email := "otp-nolog@example.com"
@@ -460,5 +510,135 @@ func TestSignupOTP_ActivationFailureRollsBackNoOrphan(t *testing.T) {
 	if status != http.StatusInternalServerError {
 		t.Fatalf("verify with missing plan status=%d, want 500", status)
 	}
+	assertSignupCounts(t, env.sqlDB, email, "example.com", 0, 0, 0)
+}
+
+// --- Part 1 false-success-bug regression tests ---------------------------
+
+// TestSignupOTP_NilMailSenderDoesNotClaimSuccess covers case (1) from the
+// hotfix mission: mailSender == nil must not produce a "verification code
+// sent" response.
+func TestSignupOTP_NilMailSenderDoesNotClaimSuccess(t *testing.T) {
+	env := newSignupTxEnvSQLiteWithSecret(t, otpTestSecret())
+	env.router.SetMailSender(nil)
+	email := "otp-nilsender@example.com"
+
+	status, out := otpDoJSON(t, env, "POST", "/api/v1/auth/signup/start", map[string]string{
+		"email": email, "password": "StrongPass123", "name": "X",
+	})
+	if status != http.StatusServiceUnavailable {
+		t.Fatalf("signup/start with nil mail sender status=%d body=%v, want 503", status, out)
+	}
+	if msg, _ := out["error"].(string); strings.Contains(strings.ToLower(msg), "smtp") {
+		t.Fatalf("raw SMTP/internal error leaked to HTTP response: %v", out)
+	}
+	var count int64
+	env.sqlDB.QueryRow(`SELECT COUNT(*) FROM pending_registrations WHERE normalized_email = ?`, email).Scan(&count)
+	if count != 0 {
+		t.Fatalf("pending_registration persisted despite nil mail sender (would trap the customer): count=%d", count)
+	}
+}
+
+// TestSignupOTP_SendFailureDoesNotClaimSuccess covers case (2): Send()
+// returning an error must not produce a "sent" response, and must not leak
+// the raw SMTP error text into the HTTP body.
+func TestSignupOTP_SendFailureDoesNotClaimSuccess(t *testing.T) {
+	env := newSignupTxEnvSQLiteWithSecret(t, otpTestSecret())
+	env.router.SetMailSender(newFakeMailSender(true))
+	email := "otp-sendfail@example.com"
+
+	status, out := otpDoJSON(t, env, "POST", "/api/v1/auth/signup/start", map[string]string{
+		"email": email, "password": "StrongPass123", "name": "X",
+	})
+	if status != http.StatusServiceUnavailable {
+		t.Fatalf("signup/start with failing send status=%d body=%v, want 503", status, out)
+	}
+	if msg, _ := out["error"].(string); strings.Contains(msg, "fake smtp") || strings.Contains(strings.ToLower(msg), "simulated") {
+		t.Fatalf("raw send-failure error text leaked to HTTP response: %v", out)
+	}
+}
+
+// TestSignupOTP_SuccessfulSendStillReturnsSentResponse covers case (3): the
+// ordinary success path is unchanged by the restructuring.
+func TestSignupOTP_SuccessfulSendStillReturnsSentResponse(t *testing.T) {
+	env := newSignupTxEnvSQLiteWithSecret(t, otpTestSecret())
+	email := "otp-sendok@example.com"
+
+	status, out := otpDoJSON(t, env, "POST", "/api/v1/auth/signup/start", map[string]string{
+		"email": email, "password": "StrongPass123", "name": "X",
+	})
+	if status != http.StatusOK {
+		t.Fatalf("signup/start status=%d body=%v", status, out)
+	}
+	if out["message"] != "verification code sent" {
+		t.Fatalf("unexpected success body: %v", out)
+	}
+}
+
+// TestSignupOTP_ResendSendFailureDoesNotClaimSuccess covers case (4): a
+// synchronous resend failure must not falsely claim delivery.
+func TestSignupOTP_ResendSendFailureDoesNotClaimSuccess(t *testing.T) {
+	env := newSignupTxEnvSQLiteWithSecret(t, otpTestSecret())
+	email := "otp-resend-sendfail@example.com"
+	otpDoJSON(t, env, "POST", "/api/v1/auth/signup/start", map[string]string{
+		"email": email, "password": "StrongPass123", "name": "X",
+	})
+	// Bypass the cooldown so the resend attempt actually reaches the send step.
+	if _, err := env.sqlDB.Exec(`UPDATE pending_registrations SET otp_created_at = ? WHERE normalized_email = ?`, time.Now().UTC().Add(-2*time.Minute), email); err != nil {
+		t.Fatalf("backdate otp_created_at: %v", err)
+	}
+
+	env.router.SetMailSender(newFakeMailSender(true))
+	status, out := otpDoJSON(t, env, "POST", "/api/v1/auth/signup/resend", map[string]string{"email": email})
+	if status != http.StatusServiceUnavailable {
+		t.Fatalf("signup/resend with failing send status=%d body=%v, want 503", status, out)
+	}
+}
+
+// TestSignupOTP_FailedSendDoesNotStartCooldown_CanRetryPromptly covers case
+// (5): a failed first send must not trap the customer in the normal
+// successful-send resend cooldown — since Part 1 discards the DB write
+// entirely on send failure, an immediate retry after a failure must be
+// allowed to proceed (and succeed) rather than being 429'd.
+func TestSignupOTP_FailedSendDoesNotStartCooldown_CanRetryPromptly(t *testing.T) {
+	env := newSignupTxEnvSQLiteWithSecret(t, otpTestSecret())
+	fake := newFakeMailSender(true)
+	env.router.SetMailSender(fake)
+	email := "otp-retryprompt@example.com"
+
+	status, out := otpDoJSON(t, env, "POST", "/api/v1/auth/signup/start", map[string]string{
+		"email": email, "password": "StrongPass123", "name": "X",
+	})
+	if status != http.StatusServiceUnavailable {
+		t.Fatalf("first signup/start (failing send) status=%d body=%v, want 503", status, out)
+	}
+	var count int64
+	env.sqlDB.QueryRow(`SELECT COUNT(*) FROM pending_registrations WHERE normalized_email = ?`, email).Scan(&count)
+	if count != 0 {
+		t.Fatalf("pending_registration persisted despite failed send: count=%d", count)
+	}
+
+	// Immediately retry with a working sender — must succeed with NO
+	// cooldown wait, since the failed attempt above never started one.
+	fake.setFail(false)
+	status, out = otpDoJSON(t, env, "POST", "/api/v1/auth/signup/start", map[string]string{
+		"email": email, "password": "StrongPass123", "name": "X",
+	})
+	if status != http.StatusOK {
+		t.Fatalf("prompt retry after failed send status=%d body=%v, want 200 (no cooldown should have started)", status, out)
+	}
+}
+
+// TestSignupOTP_FailedSendDoesNotCreateAccount covers case (10) explicitly
+// for the mail-delivery-failure path: no organization/user/subscription is
+// created merely because mail delivery failed.
+func TestSignupOTP_FailedSendDoesNotCreateAccount(t *testing.T) {
+	env := newSignupTxEnvSQLiteWithSecret(t, otpTestSecret())
+	env.router.SetMailSender(newFakeMailSender(true))
+	email := "otp-nofalseaccount@example.com"
+
+	otpDoJSON(t, env, "POST", "/api/v1/auth/signup/start", map[string]string{
+		"email": email, "password": "StrongPass123", "name": "X",
+	})
 	assertSignupCounts(t, env.sqlDB, email, "example.com", 0, 0, 0)
 }

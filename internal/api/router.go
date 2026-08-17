@@ -746,9 +746,18 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 		}
 	}
 
-	// Wire transactional mail sender for password resets.
-	// Uses the CoreMail SMTP host/port when configured.
-	ms := initTransactionalMailSender(cfg.CoreMail.SMTPHost, cfg.CoreMail.SMTPPort, cfg.CoreMail.Hostname, logger)
+	// Wire transactional mail sender for signup OTP, password resets, and
+	// support requests. Prefers authenticated TLS submission when
+	// transactional submission credentials are configured; falls back to
+	// the legacy unauthenticated MX-port path otherwise (see
+	// initTransactionalMailSender for why that path is relay-rejected for
+	// external recipients).
+	ms := initTransactionalMailSender(
+		cfg.CoreMail.SMTPHost, cfg.CoreMail.SMTPPort,
+		cfg.CoreMail.SubmissionHost, cfg.CoreMail.SubmissionPort,
+		cfg.CoreMail.TransactionalSMTPUsername, cfg.CoreMail.TransactionalSMTPPassword,
+		cfg.CoreMail.Hostname, logger,
+	)
 	router.h.SetMailSender(ms)
 
 	if sqlDB, err := db.DB(); err == nil {
@@ -849,6 +858,14 @@ func (r *Router) SetTrustPersistence(ok bool, errMsg string) {
 // mirrors SetQueueEngine/SetTrustService above.
 func (r *Router) SetClusterService(s *cluster.Service) {
 	r.h.SetClusterService(s)
+}
+
+// SetMailSender overrides the router's transactional mail sender — mirrors
+// SetQueueEngine/SetTrustService/SetClusterService above. Primarily for test
+// setups that need a deterministic fake MailSender instead of the real
+// SMTP-dialing sender initTransactionalMailSender wires by default.
+func (r *Router) SetMailSender(m handlers.MailSender) {
+	r.h.SetMailSender(m)
 }
 
 func (r *Router) App() *fiber.App { return r.app }

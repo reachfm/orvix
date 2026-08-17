@@ -82,16 +82,47 @@ func (n *noopMailSender) Send(to, subject, body string) error {
 	return nil
 }
 
-func initTransactionalMailSender(cfgSMTPHost string, cfgSMTPPort int, cfgHostname string, logger *zap.Logger) handlers.MailSender {
+// initTransactionalMailSender wires the shared first-party transactional
+// mail pipeline (signup OTP, password reset, support requests).
+//
+// Anonymous SMTP against the inbound MX port (cfgSMTPHost:cfgSMTPPort) is
+// correctly rejected by CoreMail's anti-relay policy for any recipient
+// outside the server's own domains — that rejection is the relay policy
+// working as designed, not a bug. First-party transactional mail to
+// external recipients therefore requires authenticating as a real local
+// account on the TLS submission port, which is what happens here whenever
+// submission credentials are configured; otherwise this falls back to the
+// legacy unauthenticated MX-port path for backward compatibility (which
+// will still be relay-rejected for external recipients — see
+// customer_signup_otp.go's Part 1 fix for why that no longer produces a
+// false "sent" response).
+func initTransactionalMailSender(cfgSMTPHost string, cfgSMTPPort int, cfgSubmissionHost string, cfgSubmissionPort int, cfgUsername, cfgPassword, cfgHostname string, logger *zap.Logger) handlers.MailSender {
+	from := fmt.Sprintf("noreply@%s", resolveHostname(cfgHostname))
+
+	if cfgUsername != "" && cfgPassword != "" {
+		host := cfgSubmissionHost
+		if host == "" {
+			host = cfgSMTPHost
+		}
+		port := cfgSubmissionPort
+		if port == 0 {
+			port = 587
+		}
+		if host != "" {
+			sender := newSMTPMailSender(host, port, cfgUsername, cfgPassword, from, logger)
+			logger.Info("transactional mail sender wired via authenticated SMTP submission", zap.String("host", host), zap.Int("port", port))
+			return sender
+		}
+	}
+
 	host := cfgSMTPHost
 	port := cfgSMTPPort
 	if host == "" || port == 0 {
 		logger.Info("transactional mail sender: no SMTP configured — emails logged only")
 		return newNoopMailSender()
 	}
-	from := fmt.Sprintf("noreply@%s", resolveHostname(cfgHostname))
+	logger.Warn("transactional mail sender wired via UNAUTHENTICATED SMTP — external delivery will be rejected by the anti-relay policy; configure transactional submission credentials to enable real delivery", zap.String("host", host), zap.Int("port", port))
 	sender := newSMTPMailSender(host, port, "", "", from, logger)
-	logger.Info("transactional mail sender wired via SMTP", zap.String("host", host), zap.Int("port", port))
 	return sender
 }
 
