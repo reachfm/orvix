@@ -303,9 +303,11 @@ test.describe("Orvix admin portal E2E", () => {
     await page.goto(`http://127.0.0.1:${adminPort}/admin`);
     await page.waitForLoadState("networkidle");
 
-    // Platform Administration shell renders.
+    // Platform Administration shell renders. The Overview page's h2 is a
+    // time-of-day greeting ("Good morning, ..."), so it is not a stable
+    // string to assert on — the subtitle beneath it is the stable marker.
     const mainContent = page.locator("main");
-    await expect(mainContent.locator("h2").filter({ hasText: "Platform Administration" })).toBeVisible();
+    await expect(mainContent.getByText("Platform infrastructure and administration overview")).toBeVisible();
 
     // Customer Portal navigation must never appear for this identity.
     await expect(page.locator("aside").getByText("Customer Portal")).toHaveCount(0);
@@ -415,7 +417,7 @@ test.describe("Orvix admin portal E2E", () => {
     await page.waitForLoadState("networkidle");
     const hasDarkClass = await page.evaluate(() => document.documentElement.classList.contains("dark"));
     expect(hasDarkClass).toBe(true);
-    await expect(page.locator("main").locator("h2").filter({ hasText: "Platform Administration" })).toBeVisible();
+    await expect(page.locator("main").getByText("Platform infrastructure and administration overview")).toBeVisible();
     await expect(page.locator("aside").getByText("Customer Portal")).toHaveCount(0);
 
     const darkNavSubset: { label: string; heading: string | RegExp }[] = [
@@ -522,8 +524,9 @@ test.describe("Orvix admin portal E2E", () => {
     if (gapWriteRequests.length) throw new Error(`unexpected write request(s) during read-only gap-coverage checks: ${gapWriteRequests.join(", ")}`);
     if (darkConsoleErrors.length) throw new Error(`console errors during gap-coverage sweep: ${darkConsoleErrors.join(" | ")}`);
 
-    // Logout clears the shell.
-    await page.locator("aside button").filter({ hasText: /logout/i }).first().click();
+    // Logout clears the shell. PlatformShell labels this "Sign out";
+    // the organization portal's shell still says "Logout" — match both.
+    await page.locator("aside button").filter({ hasText: /logout|sign out/i }).first().click();
     await page.waitForLoadState("networkidle");
     await expect(page.getByRole("heading", { name: "Sign In" })).toBeVisible();
   });
