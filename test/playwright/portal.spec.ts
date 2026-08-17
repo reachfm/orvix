@@ -531,12 +531,12 @@ test.describe("Orvix admin portal E2E", () => {
     await expect(page.getByRole("heading", { name: "Sign In" })).toBeVisible();
   });
 
-  test("a plain signed-up user (portal=\"\") fails closed to neither shell", async ({ browser, request }) => {
-    // Documents the real, current authorization contract: signup grants
-    // only RoleUser, which /api/v1/me maps to portal="" (no case in the
-    // Me handler's switch). The frontend must show neither the Platform
-    // Administration shell nor the Customer Portal — never infer a shell
-    // from role.
+  test("a plain signed-up user gets the Organization portal, never Platform", async ({ browser, request }) => {
+    // A self-signup user is assigned RoleUser + a valid tenant_id (they are
+    // the owner of their own tenant). /api/v1/me's Me() classifier maps
+    // RoleUser + valid tenant_id to portal="organization" — this identity
+    // must land in the Organization/Customer shell, and must never see the
+    // Platform Administration shell (never infer a shell from role).
     const email = `portal-e2e-plain-${Date.now()}@portal-e2e-plain.local`;
     const password = "PortalE2ePlainPass123!";
     const signupRes = await request.post(`http://127.0.0.1:${adminPort}/api/v1/auth/signup`, {
@@ -560,10 +560,20 @@ test.describe("Orvix admin portal E2E", () => {
     await page.goto(`http://127.0.0.1:${adminPort}/admin`);
     await page.waitForLoadState("networkidle");
 
-    await expect(page.getByText("Access Unavailable")).toBeVisible();
-    await expect(page.getByText("Platform Administration")).toHaveCount(0);
-    await expect(page.getByText("Customer Portal")).toHaveCount(0);
+    await expect(page.getByText("Access Unavailable")).toHaveCount(0);
+    await expect(page.locator("aside").getByText("Customer Portal")).toBeVisible();
+    await expect(page.getByText("Platform infrastructure and administration overview")).toHaveCount(0);
   });
+
+  // Regression guard for Me()'s default branch (an identity whose role
+  // matches no known platform/tenant case must still receive portal="" and
+  // render neither shell) is covered at the unit level in
+  // web/admin/src/App.test.tsx (see "Access Unavailable" cases around
+  // line 294 and 302-305, including a tenant_admin with portal="" from the
+  // server — proving the frontend never infers a shell from role). A
+  // browser-level mock of /api/v1/me alone cannot reach that branch here
+  // because this suite's app loads the real Sign In screen first and only
+  // calls /me after an authenticated session exists.
 
   test("theme: defaults to Light even with OS dark preference, toggles to Dark, persists across reload, and applies pre-paint", async ({ browser, request }) => {
     const loginRes = await request.post(`http://127.0.0.1:${adminPort}/api/v1/auth/login`, {
