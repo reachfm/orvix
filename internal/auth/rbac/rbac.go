@@ -468,29 +468,29 @@ var rolePermissions = map[auth.Role]map[Permission]bool{
 		PermBillingRead:       true,
 		PermJobsRead:          true,
 	},
-	// RoleUser is a tenant owner/member who has full control over their
-	// own tenant resources but NO platform-level privileges (platform
-	// organizations read/write, platform security, platform sessions).
-	auth.RoleUser: {
-		PermDashboardRead: true,
-		PermDomainsRead:   true, PermDomainsWrite: true,
-		PermMailboxesRead: true, PermMailboxesWrite: true,
-		PermOrganizationsRead: true, PermOrganizationsWrite: true,
-		PermUsersRead: true, PermUsersWrite: true,
-		PermAliasesRead: true, PermAliasesWrite: true,
-		PermGroupsRead: true, PermGroupsWrite: true,
-		PermInvitationsRead: true, PermInvitationsWrite: true,
-		PermOwnershipTransfer: true,
-		PermAPIKeysRead:       true, PermAPIKeysWrite: true,
-		PermBillingRead: true, PermBillingWrite: true,
-		PermJobsRead: true, PermJobsWrite: true,
-		PermAuditRead:        true,
-		PermSettingsRead:     true,
-		PermMonitoringRead:   true,
-		PermCredentialsReset: true,
-		PermSessionsRevoke:   true,
-		PermSecurityRead:     true,
-	},
+	// RoleUser is the per-mailbox end-user role (webmail), canonically
+	// documented in internal/auth/auth.go as having NO Organization
+	// administration privileges. This map therefore grants it NO tenant
+	// admin permissions: a plain mailbox RoleUser must NOT gain
+	// organization writes, domain administration, mailbox administration,
+	// member management, billing changes, API key administration, or
+	// ownership transfer through the customer admin console or any
+	// direct API call.
+	//
+	// Historical note: for a time this map granted RoleUser a near-full
+	// tenant-admin permission set as compatibility behavior for
+	// signup-created tenant owners. That was a stale workaround: a
+	// person who creates an Organization through public Start Free
+	// signup is persisted as tenant_admin (see customer_auth.go /
+	// customer_signup_otp.go), so RoleUser no longer needs admin
+	// privileges anywhere. Webmail authentication is unaffected — the
+	// webmail surface (internal/api/handlers/webmail_auth.go) grants
+	// RoleUser rows only mailbox-scoped access and never consults this
+	// map. Signup-created owners whose rows predate the canonical-owner
+	// fix are repaired by the operator via the narrow, audited
+	// `orvix admin repair-signup-owner` CLI path (cmd/orvix), never by
+	// re-granting this map.
+	auth.RoleUser: {},
 	// RoleBilling is a tenant billing-only role. Read access to tenant
 	// resources. Billing write. No domain/mailbox/member mutations.
 	auth.RoleBilling: {

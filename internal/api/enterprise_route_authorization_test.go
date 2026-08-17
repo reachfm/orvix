@@ -43,7 +43,12 @@ func TestExactAuthorizationMatrix(t *testing.T) {
 	mockCSRF := func(c fiber.Ctx) error { return c.Next() }
 	ok := func(c fiber.Ctx) error { return c.JSON(fiber.Map{"ok": true}) }
 
-	enterprise := app.Group("/enterprise", reqTenant, mockCSRF)
+	// Mirror of production router.go: the /enterprise group is role-gated
+	// to the canonical tenant administration family BEFORE tenant context.
+	enterpriseRoleGate := auth.RequireAnyRole(
+		auth.RoleTenantAdmin, auth.RoleTenantOperator, auth.RoleTenantSupport, auth.RoleTenantReadOnly,
+	)
+	enterprise := app.Group("/enterprise", enterpriseRoleGate, reqTenant, mockCSRF)
 
 	// GET routes — no permission check
 	enterprise.Get("/dashboard", ok)
@@ -69,49 +74,83 @@ func TestExactAuthorizationMatrix(t *testing.T) {
 		wantCode int
 	}
 	tests := []testCase{
-		// ── RoleOperator: mailboxes.write but NOT domains/aliases/groups/invitations ──
-		{auth.RoleOperator, "GET", "/enterprise/dashboard", 200},
-		{auth.RoleOperator, "GET", "/enterprise/mailboxes", 200},
-		{auth.RoleOperator, "POST", "/enterprise/mailboxes", 200},
-		{auth.RoleOperator, "POST", "/enterprise/domains", 403},
-		{auth.RoleOperator, "POST", "/enterprise/groups", 403},
-		{auth.RoleOperator, "POST", "/enterprise/invitations", 403},
-		{auth.RoleOperator, "POST", "/enterprise/billing/subscription", 403},
-		{auth.RoleOperator, "POST", "/enterprise/api-keys", 403},
+		// ── RoleTenantAdmin: full read + write console ──
+		{auth.RoleTenantAdmin, "GET", "/enterprise/dashboard", 200},
+		{auth.RoleTenantAdmin, "GET", "/enterprise/domains", 200},
+		{auth.RoleTenantAdmin, "GET", "/enterprise/mailboxes", 200},
+		{auth.RoleTenantAdmin, "GET", "/enterprise/api-keys", 200},
+		{auth.RoleTenantAdmin, "POST", "/enterprise/domains", 200},
+		{auth.RoleTenantAdmin, "POST", "/enterprise/mailboxes", 200},
+		{auth.RoleTenantAdmin, "POST", "/enterprise/groups", 200},
+		{auth.RoleTenantAdmin, "POST", "/enterprise/aliases", 200},
+		{auth.RoleTenantAdmin, "POST", "/enterprise/invitations", 200},
+		{auth.RoleTenantAdmin, "POST", "/enterprise/billing/subscription", 200},
+		{auth.RoleTenantAdmin, "POST", "/enterprise/api-keys", 200},
+		{auth.RoleTenantAdmin, "POST", "/enterprise/ownership/request", 200},
 
-		// ── RoleBilling: billing.write but NOT domains/mailboxes/aliases ──
-		{auth.RoleBilling, "GET", "/enterprise/dashboard", 200},
-		{auth.RoleBilling, "GET", "/enterprise/billing/subscription", 200},
-		{auth.RoleBilling, "POST", "/enterprise/billing/subscription", 200},
-		{auth.RoleBilling, "POST", "/enterprise/domains", 403},
-		{auth.RoleBilling, "POST", "/enterprise/mailboxes", 403},
-		{auth.RoleBilling, "POST", "/enterprise/invitations", 403},
-		{auth.RoleBilling, "POST", "/enterprise/api-keys", 403},
-		{auth.RoleBilling, "POST", "/enterprise/ownership/request", 403},
+		// ── RoleTenantOperator: operational subset only ──
+		{auth.RoleTenantOperator, "GET", "/enterprise/dashboard", 200},
+		{auth.RoleTenantOperator, "GET", "/enterprise/mailboxes", 200},
+		{auth.RoleTenantOperator, "POST", "/enterprise/mailboxes", 200},
+		{auth.RoleTenantOperator, "GET", "/enterprise/domains", 200},
+		{auth.RoleTenantOperator, "POST", "/enterprise/domains", 403},
+		{auth.RoleTenantOperator, "POST", "/enterprise/groups", 403},
+		{auth.RoleTenantOperator, "POST", "/enterprise/invitations", 403},
+		{auth.RoleTenantOperator, "POST", "/enterprise/billing/subscription", 403},
+		{auth.RoleTenantOperator, "POST", "/enterprise/api-keys", 403},
+		{auth.RoleTenantOperator, "POST", "/enterprise/ownership/request", 403},
 
-		// ── RoleReadOnly: ALL writes denied ──
-		{auth.RoleReadOnly, "GET", "/enterprise/dashboard", 200},
-		{auth.RoleReadOnly, "GET", "/enterprise/domains", 200},
-		{auth.RoleReadOnly, "GET", "/enterprise/api-keys", 200},
-		{auth.RoleReadOnly, "POST", "/enterprise/domains", 403},
-		{auth.RoleReadOnly, "POST", "/enterprise/mailboxes", 403},
-		{auth.RoleReadOnly, "POST", "/enterprise/groups", 403},
-		{auth.RoleReadOnly, "POST", "/enterprise/aliases", 403},
-		{auth.RoleReadOnly, "POST", "/enterprise/invitations", 403},
-		{auth.RoleReadOnly, "POST", "/enterprise/billing/subscription", 403},
-		{auth.RoleReadOnly, "POST", "/enterprise/api-keys", 403},
-		{auth.RoleReadOnly, "POST", "/enterprise/ownership/request", 403},
+		// ── RoleTenantSupport: support subset only ──
+		{auth.RoleTenantSupport, "GET", "/enterprise/dashboard", 200},
+		{auth.RoleTenantSupport, "GET", "/enterprise/mailboxes", 200},
+		{auth.RoleTenantSupport, "POST", "/enterprise/mailboxes", 200},
+		{auth.RoleTenantSupport, "POST", "/enterprise/domains", 403},
+		{auth.RoleTenantSupport, "POST", "/enterprise/billing/subscription", 403},
+		{auth.RoleTenantSupport, "POST", "/enterprise/api-keys", 403},
+		{auth.RoleTenantSupport, "POST", "/enterprise/ownership/request", 403},
 
-		// ── RoleUser (owner): all tenant writes pass ──
-		{auth.RoleUser, "GET", "/enterprise/dashboard", 200},
-		{auth.RoleUser, "POST", "/enterprise/domains", 200},
-		{auth.RoleUser, "POST", "/enterprise/mailboxes", 200},
-		{auth.RoleUser, "POST", "/enterprise/groups", 200},
-		{auth.RoleUser, "POST", "/enterprise/aliases", 200},
-		{auth.RoleUser, "POST", "/enterprise/invitations", 200},
-		{auth.RoleUser, "POST", "/enterprise/billing/subscription", 200},
-		{auth.RoleUser, "POST", "/enterprise/api-keys", 200},
-		{auth.RoleUser, "POST", "/enterprise/ownership/request", 200},
+		// ── RoleTenantReadOnly: ALL writes denied ──
+		{auth.RoleTenantReadOnly, "GET", "/enterprise/dashboard", 200},
+		{auth.RoleTenantReadOnly, "GET", "/enterprise/domains", 200},
+		{auth.RoleTenantReadOnly, "GET", "/enterprise/api-keys", 200},
+		{auth.RoleTenantReadOnly, "POST", "/enterprise/domains", 403},
+		{auth.RoleTenantReadOnly, "POST", "/enterprise/mailboxes", 403},
+		{auth.RoleTenantReadOnly, "POST", "/enterprise/groups", 403},
+		{auth.RoleTenantReadOnly, "POST", "/enterprise/aliases", 403},
+		{auth.RoleTenantReadOnly, "POST", "/enterprise/invitations", 403},
+		{auth.RoleTenantReadOnly, "POST", "/enterprise/billing/subscription", 403},
+		{auth.RoleTenantReadOnly, "POST", "/enterprise/api-keys", 403},
+		{auth.RoleTenantReadOnly, "POST", "/enterprise/ownership/request", 403},
+
+		// ── RoleUser (webmail end-user): denied the ENTIRE console ──
+		// RoleUser is the per-mailbox end-user role with no Organization
+		// administration privileges. The enterpriseRead group gate rejects
+		// it before any read or write handler runs.
+		{auth.RoleUser, "GET", "/enterprise/dashboard", 403},
+		{auth.RoleUser, "GET", "/enterprise/domains", 403},
+		{auth.RoleUser, "GET", "/enterprise/mailboxes", 403},
+		{auth.RoleUser, "GET", "/enterprise/api-keys", 403},
+		{auth.RoleUser, "POST", "/enterprise/domains", 403},
+		{auth.RoleUser, "POST", "/enterprise/mailboxes", 403},
+		{auth.RoleUser, "POST", "/enterprise/groups", 403},
+		{auth.RoleUser, "POST", "/enterprise/aliases", 403},
+		{auth.RoleUser, "POST", "/enterprise/invitations", 403},
+		{auth.RoleUser, "POST", "/enterprise/billing/subscription", 403},
+		{auth.RoleUser, "POST", "/enterprise/api-keys", 403},
+		{auth.RoleUser, "POST", "/enterprise/ownership/request", 403},
+
+		// ── RoleBilling: unsupported billing-only persona — also denied ──
+		{auth.RoleBilling, "GET", "/enterprise/billing/subscription", 403},
+		{auth.RoleBilling, "POST", "/enterprise/billing/subscription", 403},
+
+		// ── Legacy roles (pre-normalization) — denied the console ──
+		// Legacy operator/readonly rows are normalized at startup to
+		// tenant_operator/tenant_readonly when they carry a tenant_id;
+		// un-normalized rows are ambiguous and must have zero access.
+		{auth.RoleOperator, "GET", "/enterprise/dashboard", 403},
+		{auth.RoleOperator, "POST", "/enterprise/mailboxes", 403},
+		{auth.RoleReadOnly, "GET", "/enterprise/dashboard", 403},
+		{auth.RoleAdmin, "GET", "/enterprise/dashboard", 403},
 	}
 
 	for _, tc := range tests {
@@ -128,7 +167,7 @@ func TestExactAuthorizationMatrix(t *testing.T) {
 				c.Locals("user_id", uint(1))
 				return c.Next()
 			})
-			a.Use("/enterprise", reqTenant, mockCSRF)
+			a.Use("/enterprise", enterpriseRoleGate, reqTenant, mockCSRF)
 
 			a.Get("/enterprise/dashboard", ok)
 			a.Get("/enterprise/domains", ok)
@@ -179,7 +218,7 @@ func TestSuspendedTenantAllWritesDenied(t *testing.T) {
 				return c.Next()
 			}
 			a.Use(func(c fiber.Ctx) error {
-				c.Locals("role", auth.RoleUser)
+				c.Locals("role", auth.RoleTenantAdmin)
 				c.Locals("tenant_id", uint(1))
 				return c.Next()
 			})

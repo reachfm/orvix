@@ -1233,8 +1233,15 @@ func (h *Handler) DeleteAPIKey(c fiber.Ctx) error {
 // shell. Derivation is fail-closed:
 //   - RolePlatformSuperAdmin (or the legacy RoleSuperAdmin) → "platform".
 //     No `organization` field.
-//   - Any tenant role with a non-NULL tenant_id → "organization" and an
-//     `organization` object with id/name/slug.
+//   - Canonical tenant administration roles (tenant_admin, tenant_operator,
+//     tenant_support, tenant_readonly) with a non-NULL tenant_id →
+//     "organization" and an `organization` object with id/name/slug.
+//   - RoleUser (per-mailbox webmail end-user) → NOT the full Organization
+//     Admin shell. RoleUser has no Organization administration privileges,
+//     so it resolves to portal="" and the client fails closed with the
+//     access-unavailable state. Webmail has its own separate surface.
+//   - RoleBilling → portal="" (fail closed): the billing-only persona is
+//     not intentionally supported by a visible shell today.
 //   - Anything else (unknown role, tenant role without tenant_id) →
 //     empty portal string. The client MUST refuse to render a shell.
 //
@@ -1262,7 +1269,7 @@ func (h *Handler) Me(c fiber.Ctx) error {
 	switch auth.Role(role) {
 	case auth.RolePlatformSuperAdmin, auth.RoleSuperAdmin:
 		portal = "platform"
-	case auth.RoleTenantAdmin, auth.RoleTenantOperator, auth.RoleTenantSupport, auth.RoleTenantReadOnly, auth.RoleUser:
+	case auth.RoleTenantAdmin, auth.RoleTenantOperator, auth.RoleTenantSupport, auth.RoleTenantReadOnly:
 		if tenantID.Valid && tenantID.Int64 > 0 {
 			portal = "organization"
 			var tName, tSlug string
@@ -1275,9 +1282,11 @@ func (h *Handler) Me(c fiber.Ctx) error {
 			}
 		}
 	default:
-		// Unknown / legacy un-normalized role → no portal. The client
+		// RoleUser (webmail end-user), RoleBilling (unsupported persona),
+		// unknown / legacy un-normalized role → no portal. The client
 		// shows an access-denied screen instead of falling through to
-		// the platform shell.
+		// the platform shell or granting a RoleUser the full Organization
+		// Admin console.
 		portal = ""
 	}
 

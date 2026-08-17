@@ -187,12 +187,20 @@ func (h *Handler) Signup(c fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "internal error"})
 	}
 
+	// The person who creates a new Organization through public Start Free
+	// signup is the Organization OWNER — the primary administrator of their
+	// own new tenant. The owner identity is persisted canonically as
+	// tenant_admin (NOT RoleUser: RoleUser is the per-mailbox webmail
+	// end-user role with no Organization administration privileges — see
+	// internal/auth/auth.go). The server assigns this role because the
+	// caller is creating their OWN tenant; the signup request body never
+	// carries a role field and never influences authorization.
 	var userID uint
 	now = time.Now().UTC()
 	if dial.IsPostgres() {
 		err = tx.QueryRow(
 			fmt.Sprintf("INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified) VALUES (%s) RETURNING id", dial.Placeholders(8)),
-			now, now, email, string(hash), string(auth.RoleUser), tenantID, true, true,
+			now, now, email, string(hash), string(auth.RoleTenantAdmin), tenantID, true, true,
 		).Scan(&userID)
 		if err != nil {
 			h.logger.Error("signup: insert user", zap.Error(err))
@@ -201,7 +209,7 @@ func (h *Handler) Signup(c fiber.Ctx) error {
 	} else {
 		res, err := tx.Exec(
 			fmt.Sprintf("INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified) VALUES (%s)", dial.Placeholders(8)),
-			now, now, email, string(hash), string(auth.RoleUser), tenantID, true, true,
+			now, now, email, string(hash), string(auth.RoleTenantAdmin), tenantID, true, true,
 		)
 		if err != nil {
 			h.logger.Error("signup: insert user", zap.Error(err))
@@ -247,7 +255,7 @@ func (h *Handler) Signup(c fiber.Ctx) error {
 		"user": fiber.Map{
 			"id":    userID,
 			"email": email,
-			"role":  string(auth.RoleUser),
+			"role":  string(auth.RoleTenantAdmin),
 		},
 	})
 }

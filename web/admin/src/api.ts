@@ -451,6 +451,15 @@ export const api = {
   listInvoices: () => request<any[]>("/enterprise/billing/invoices"),
   getInvoice: (id: number) => request<any>(`/enterprise/billing/invoices/${id}`),
 
+  // Enterprise API keys (tenant-scoped, /enterprise/api-keys)
+  listEnterpriseApiKeys: () => request<any[]>("/enterprise/api-keys"),
+  createEnterpriseApiKey: (data: { name: string; scopes: string[] }) =>
+    request("/enterprise/api-keys", { method: "POST", body: JSON.stringify(data) }),
+  rotateEnterpriseApiKey: (id: number, scopes?: string[]) =>
+    request(`/enterprise/api-keys/${id}/rotate`, { method: "POST", body: JSON.stringify({ scopes: scopes || [] }) }),
+  deleteEnterpriseApiKey: (id: number) =>
+    request(`/enterprise/api-keys/${id}`, { method: "DELETE" }),
+
   // Audit logs
   listAuditLogs: () => request<any[]>("/enterprise/audit/logs"),
 

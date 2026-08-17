@@ -91,6 +91,12 @@ var rawLegacyUsersAdminInsert = map[string]string{
 	// TestWebmailLegacyAdminReconciliation and
 	// TestWebmailGetOrCreateUserRoleChangeBumpsVersionAndRevokesToken.
 	"internal/api/handlers/webmail_auth_revocation_test.go": "Class C: legacy 'admin' seed proves migration-window reconciliation + token revocation",
+
+	// me_portal_role_test.go — TestCountAdmins_LegacyAdminRowsStillCounted
+	// intentionally seeds a legacy 'admin' row to prove the migration
+	// window: CountAdmins keeps counting pre-normalization admin rows until
+	// the startup normalizer rewrites them to canonical roles.
+	"internal/api/handlers/me_portal_role_test.go": "Class C: legacy 'admin' seed proves CountAdmins migration-window counting",
 }
 
 // helperCallPattern matches seedLegacyAdminForMigrationTest and its

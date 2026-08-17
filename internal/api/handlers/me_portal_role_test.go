@@ -113,9 +113,10 @@ func (h *mePortalHarness) me(t *testing.T, bearer string) (int, map[string]inter
 	return resp.StatusCode, out
 }
 
-// TestMePortal_SelfSignupOwnerGetsOrganizationPortal is the regression test
-// for Bug 1: a self-signup tenant owner (role="user", valid tenant_id) must
-// land in the organization portal, not fall through to portal="".
+// TestMePortal_SelfSignupOwnerGetsOrganizationPortal is the regression
+// test for Bug 1 (fixed canonically): a self-signup tenant owner is
+// persisted as tenant_admin by the server (customer_auth.go /
+// customer_signup_otp.go) and must land in the organization portal.
 func TestMePortal_SelfSignupOwnerGetsOrganizationPortal(t *testing.T) {
 	h := newMePortalHarness(t)
 	now := time.Now().UTC()
@@ -123,7 +124,7 @@ func TestMePortal_SelfSignupOwnerGetsOrganizationPortal(t *testing.T) {
 	tid, _ := res.LastInsertId()
 
 	pw, _ := auth.HashPassword("OwnerPass!2026")
-	h.sqlDB.Exec(`INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified) VALUES (?, ?, 'owner@test.local', ?, 'user', ?, 1, 1)`, now, now, pw, tid)
+	h.sqlDB.Exec(`INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified) VALUES (?, ?, 'owner@test.local', ?, 'tenant_admin', ?, 1, 1)`, now, now, pw, tid)
 
 	tok := h.login(t, "owner@test.local", "OwnerPass!2026")
 	status, out := h.me(t, tok)
@@ -131,11 +132,38 @@ func TestMePortal_SelfSignupOwnerGetsOrganizationPortal(t *testing.T) {
 		t.Fatalf("me status=%d body=%v", status, out)
 	}
 	if out["portal"] != "organization" {
-		t.Fatalf("self-signup owner (role=user) portal=%v, want organization; body=%v", out["portal"], out)
+		t.Fatalf("self-signup owner (tenant_admin) portal=%v, want organization; body=%v", out["portal"], out)
 	}
 	org, ok := out["organization"].(map[string]interface{})
 	if !ok || org["id"] == nil {
 		t.Fatalf("expected organization block in /me response, got %v", out)
+	}
+}
+
+// TestMePortal_RoleUserFailsClosed is the canonical RoleUser regression:
+// a RoleUser row (per-mailbox webmail end-user) with a valid tenant_id
+// must NOT be classified into the full Organization Admin shell — the
+// server fails closed with portal="" and the client shows the
+// access-unavailable state instead of granting the admin console.
+func TestMePortal_RoleUserFailsClosed(t *testing.T) {
+	h := newMePortalHarness(t)
+	now := time.Now().UTC()
+	res, _ := h.sqlDB.Exec(`INSERT INTO tenants (name, slug, domain, plan, active, created_at, updated_at) VALUES ('webmail-co', 'webmail-co', 'webmail-co.example', 'free', 1, ?, ?)`, now, now)
+	tid, _ := res.LastInsertId()
+
+	pw, _ := auth.HashPassword("WebmailPass!2026")
+	h.sqlDB.Exec(`INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified) VALUES (?, ?, 'webmail@test.local', ?, 'user', ?, 1, 1)`, now, now, pw, tid)
+
+	tok := h.login(t, "webmail@test.local", "WebmailPass!2026")
+	status, out := h.me(t, tok)
+	if status != http.StatusOK {
+		t.Fatalf("me status=%d body=%v", status, out)
+	}
+	if out["portal"] != "" {
+		t.Fatalf("RoleUser portal=%v, want empty string (fail closed — webmail end-user, not an Organization administrator); body=%v", out["portal"], out)
+	}
+	if _, hasOrg := out["organization"]; hasOrg {
+		t.Fatalf("RoleUser /me must not carry an organization block; body=%v", out)
 	}
 }
 
@@ -192,16 +220,20 @@ func TestMePortal_UnrecognizedRoleFailsClosed(t *testing.T) {
 	}
 }
 
-// TestCountAdmins_CountsSelfSignupOwner is the regression test for Bug 2:
-// a role="user" tenant owner must be counted as an admin by the Platform
-// dashboard's organization admin count.
-func TestCountAdmins_CountsSelfSignupOwner(t *testing.T) {
+// TestCountAdmins_CountsSignupOwnerAsTenantAdmin is the canonical
+// regression for the Platform Organizations drawer's "Admin users" field:
+// a signup-created owner persisted as tenant_admin must be counted, while
+// a plain RoleUser (webmail end-user) must NOT be counted as an admin.
+func TestCountAdmins_CountsSignupOwnerAsTenantAdmin(t *testing.T) {
 	h := newMePortalHarness(t)
 	now := time.Now().UTC()
 	res, _ := h.sqlDB.Exec(`INSERT INTO tenants (name, slug, domain, plan, active, created_at, updated_at) VALUES ('cnt-co', 'cnt-co', 'cnt-co.example', 'free', 1, ?, ?)`, now, now)
 	tid, _ := res.LastInsertId()
 	pw, _ := auth.HashPassword("CountPass!2026")
-	h.sqlDB.Exec(`INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified) VALUES (?, ?, 'cnt-owner@test.local', ?, 'user', ?, 1, 1)`, now, now, pw, tid)
+	// Signup-created owner — canonical tenant_admin.
+	h.sqlDB.Exec(`INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified) VALUES (?, ?, 'cnt-owner@test.local', ?, 'tenant_admin', ?, 1, 1)`, now, now, pw, tid)
+	// Webmail end-user in the same tenant — must never be counted.
+	h.sqlDB.Exec(`INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified) VALUES (?, ?, 'cnt-webmail@test.local', ?, 'user', ?, 1, 1)`, now, now, pw, tid)
 
 	repo := organization.NewOrganizationRepo(h.sqlDB)
 	count, err := repo.CountAdmins(context.Background(), uint(tid))
@@ -209,6 +241,49 @@ func TestCountAdmins_CountsSelfSignupOwner(t *testing.T) {
 		t.Fatalf("CountAdmins: %v", err)
 	}
 	if count != 1 {
-		t.Fatalf("CountAdmins for role=user tenant owner = %d, want 1", count)
+		t.Fatalf("CountAdmins = %d, want 1 (only the tenant_admin owner; webmail RoleUser must not count)", count)
+	}
+}
+
+// TestCountAdmins_RoleUserOnlyTenantCountsZero proves the failure mode the
+// legacy role='user' owner rows produced: a tenant whose ONLY user rows are
+// RoleUser has ZERO countable admins (this is exactly what the operator's
+// `orvix admin repair-signup-owner` repair fixes for legacy signup rows).
+func TestCountAdmins_RoleUserOnlyTenantCountsZero(t *testing.T) {
+	h := newMePortalHarness(t)
+	now := time.Now().UTC()
+	res, _ := h.sqlDB.Exec(`INSERT INTO tenants (name, slug, domain, plan, active, created_at, updated_at) VALUES ('legacy-co', 'legacy-co', 'legacy-co.example', 'free', 1, ?, ?)`, now, now)
+	tid, _ := res.LastInsertId()
+	pw, _ := auth.HashPassword("LegacyPass!2026")
+	h.sqlDB.Exec(`INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified) VALUES (?, ?, 'legacy-owner@test.local', ?, 'user', ?, 1, 1)`, now, now, pw, tid)
+
+	repo := organization.NewOrganizationRepo(h.sqlDB)
+	count, err := repo.CountAdmins(context.Background(), uint(tid))
+	if err != nil {
+		t.Fatalf("CountAdmins: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("CountAdmins for a RoleUser-only tenant = %d, want 0 (webmail end-users are not administrators)", count)
+	}
+}
+
+// TestCountAdmins_LegacyAdminRowsStillCounted guards the migration window:
+// pre-normalization 'admin'/'superadmin' rows remain countable until the
+// startup normalizer rewrites them to canonical roles.
+func TestCountAdmins_LegacyAdminRowsStillCounted(t *testing.T) {
+	h := newMePortalHarness(t)
+	now := time.Now().UTC()
+	res, _ := h.sqlDB.Exec(`INSERT INTO tenants (name, slug, domain, plan, active, created_at, updated_at) VALUES ('legacy-admin-co', 'legacy-admin-co', 'legacy-admin-co.example', 'free', 1, ?, ?)`, now, now)
+	tid, _ := res.LastInsertId()
+	pw, _ := auth.HashPassword("LegacyAdminPass!2026")
+	h.sqlDB.Exec(`INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified) VALUES (?, ?, 'legacy-admin@test.local', ?, 'admin', ?, 1, 1)`, now, now, pw, tid)
+
+	repo := organization.NewOrganizationRepo(h.sqlDB)
+	count, err := repo.CountAdmins(context.Background(), uint(tid))
+	if err != nil {
+		t.Fatalf("CountAdmins: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("CountAdmins for legacy 'admin' row = %d, want 1 (migration-window rows remain countable)", count)
 	}
 }

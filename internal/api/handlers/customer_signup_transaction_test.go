@@ -130,6 +130,7 @@ func assertSignupCompletesAndCommitsAtomically(t *testing.T, env *signupTxEnv) {
 		t.Fatalf("signup status=%d body=%s", status, body)
 	}
 	assertSignupCounts(t, env.sqlDB, "signup-ok@example.com", "example.com", 1, 1, 1)
+	assertSignupOwnerRole(t, env.sqlDB, "signup-ok@example.com")
 }
 
 func assertSignupSubscriptionFailureRollsBack(t *testing.T, env *signupTxEnv) {
@@ -186,6 +187,25 @@ func assertSignupCounts(t *testing.T, db *sql.DB, email, domain string, wantTena
 	assertCountWhere(t, db, "tenants", "domain", domain, wantTenants)
 	assertCountWhere(t, db, "users", "email", strings.ToLower(email), wantUsers)
 	assertScalarInt64Handlers(t, db, "SELECT COUNT(*) FROM subscriptions", wantSubs)
+}
+
+// assertSignupOwnerRole pins the canonical owner model: a user row created
+// by public signup (immediate or OTP) must be persisted as tenant_admin —
+// RoleUser is the per-mailbox webmail end-user role and must never be
+// assigned to a new Organization owner.
+func assertSignupOwnerRole(t *testing.T, db *sql.DB, email string) {
+	t.Helper()
+	var role string
+	dial, derr := dbdialect.Detect(db)
+	if derr != nil {
+		dial = dbdialect.FromDriver("sqlite")
+	}
+	if err := db.QueryRow(dial.Rewrite("SELECT role FROM users WHERE email = ?"), strings.ToLower(email)).Scan(&role); err != nil {
+		t.Fatalf("read signup owner role for %s: %v", email, err)
+	}
+	if role != string(auth.RoleTenantAdmin) {
+		t.Fatalf("signup owner role for %s = %q, want %q (canonical tenant_admin)", email, role, auth.RoleTenantAdmin)
+	}
 }
 
 func assertCountWhere(t *testing.T, db *sql.DB, table, column, value string, want int64) {

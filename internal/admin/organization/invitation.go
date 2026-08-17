@@ -63,6 +63,15 @@ func (s *Service) CreateInvitation(ctx context.Context, orgID, inviterID uint, e
 	if err != nil || org == nil {
 		return nil, "", ErrOrganizationNotFound
 	}
+	// The invited member's role must be a canonical tenant administration
+	// role. RoleUser ("user" — a per-mailbox webmail end-user) and every
+	// other non-administrative or platform role is rejected: an invitation
+	// must never mint an identity that either cannot administer anything
+	// or that carries a role the member-role policy does not allow
+	// (UpdateMemberRole uses the same allowlist via isValidOrgMemberRole).
+	if !isValidOrgMemberRole(role) {
+		return nil, "", fmt.Errorf("invalid organization member role: %s", role)
+	}
 	rawToken, tokenHash, err := generateInviteToken()
 	if err != nil {
 		return nil, "", fmt.Errorf("generate token: %w", err)

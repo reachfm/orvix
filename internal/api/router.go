@@ -1450,9 +1450,12 @@ func (r *Router) setupRoutes() {
 	// Enterprise customer administration (tenant-scoped, CSRF-protected).
 	// All operations are scoped to the caller's tenant_id.
 	//
-	// GET routes (enterpriseRead): any authenticated user with valid tenant
-	// context. RoleUser (signup-created owner), RoleBilling, RoleReadOnly,
-	// RoleOperator, RoleAdmin, and RoleSuperAdmin all have dashboard read.
+	// GET routes (enterpriseRead): role-gated to the canonical tenant
+	// administration family (tenant_admin, tenant_operator,
+	// tenant_support, tenant_readonly) with valid tenant context. RoleUser
+	// (per-mailbox webmail end-user) and RoleBilling (unsupported billing
+	// persona) are denied the entire console — reads of domains, mailboxes
+	// and members are still Organization administration surface.
 	//
 	// POST/PATCH/DELETE routes: each capability group has its own exact
 	// permission guard. A caller with domains.write cannot reach mailbox
@@ -1513,25 +1516,43 @@ func (r *Router) setupRoutes() {
 	// read_only grant for platform actors.
 	protected.Get("/enterprise/organizations/current", r.h.SupportAccessMiddlewareForScope("read_only"), r.csrf.Middleware(), r.h.GetCurrentOrganization)
 
+	// The /enterprise/* group IS the customer Organization Admin console.
+	// It is role-gated to the canonical tenant administration family
+	// (tenant_admin, tenant_operator, tenant_support, tenant_readonly) —
+	// the same family tenantCompatMW admits. RoleUser (per-mailbox webmail
+	// end-user) and RoleBilling (unsupported billing-only persona) must
+	// NOT reach any of these endpoints, even read-only ones: reads of
+	// domains/mailboxes/members are still Organization administration
+	// surface. Per-route authrbac.Require(...) gates below decide read vs
+	// write within the family; this gate keeps non-administrative roles
+	// entirely out of the console.
 	enterpriseRead := protected.Group("/enterprise",
+		auth.RequireAnyRole(auth.RoleTenantAdmin, auth.RoleTenantOperator, auth.RoleTenantSupport, auth.RoleTenantReadOnly),
 		requireTenantContext,
 		r.csrf.Middleware(),
 		requireTenantActive,
 	)
 
-	// Per-capability write guards: each guards only its own resource.
-	canWriteDomains := enterpriseRead.Group("", authrbac.Require(authrbac.PermDomainsWrite))
-	canWriteMailboxes := enterpriseRead.Group("", authrbac.Require(authrbac.PermMailboxesWrite))
-	canWriteOrgs := enterpriseRead.Group("", authrbac.Require(authrbac.PermOrganizationsWrite))
-	canWriteUsers := enterpriseRead.Group("", authrbac.Require(authrbac.PermUsersWrite))
-	canWriteInvitations := enterpriseRead.Group("", authrbac.Require(authrbac.PermInvitationsWrite))
-	canTransferOwnership := enterpriseRead.Group("", authrbac.Require(authrbac.PermOwnershipTransfer))
-	canWriteAPIKeys := enterpriseRead.Group("", authrbac.Require(authrbac.PermAPIKeysWrite))
-	canWriteBilling := enterpriseRead.Group("", authrbac.Require(authrbac.PermBillingWrite))
-	canWriteAliases := enterpriseRead.Group("", authrbac.Require(authrbac.PermAliasesWrite))
-	canWriteGroups := enterpriseRead.Group("", authrbac.Require(authrbac.PermGroupsWrite))
-	canWriteImports := enterpriseRead.Group("", authrbac.Require(authrbac.PermImportsWrite))
-	canExecuteImports := enterpriseRead.Group("", authrbac.Require(authrbac.PermImportsExecute))
+	// Per-capability write guards. IMPORTANT: these are plain middleware
+	// handlers applied PER ROUTE, NOT empty-prefix Group("") objects —
+	// Fiber v3 merges middleware across empty-prefix groups registered on
+	// the same parent (documented in the /protected block below), which
+	// would flatten every write gate onto every route of the console and
+	// deny tenant_operator/tenant_support/tenant_readonly even read-only
+	// access. The per-route slice pattern is the same one tenantCompatMW
+	// uses; it must not drift back to Group("").
+	canWriteDomains := authrbac.Require(authrbac.PermDomainsWrite)
+	canWriteMailboxes := authrbac.Require(authrbac.PermMailboxesWrite)
+	canWriteOrgs := authrbac.Require(authrbac.PermOrganizationsWrite)
+	canWriteUsers := authrbac.Require(authrbac.PermUsersWrite)
+	canWriteInvitations := authrbac.Require(authrbac.PermInvitationsWrite)
+	canTransferOwnership := authrbac.Require(authrbac.PermOwnershipTransfer)
+	canWriteAPIKeys := authrbac.Require(authrbac.PermAPIKeysWrite)
+	canWriteBilling := authrbac.Require(authrbac.PermBillingWrite)
+	canWriteAliases := authrbac.Require(authrbac.PermAliasesWrite)
+	canWriteGroups := authrbac.Require(authrbac.PermGroupsWrite)
+	canWriteImports := authrbac.Require(authrbac.PermImportsWrite)
+	canExecuteImports := authrbac.Require(authrbac.PermImportsExecute)
 
 	// ── Dashboard ──
 	enterpriseRead.Get("/dashboard", r.h.CustomerDashboard)
@@ -1539,57 +1560,57 @@ func (r *Router) setupRoutes() {
 	// ── Domains ──
 	enterpriseRead.Get("/domains", r.h.ListAdminDomains)
 	enterpriseRead.Get("/domains/:id", r.h.GetAdminDomain)
-	canWriteDomains.Post("/domains", r.h.CreateAdminDomain)
-	canWriteDomains.Patch("/domains/:id", r.h.UpdateAdminDomain)
-	canWriteDomains.Post("/domains/:id/status", r.h.SetAdminDomainStatus)
-	canWriteDomains.Delete("/domains/:id", r.h.DeleteAdminDomain)
+	enterpriseRead.Post("/domains", canWriteDomains, r.h.CreateAdminDomain)
+	enterpriseRead.Patch("/domains/:id", canWriteDomains, r.h.UpdateAdminDomain)
+	enterpriseRead.Post("/domains/:id/status", canWriteDomains, r.h.SetAdminDomainStatus)
+	enterpriseRead.Delete("/domains/:id", canWriteDomains, r.h.DeleteAdminDomain)
 	enterpriseRead.Get("/domains/:id/dkim", r.h.GetAdminDomainDKIM)
-	canWriteDomains.Post("/domains/:id/dkim/generate", r.h.PostAdminDomainDKIMGenerate)
-	canWriteDomains.Post("/domains/:id/dkim/rotate", r.h.PostAdminDomainDKIMRotate)
-	canWriteDomains.Post("/domains/:id/dkim/revoke", r.h.PostAdminDomainDKIMRevoke)
+	enterpriseRead.Post("/domains/:id/dkim/generate", canWriteDomains, r.h.PostAdminDomainDKIMGenerate)
+	enterpriseRead.Post("/domains/:id/dkim/rotate", canWriteDomains, r.h.PostAdminDomainDKIMRotate)
+	enterpriseRead.Post("/domains/:id/dkim/revoke", canWriteDomains, r.h.PostAdminDomainDKIMRevoke)
 	enterpriseRead.Get("/domains/:id/dkim/history", r.h.GetAdminDomainDKIMHistory)
 	enterpriseRead.Get("/domains/:id/tls", r.h.GetAdminDomainTLSStatus)
 	enterpriseRead.Get("/domains/:id/mail-access-mode", r.h.GetAdminDomainMailAccessMode)
-	canWriteDomains.Post("/domains/:id/mail-access-mode", r.h.PostAdminDomainMailAccessMode)
+	enterpriseRead.Post("/domains/:id/mail-access-mode", canWriteDomains, r.h.PostAdminDomainMailAccessMode)
 	enterpriseRead.Post("/domains/:id/verify", r.h.VerifyEnterpriseDomain)
 	enterpriseRead.Get("/domains/:id/dns", r.h.GetEnterpriseDomainDNS)
-	canWriteDomains.Post("/domains/:id/dns/verify", r.h.VerifyEnterpriseDomainDNS)
+	enterpriseRead.Post("/domains/:id/dns/verify", canWriteDomains, r.h.VerifyEnterpriseDomainDNS)
 
 	// ── Mailboxes ──
 	enterpriseRead.Get("/mailboxes", r.h.ListAdminMailboxes)
 	enterpriseRead.Get("/mailboxes/:id", r.h.GetAdminMailbox)
-	canWriteMailboxes.Post("/mailboxes", r.h.CreateAdminMailbox)
-	canWriteMailboxes.Patch("/mailboxes/:id", r.h.UpdateAdminMailbox)
-	canWriteMailboxes.Post("/mailboxes/:id/status", r.h.SetAdminMailboxStatus)
-	canWriteMailboxes.Post("/mailboxes/bulk/status", r.h.BulkSetAdminMailboxStatus)
-	canWriteMailboxes.Post("/mailboxes/:id/reset-password", r.h.ResetAdminMailboxPassword)
-	canWriteMailboxes.Delete("/mailboxes/:id", r.h.DeleteMailbox)
-	canWriteMailboxes.Post("/mailboxes/:id/restore", r.h.PostAdminMailboxRestore)
-	canWriteMailboxes.Delete("/mailboxes/:id/purge", r.h.DeleteAdminMailboxPurge)
+	enterpriseRead.Post("/mailboxes", canWriteMailboxes, r.h.CreateAdminMailbox)
+	enterpriseRead.Patch("/mailboxes/:id", canWriteMailboxes, r.h.UpdateAdminMailbox)
+	enterpriseRead.Post("/mailboxes/:id/status", canWriteMailboxes, r.h.SetAdminMailboxStatus)
+	enterpriseRead.Post("/mailboxes/bulk/status", canWriteMailboxes, r.h.BulkSetAdminMailboxStatus)
+	enterpriseRead.Post("/mailboxes/:id/reset-password", canWriteMailboxes, r.h.ResetAdminMailboxPassword)
+	enterpriseRead.Delete("/mailboxes/:id", canWriteMailboxes, r.h.DeleteMailbox)
+	enterpriseRead.Post("/mailboxes/:id/restore", canWriteMailboxes, r.h.PostAdminMailboxRestore)
+	enterpriseRead.Delete("/mailboxes/:id/purge", canWriteMailboxes, r.h.DeleteAdminMailboxPurge)
 
 	// ── Bulk mailbox provisioning (Milestone 6) ──
-	canWriteMailboxes.Post("/domains/:id/mailboxes/bulk/validate", r.h.PostBulkProvisionValidate)
-	canWriteMailboxes.Post("/domains/:id/mailboxes/bulk/jobs", r.h.PostBulkProvisionCreateJob)
+	enterpriseRead.Post("/domains/:id/mailboxes/bulk/validate", canWriteMailboxes, r.h.PostBulkProvisionValidate)
+	enterpriseRead.Post("/domains/:id/mailboxes/bulk/jobs", canWriteMailboxes, r.h.PostBulkProvisionCreateJob)
 	enterpriseRead.Get("/mailboxes/bulk/jobs/:jobId", r.h.GetBulkProvisionJob)
-	canWriteMailboxes.Post("/mailboxes/bulk/jobs/:jobId/execute", r.h.PostBulkProvisionExecute)
-	canWriteMailboxes.Post("/mailboxes/bulk/jobs/:jobId/cancel", r.h.PostBulkProvisionCancel)
-	canWriteMailboxes.Post("/mailboxes/bulk/jobs/:jobId/retry", r.h.PostBulkProvisionRetry)
+	enterpriseRead.Post("/mailboxes/bulk/jobs/:jobId/execute", canWriteMailboxes, r.h.PostBulkProvisionExecute)
+	enterpriseRead.Post("/mailboxes/bulk/jobs/:jobId/cancel", canWriteMailboxes, r.h.PostBulkProvisionCancel)
+	enterpriseRead.Post("/mailboxes/bulk/jobs/:jobId/retry", canWriteMailboxes, r.h.PostBulkProvisionRetry)
 
 	// ── Outbound relay control plane (Milestone 7) ──
-	canWriteDomains.Post("/relay/pools", r.h.PostRelayPool)
-	canWriteDomains.Post("/relay/providers", r.h.PostRelayProvider)
+	enterpriseRead.Post("/relay/pools", canWriteDomains, r.h.PostRelayPool)
+	enterpriseRead.Post("/relay/providers", canWriteDomains, r.h.PostRelayProvider)
 	enterpriseRead.Get("/relay/pools/:id/providers", r.h.GetRelayPoolProviders)
-	canWriteDomains.Post("/relay/providers/:id/test", r.h.PostRelayProviderTest)
-	canWriteDomains.Post("/relay/routing-rules", r.h.PostRelayRoutingRule)
-	canWriteDomains.Post("/relay/emergency-override", r.h.PostRelayEmergencyOverride)
-	canWriteDomains.Delete("/relay/emergency-override/:id", r.h.DeleteRelayEmergencyOverride)
+	enterpriseRead.Post("/relay/providers/:id/test", canWriteDomains, r.h.PostRelayProviderTest)
+	enterpriseRead.Post("/relay/routing-rules", canWriteDomains, r.h.PostRelayRoutingRule)
+	enterpriseRead.Post("/relay/emergency-override", canWriteDomains, r.h.PostRelayEmergencyOverride)
+	enterpriseRead.Delete("/relay/emergency-override/:id", canWriteDomains, r.h.DeleteRelayEmergencyOverride)
 
 	// ── Cluster control plane (Milestone 10) ──
 	enterpriseRead.Get("/cluster/nodes", r.h.GetClusterNodes)
-	canWriteDomains.Post("/cluster/nodes/:id/cordon", r.h.PostClusterNodeCordon)
-	canWriteDomains.Post("/cluster/nodes/:id/uncordon", r.h.PostClusterNodeUncordon)
-	canWriteDomains.Post("/cluster/nodes/:id/drain", r.h.PostClusterNodeDrain)
-	canWriteDomains.Post("/cluster/nodes/:id/resume", r.h.PostClusterNodeResume)
+	enterpriseRead.Post("/cluster/nodes/:id/cordon", canWriteDomains, r.h.PostClusterNodeCordon)
+	enterpriseRead.Post("/cluster/nodes/:id/uncordon", canWriteDomains, r.h.PostClusterNodeUncordon)
+	enterpriseRead.Post("/cluster/nodes/:id/drain", canWriteDomains, r.h.PostClusterNodeDrain)
+	enterpriseRead.Post("/cluster/nodes/:id/resume", canWriteDomains, r.h.PostClusterNodeResume)
 
 	// ── Organizations ──
 	enterpriseRead.Get("/organizations/:id", r.h.GetOrganization)
@@ -1601,73 +1622,73 @@ func (r *Router) setupRoutes() {
 
 	// ── Invitations ──
 	enterpriseRead.Get("/invitations", r.h.ListInvitations)
-	canWriteInvitations.Post("/invitations", r.h.CreateInvitation)
-	canWriteInvitations.Post("/invitations/:id/revoke", r.h.RevokeInvitation)
+	enterpriseRead.Post("/invitations", canWriteInvitations, r.h.CreateInvitation)
+	enterpriseRead.Post("/invitations/:id/revoke", canWriteInvitations, r.h.RevokeInvitation)
 
 	// ── Members ──
 	enterpriseRead.Get("/members", r.h.ListMembers)
-	canWriteUsers.Patch("/members/:id/role", r.h.UpdateMemberRole)
-	canWriteUsers.Delete("/members/:id", r.h.RemoveMember)
+	enterpriseRead.Patch("/members/:id/role", canWriteUsers, r.h.UpdateMemberRole)
+	enterpriseRead.Delete("/members/:id", canWriteUsers, r.h.RemoveMember)
 
 	// ── Ownership ──
-	canTransferOwnership.Post("/ownership/request", r.h.RequestOwnershipTransfer)
-	canTransferOwnership.Post("/ownership/accept", r.h.AcceptOwnershipTransfer)
-	canTransferOwnership.Post("/ownership/cancel", r.h.CancelOwnershipTransfer)
+	enterpriseRead.Post("/ownership/request", canTransferOwnership, r.h.RequestOwnershipTransfer)
+	enterpriseRead.Post("/ownership/accept", canTransferOwnership, r.h.AcceptOwnershipTransfer)
+	enterpriseRead.Post("/ownership/cancel", canTransferOwnership, r.h.CancelOwnershipTransfer)
 
 	// ── Aliases ──
 	enterpriseRead.Get("/aliases", r.h.ListAliases)
-	canWriteAliases.Post("/aliases", r.h.CreateAlias)
-	canWriteAliases.Delete("/aliases/:id", r.h.DeleteAlias)
+	enterpriseRead.Post("/aliases", canWriteAliases, r.h.CreateAlias)
+	enterpriseRead.Delete("/aliases/:id", canWriteAliases, r.h.DeleteAlias)
 
 	// ── Groups ──
 	enterpriseRead.Get("/groups", r.h.ListGroups)
-	canWriteGroups.Post("/groups", r.h.CreateGroup)
-	canWriteGroups.Post("/groups/:id/members", r.h.AddGroupMember)
-	canWriteGroups.Delete("/groups/:id/members/:memberId", r.h.RemoveGroupMember)
-	canWriteGroups.Delete("/groups/:id", r.h.DeleteGroup)
+	enterpriseRead.Post("/groups", canWriteGroups, r.h.CreateGroup)
+	enterpriseRead.Post("/groups/:id/members", canWriteGroups, r.h.AddGroupMember)
+	enterpriseRead.Delete("/groups/:id/members/:memberId", canWriteGroups, r.h.RemoveGroupMember)
+	enterpriseRead.Delete("/groups/:id", canWriteGroups, r.h.DeleteGroup)
 
 	// ── Abuse ──
 	enterpriseRead.Get("/abuse/send-limit", r.h.CheckSendLimit)
 	enterpriseRead.Get("/abuse/signals", r.h.ListAbuseSignals)
-	canWriteUsers.Post("/abuse/signals/:id/acknowledge", r.h.AcknowledgeAbuseSignal)
-	canWriteUsers.Post("/abuse/signals/:id/resolve", r.h.ResolveAbuseSignal)
+	enterpriseRead.Post("/abuse/signals/:id/acknowledge", canWriteUsers, r.h.AcknowledgeAbuseSignal)
+	enterpriseRead.Post("/abuse/signals/:id/resolve", canWriteUsers, r.h.ResolveAbuseSignal)
 
 	// ── Account Status ──
 	enterpriseRead.Get("/status", r.h.SuspensionStatus)
-	canWriteOrgs.Post("/deletion", r.h.RequestDeletion)
-	canWriteOrgs.Post("/deletion/cancel", r.h.CancelDeletion)
+	enterpriseRead.Post("/deletion", canWriteOrgs, r.h.RequestDeletion)
+	enterpriseRead.Post("/deletion/cancel", canWriteOrgs, r.h.CancelDeletion)
 
 	// ── Billing ──
 	enterpriseRead.Get("/billing/subscription", r.h.GetBillingSubscription)
 	enterpriseRead.Get("/billing/usage", r.h.GetBillingUsage)
 	enterpriseRead.Get("/billing/quota", r.h.CheckBillingQuota)
-	canWriteBilling.Post("/billing/subscription", r.h.CreateBillingSubscription)
+	enterpriseRead.Post("/billing/subscription", canWriteBilling, r.h.CreateBillingSubscription)
 	enterpriseRead.Get("/billing/invoices", r.h.ListCustomerInvoices)
 	enterpriseRead.Get("/billing/invoices/:id", r.h.GetCustomerInvoice)
 
 	// ── API Keys ──
 	enterpriseRead.Get("/api-keys", r.h.ListEnterpriseAPIKeys)
-	canWriteAPIKeys.Post("/api-keys", r.h.CreateEnterpriseAPIKey)
-	canWriteAPIKeys.Post("/api-keys/:id/rotate", r.h.RotateEnterpriseAPIKey)
-	canWriteAPIKeys.Delete("/api-keys/:id", r.h.DeleteEnterpriseAPIKey)
+	enterpriseRead.Post("/api-keys", canWriteAPIKeys, r.h.CreateEnterpriseAPIKey)
+	enterpriseRead.Post("/api-keys/:id/rotate", canWriteAPIKeys, r.h.RotateEnterpriseAPIKey)
+	enterpriseRead.Delete("/api-keys/:id", canWriteAPIKeys, r.h.DeleteEnterpriseAPIKey)
 
 	// ── Audit Logs ──
 	enterpriseRead.Get("/audit/logs", r.h.ListEnterpriseAuditLogs)
 
 	// ── Sessions ──
 	enterpriseRead.Get("/sessions", r.h.ListAccountSessions)
-	canWriteUsers.Post("/sessions/:id/revoke", r.h.RevokeAccountSession)
+	enterpriseRead.Post("/sessions/:id/revoke", canWriteUsers, r.h.RevokeAccountSession)
 
 	// ── Imports ──
 	enterpriseRead.Get("/imports", r.h.ListImports)
 	enterpriseRead.Get("/imports/:id", r.h.GetImport)
 	enterpriseRead.Get("/imports/:id/report", r.h.GetImportReport)
-	canWriteImports.Post("/imports", r.h.CreateImport)
-	canWriteImports.Post("/imports/:id/validate", r.h.ValidateImport)
-	canExecuteImports.Post("/imports/:id/execute", r.h.ExecuteImport)
-	canExecuteImports.Post("/imports/:id/resume", r.h.ResumeImport)
-	canExecuteImports.Post("/imports/:id/cancel", r.h.CancelImport)
-	canExecuteImports.Post("/imports/:id/compensate", r.h.CompensateImport)
+	enterpriseRead.Post("/imports", canWriteImports, r.h.CreateImport)
+	enterpriseRead.Post("/imports/:id/validate", canWriteImports, r.h.ValidateImport)
+	enterpriseRead.Post("/imports/:id/execute", canExecuteImports, r.h.ExecuteImport)
+	enterpriseRead.Post("/imports/:id/resume", canExecuteImports, r.h.ResumeImport)
+	enterpriseRead.Post("/imports/:id/cancel", canExecuteImports, r.h.CancelImport)
+	enterpriseRead.Post("/imports/:id/compensate", canExecuteImports, r.h.CompensateImport)
 
 	// CSRF is enforced on the entire admin group by default (deny-list,
 	// not allow-list) rather than only on routes an author remembered to

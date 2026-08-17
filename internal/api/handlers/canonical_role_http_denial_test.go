@@ -237,9 +237,14 @@ func (h *httpDenialHarness) domainNameByID(t *testing.T, id uint) string {
 }
 
 // ── Scenario A ────────────────────────────────────────────────────
-// PSA with tenant_id NULL must be rejected by TenantMiddleware before
-// reaching any /enterprise/* handler. Exact contract: 403 + plain-text
-// "tenant context required" (see probe above).
+// PSA with tenant_id NULL must be rejected before reaching any
+// /enterprise/* handler. Exact contract: 403 + a stable denial token.
+// The denial source is now the enterpriseRead role gate ("insufficient
+// permissions", added with the canonical tenant-family gate); a PSA can
+// never pass it, so the older "tenant context required" text from
+// requireTenantContext is no longer the first denial. Both are 403
+// denials of the same surface; the stable contract asserted here is
+// 403 + no 5xx + no mutation.
 func TestHTTPDenial_PlatformSuperAdmin_TenantOperationDenied(t *testing.T) {
 	h := newHTTPDenialHarness(t)
 	seedPlatformSuperAdminWithPassword(t, h.sqlDB, "psa@denial.example", "PSAPass!2026")
@@ -251,7 +256,9 @@ func TestHTTPDenial_PlatformSuperAdmin_TenantOperationDenied(t *testing.T) {
 	status, body := h.authedRequest(t, "GET", "/api/v1/enterprise/domains", tok, "")
 	mustNot5xx(t, "PSA/enterprise/domains", status, body)
 	mustEqStatus(t, "PSA/enterprise/domains", http.StatusForbidden, status, body)
-	mustContain(t, "PSA/enterprise/domains", body, "tenant context required")
+	if !strings.Contains(string(body), "insufficient permissions") && !strings.Contains(string(body), "tenant context required") {
+		t.Fatalf("PSA/enterprise/domains: body missing a stable denial token; got=%s", body)
+	}
 
 	if got := h.countCoremailDomainsInTenant(t, h.tenantA); got != beforeA {
 		t.Errorf("no-mutation: tenant A domain count %d -> %d", beforeA, got)

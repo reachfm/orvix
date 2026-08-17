@@ -377,6 +377,15 @@ func TestSignupOTP_VerifiedCustomerGetsOrganizationPortal(t *testing.T) {
 	if status != http.StatusCreated {
 		t.Fatalf("verify status=%d body=%v", status, out)
 	}
+	// The OTP-activated Organization owner must be persisted canonically as
+	// tenant_admin — NOT RoleUser (per-mailbox webmail end-user).
+	var role string
+	if err := env.sqlDB.QueryRow(`SELECT role FROM users WHERE email = ?`, email).Scan(&role); err != nil {
+		t.Fatalf("read owner role: %v", err)
+	}
+	if role != string(auth.RoleTenantAdmin) {
+		t.Fatalf("OTP-activated owner role=%q, want %q (canonical tenant_admin)", role, auth.RoleTenantAdmin)
+	}
 	token, _ := out["access_token"].(string)
 	if token == "" {
 		t.Fatalf("no access token returned")
@@ -393,6 +402,56 @@ func TestSignupOTP_VerifiedCustomerGetsOrganizationPortal(t *testing.T) {
 	json.NewDecoder(resp.Body).Decode(&meOut)
 	if meOut["portal"] != "organization" {
 		t.Fatalf("verified customer portal=%v, want organization; body=%v", meOut["portal"], meOut)
+	}
+}
+
+// TestSignupOTP_RequestBodyRoleIgnored proves the server assigns the
+// Organization owner role itself: a public signup request that smuggles a
+// role field (including tenant_admin or platform_super_admin) must be
+// ignored — the identity is persisted exactly as the server decides
+// (tenant_admin for the caller's own new tenant), and never as a platform
+// identity.
+func TestSignupOTP_RequestBodyRoleIgnored(t *testing.T) {
+	env := newSignupTxEnvSQLiteWithSecret(t, otpTestSecret())
+	email := "otp-role-smuggle@example.com"
+
+	body, _ := json.Marshal(map[string]string{
+		"email": email, "password": "StrongPass123", "name": "Smuggle Co",
+		"role": "platform_super_admin",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/signup/start", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := env.router.App().Test(req, fiber.TestConfig{Timeout: 0})
+	if err != nil {
+		t.Fatalf("signup/start: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("signup/start status=%d", resp.StatusCode)
+	}
+
+	hash := otpHashFor(t, env.sqlDB, email)
+	code := bruteForceOTP(t, otpTestSecret(), hash)
+	status, _ := otpDoJSON(t, env, "POST", "/api/v1/auth/signup/verify", map[string]string{"email": email, "code": code})
+	if status != http.StatusCreated {
+		t.Fatalf("signup/verify status=%d", status)
+	}
+
+	var role string
+	var tenantID sql.NullInt64
+	if err := env.sqlDB.QueryRow(`SELECT role, tenant_id FROM users WHERE email = ?`, email).Scan(&role, &tenantID); err != nil {
+		t.Fatalf("read user: %v", err)
+	}
+	if role != string(auth.RoleTenantAdmin) {
+		t.Fatalf("smuggled-role signup owner role=%q, want %q (server-assigned)", role, auth.RoleTenantAdmin)
+	}
+	if !tenantID.Valid || tenantID.Int64 <= 0 {
+		t.Fatalf("smuggled-role signup owner has no valid tenant_id — server must bind the owner to its own new tenant")
+	}
+	var platCount int64
+	env.sqlDB.QueryRow(`SELECT COUNT(*) FROM users WHERE role = 'platform_super_admin'`).Scan(&platCount)
+	if platCount != 0 {
+		t.Fatalf("public signup created a platform_super_admin identity: count=%d", platCount)
 	}
 }
 

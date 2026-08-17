@@ -54,7 +54,15 @@ export default function SignupPage() {
     onSuccess: () => {
       setStage("success");
       setCodeState("idle");
-      window.location.reload();
+      // Navigate to the canonical Organization landing route, NOT a
+      // reload of /admin/signup. window.location.replace() swaps the
+      // history entry, so the browser URL becomes the real admin/customer
+      // portal route, a refresh stays on a valid authenticated
+      // destination, and the Back button cannot reopen the OTP
+      // completion step. The signup session cookies were already set by
+      // /auth/signup/verify, so /admin resolves /me and renders the
+      // Organization portal directly.
+      window.location.replace("/admin");
     },
     onError: (err: any) => {
       const msg = String(err?.message || "").toLowerCase();

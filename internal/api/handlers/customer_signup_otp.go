@@ -540,19 +540,28 @@ func (h *Handler) activatePendingRegistration(c fiber.Ctx, sqlDB *sql.DB, dial *
 		tenantID = uint(id)
 	}
 
+	// The person who creates a new Organization through public Start Free
+	// signup is the Organization OWNER — the primary administrator of their
+	// own new tenant. The owner identity is persisted canonically as
+	// tenant_admin (NOT RoleUser: RoleUser is the per-mailbox webmail
+	// end-user role with no Organization administration privileges — see
+	// internal/auth/auth.go). This mirrors the immediate Signup path
+	// (customer_auth.go). The role is server-assigned because the caller is
+	// creating their OWN tenant; the signup request body never carries a
+	// role field and never influences authorization.
 	var userID uint
 	now = time.Now().UTC()
 	if dial.IsPostgres() {
 		if err := tx.QueryRow(
 			fmt.Sprintf("INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified) VALUES (%s) RETURNING id", dial.Placeholders(8)),
-			now, now, email, pwHash, string(auth.RoleUser), tenantID, true, true,
+			now, now, email, pwHash, string(auth.RoleTenantAdmin), tenantID, true, true,
 		).Scan(&userID); err != nil {
 			return 0, 0, fmt.Errorf("create user: %w", err)
 		}
 	} else {
 		res, err := tx.Exec(
 			fmt.Sprintf("INSERT INTO users (created_at, updated_at, email, password_hash, role, tenant_id, active, email_verified) VALUES (%s)", dial.Placeholders(8)),
-			now, now, email, pwHash, string(auth.RoleUser), tenantID, true, true,
+			now, now, email, pwHash, string(auth.RoleTenantAdmin), tenantID, true, true,
 		)
 		if err != nil {
 			return 0, 0, fmt.Errorf("create user: %w", err)

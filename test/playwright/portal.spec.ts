@@ -10,6 +10,8 @@ const ADMIN_EMAIL = "admin@e2e-test.local";
 const ADMIN_PASSWORD = "E2eTestPass123!";
 const TENANT_ADMIN_EMAIL = "tenant-admin@portal-e2e-tenant.test";
 const TENANT_ADMIN_PASSWORD = "PortalE2eTenantAdmin123!";
+const WEBMAIL_USER_EMAIL = "webmail-user@portal-e2e-tenant.test";
+const WEBMAIL_USER_PASSWORD = "PortalE2eWebmailUser123!";
 
 function escapeRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -102,18 +104,25 @@ redis:
 
   await waitForHealth(`http://127.0.0.1:${adminPort}/api/v1/health`, 45000);
 
-  // Seed a genuine tenant_admin fixture for the Organization-portal test.
-  // There is currently no supported non-SQL production API to bootstrap
-  // the FIRST tenant_admin of a brand-new tenant (POST /api/v1/auth/signup
-  // always creates plain RoleUser — see seed-fixture/main.go's doc comment
-  // for the full rationale). This seeds directly into this test run's own
-  // disposable temp-file SQLite database, the same hermetic-fixture
-  // pattern internal/api/router_test.go and
-  // cmd/orvix/admin_recovery_test.go already use for their own ephemeral
-  // databases — never a live, production, or VPS database.
+  // Seed a genuine tenant_admin fixture for the Organization-portal test
+  // AND a RoleUser webmail end-user fixture for the fail-closed portal
+  // test. Public signup now creates the Organization owner as tenant_admin
+  // (customer_auth.go / customer_signup_otp.go), so the tenant_admin here
+  // mirrors a real signup-created owner; the RoleUser row mirrors a
+  // per-mailbox webmail end-user, which must never be granted the
+  // Organization Admin console. Seeding happens directly in this test
+  // run's own disposable temp-file SQLite database, the same hermetic
+  // pattern internal/api/router_test.go and cmd/orvix/admin_recovery_test.go
+  // use for their own ephemeral databases — never a live, production, or
+  // VPS database.
   execFileSync(
     "go",
     ["run", "./seed-fixture", dsn, TENANT_ADMIN_EMAIL, TENANT_ADMIN_PASSWORD, "Portal E2E Tenant"],
+    { cwd: __dirname, stdio: "inherit" },
+  );
+  execFileSync(
+    "go",
+    ["run", "./seed-fixture", dsn, WEBMAIL_USER_EMAIL, WEBMAIL_USER_PASSWORD, "Portal E2E Tenant", "user"],
     { cwd: __dirname, stdio: "inherit" },
   );
 });
@@ -136,16 +145,13 @@ test.describe("Orvix admin portal E2E", () => {
   test("login and navigate dashboard and customer portal sections", async ({ browser, request }) => {
     // PORTAL-SEPARATION-PHASE1 / PLATFORM-SHELL: this exercises the
     // Organization portal (portal="organization") as a genuine
-    // tenant_admin, seeded in beforeAll (see seed-fixture/main.go — there
-    // is currently no supported non-SQL production API to provision the
-    // first tenant_admin of a brand-new tenant). A PLAIN signed-up
-    // RoleUser (POST /api/v1/auth/signup) is intentionally NOT used here
-    // any more: /api/v1/me correctly returns portal="" for that role
-    // (handlers.go's Me handler has no case for RoleUser), and the
-    // frontend now correctly fails closed for portal="" instead of
-    // showing the Customer Portal shell to an unauthorized role — see
-    // the "signed-up plain user fails closed" test below for that
-    // contract.
+    // tenant_admin, seeded in beforeAll (mirroring a signup-created
+    // owner, which public signup now persists as tenant_admin). A plain
+    // RoleUser webmail end-user is intentionally NOT used here:
+    // /api/v1/me fails closed with portal="" for RoleUser, and the
+    // frontend shows the access-unavailable state instead of the
+    // Customer Portal shell — see the "plain RoleUser webmail end-user
+    // fails closed" test below for that contract.
     const loginRes = await request.post(`http://127.0.0.1:${adminPort}/api/v1/auth/login`, {
       data: { email: TENANT_ADMIN_EMAIL, password: TENANT_ADMIN_PASSWORD },
     });
@@ -181,6 +187,11 @@ test.describe("Orvix admin portal E2E", () => {
     // admin "Mailboxes" + customer "Mailboxes"), so we use exact text matching
     // where possible and .last() for labels that appear twice under the same name.
     const portalSections: { text: string; heading: string | RegExp }[] = [
+      // Every visible Organization-portal tab, including Dashboard and
+      // Domains (the two that historically failed with raw
+      // "insufficient permissions" for the signup-created owner).
+      { text: "Dashboard", heading: "Dashboard" },
+      { text: "Domains", heading: /^Domains/ },
       { text: "Organization", heading: "Organization" },
       { text: "Mailboxes", heading: "Mailboxes" },
       { text: "Aliases", heading: "Email Aliases" },
@@ -531,24 +542,36 @@ test.describe("Orvix admin portal E2E", () => {
     await expect(page.getByRole("heading", { name: "Sign In" })).toBeVisible();
   });
 
-  test("a plain signed-up user gets the Organization portal, never Platform", async ({ browser, request }) => {
-    // A self-signup user is assigned RoleUser + a valid tenant_id (they are
-    // the owner of their own tenant). /api/v1/me's Me() classifier maps
-    // RoleUser + valid tenant_id to portal="organization" — this identity
-    // must land in the Organization/Customer shell, and must never see the
-    // Platform Administration shell (never infer a shell from role).
-    const email = `portal-e2e-plain-${Date.now()}@portal-e2e-plain.local`;
-    const password = "PortalE2ePlainPass123!";
+  test("a fresh signup creates a tenant_admin owner who gets the Organization portal, never Platform", async ({ browser, request }) => {
+    // The server assigns the Organization owner role itself: public
+    // signup persists the new owner as tenant_admin (never RoleUser —
+    // that is the per-mailbox webmail end-user role). This identity must
+    // land in the Organization/Customer shell and must never see the
+    // Platform Administration shell.
+    const email = `portal-e2e-owner-${Date.now()}@portal-e2e-owner.local`;
+    const password = "PortalE2eOwnerPass123!";
     const signupRes = await request.post(`http://127.0.0.1:${adminPort}/api/v1/auth/signup`, {
-      data: { email, password, name: "Portal E2E Plain User" },
+      data: { email, password, name: "Portal E2E Owner" },
     });
     expect(signupRes.ok()).toBeTruthy();
+    const signupBody = await signupRes.json();
+    // Canonical owner model: the response names tenant_admin and the
+    // database row must match (checked below via /me).
+    expect(signupBody?.user?.role).toBe("tenant_admin");
 
     const loginRes = await request.post(`http://127.0.0.1:${adminPort}/api/v1/auth/login`, {
       data: { email, password },
     });
     expect(loginRes.ok()).toBeTruthy();
     const accessToken: string = (await loginRes.json()).access_token;
+
+    const meRes = await request.get(`http://127.0.0.1:${adminPort}/api/v1/me`, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    expect(meRes.ok()).toBeTruthy();
+    const meBody = await meRes.json();
+    expect(meBody.portal).toBe("organization");
+    expect(meBody.role).toBe("tenant_admin");
 
     const context = await browser.newContext({ bypassCSP: true });
     const page = await context.newPage();
@@ -560,9 +583,55 @@ test.describe("Orvix admin portal E2E", () => {
     await page.goto(`http://127.0.0.1:${adminPort}/admin`);
     await page.waitForLoadState("networkidle");
 
+    // The organization portal shell renders for the owner, and the
+    // owner's Dashboard actually loads (no "insufficient permissions").
     await expect(page.getByText("Access Unavailable")).toHaveCount(0);
     await expect(page.locator("aside").getByText("Customer Portal")).toBeVisible();
+    await expect(page.locator("main").locator("h2").filter({ hasText: "Dashboard" })).toBeVisible();
+    await expect(page.getByText("Failed to load dashboard")).toHaveCount(0);
+    await expect(page.getByText("insufficient permissions")).toHaveCount(0);
     await expect(page.getByText("Platform infrastructure and administration overview")).toHaveCount(0);
+  });
+
+  test("a plain RoleUser webmail end-user fails closed: no admin shell at all", async ({ browser, request }) => {
+    // RoleUser is the per-mailbox webmail end-user role. It must NOT get
+    // the Organization Admin console — /me fails closed with portal="" and
+    // the frontend renders the access-unavailable state instead.
+    const loginRes = await request.post(`http://127.0.0.1:${adminPort}/api/v1/auth/login`, {
+      data: { email: WEBMAIL_USER_EMAIL, password: WEBMAIL_USER_PASSWORD },
+    });
+    expect(loginRes.ok()).toBeTruthy();
+    const accessToken: string = (await loginRes.json()).access_token;
+
+    const meRes = await request.get(`http://127.0.0.1:${adminPort}/api/v1/me`, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    expect(meRes.ok()).toBeTruthy();
+    const meBody = await meRes.json();
+    expect(meBody.portal).toBe("");
+
+    const context = await browser.newContext({ bypassCSP: true });
+    const page = await context.newPage();
+    await page.route("**/api/v1/**", async (route) => {
+      const headers = { ...route.request().headers(), Authorization: `Bearer ${accessToken}` };
+      await route.continue({ headers });
+    });
+
+    await page.goto(`http://127.0.0.1:${adminPort}/admin`);
+    await page.waitForLoadState("networkidle");
+
+    // Fail-closed: no Customer Portal nav, no Platform nav, and the
+    // access-unavailable state is shown.
+    await expect(page.getByText("Access Unavailable")).toBeVisible();
+    await expect(page.locator("aside").getByText("Customer Portal")).toHaveCount(0);
+    await expect(page.getByText("Platform infrastructure and administration overview")).toHaveCount(0);
+
+    // Direct API denial: the webmail user cannot call the tenant-admin
+    // console endpoints either.
+    const domainsRes = await request.get(`http://127.0.0.1:${adminPort}/api/v1/enterprise/domains`, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    expect(domainsRes.status()).toBe(403);
   });
 
   // Regression guard for Me()'s default branch (an identity whose role

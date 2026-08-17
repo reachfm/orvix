@@ -144,7 +144,44 @@ func (s *Service) GetOrganizationDetail(ctx context.Context, id uint) (*Organiza
 	} else {
 		detail.StatusLabel = "disabled"
 	}
+	// Populate the real counters the Platform Organizations drawer renders
+	// (Domains / Mailboxes / Admin users). These were declared on the
+	// detail struct but never computed, so the drawer always showed 0 —
+	// including "Admin users = 0" for every signup-created organization.
+	// Domain/Mailbox counts come from the SAME coremail_* tables the
+	// customer portal's own Domains/Mailboxes pages list, so the drawer
+	// number matches what the customer sees. AdminCount comes from
+	// CountAdmins, whose canonical role set counts true tenant
+	// administrators (tenant_admin plus legacy admin/superadmin
+	// pre-normalization rows) and never webmail RoleUser rows.
+	if domainCount, derr := s.countCoremailDomains(ctx, id); derr == nil {
+		detail.DomainCount = domainCount
+	}
+	if mailboxCount, merr := s.countCoremailMailboxes(ctx, id); merr == nil {
+		detail.MailboxCount = mailboxCount
+	}
+	if adminCount, aerr := s.repo.CountAdmins(ctx, id); aerr == nil {
+		detail.AdminCount = adminCount
+	}
 	return detail, nil
+}
+
+// countCoremailDomains counts non-deleted coremail_domains rows for the
+// tenant — the same table and predicate ListAdminDomains uses.
+func (s *Service) countCoremailDomains(ctx context.Context, tenantID uint) (int, error) {
+	var count int
+	err := s.repo.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM coremail_domains WHERE tenant_id="+s.repo.dialect.Placeholder(1)+" AND deleted_at IS NULL", tenantID).Scan(&count)
+	return count, err
+}
+
+// countCoremailMailboxes counts non-deleted coremail_mailboxes rows for
+// the tenant — the same table and predicate ListAdminMailboxes uses.
+func (s *Service) countCoremailMailboxes(ctx context.Context, tenantID uint) (int, error) {
+	var count int
+	err := s.repo.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM coremail_mailboxes WHERE tenant_id="+s.repo.dialect.Placeholder(1)+" AND deleted_at IS NULL", tenantID).Scan(&count)
+	return count, err
 }
 
 func (s *Service) ListMembers(ctx context.Context, orgID uint) ([]OrganizationMember, error) {
