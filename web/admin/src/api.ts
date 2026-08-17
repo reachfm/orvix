@@ -348,6 +348,23 @@ export const api = {
   signup: (data: any) =>
     request("/auth/signup", { method: "POST", body: JSON.stringify(data) }),
 
+  // Signup — email OTP verification flow (Phase D/E)
+  signupStart: (data: { email: string; password: string; name?: string }) =>
+    request<{ message: string; email: string }>("/auth/signup/start", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+  signupResend: (email: string) =>
+    request<{ message: string }>("/auth/signup/resend", {
+      method: "POST",
+      body: JSON.stringify({ email }),
+    }),
+  signupVerify: (email: string, code: string) =>
+    request<{ access_token: string; access_expires_in: number; refresh_expires_in: number }>(
+      "/auth/signup/verify",
+      { method: "POST", body: JSON.stringify({ email, code }) },
+    ),
+
   // Dashboard
   getDashboard: () => request<any>("/enterprise/dashboard"),
   // getPlatformDashboard moved to features/platform/overview/api.ts

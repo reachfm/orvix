@@ -1190,6 +1190,13 @@ func (r *Router) setupRoutes() {
 	loginGroup.Post("/forgot-password", r.authThrottle(), r.h.ForgotPassword)
 	loginGroup.Post("/reset-password", r.authThrottleIP(), r.h.ResetPassword)
 
+	// Phase D/E: email-OTP-verified signup (two-step flow). All three
+	// endpoints carry an email in the body, so the full IP+account+combo
+	// throttle applies, same as /auth/signup.
+	loginGroup.Post("/signup/start", r.authThrottle(), r.h.SignupStart)
+	loginGroup.Post("/signup/resend", r.authThrottle(), r.h.SignupResend)
+	loginGroup.Post("/signup/verify", r.authThrottle(), r.h.SignupVerify)
+
 	// H-6: /admin/login is the admin SPA's form target. It was registered on
 	// the ROOT app, outside the API group, and so carried no limiter at all —
 	// unbounded password guessing against the highest-value accounts on the
@@ -1963,6 +1970,12 @@ func (r *Router) setupRoutes() {
 	protected.Patch("/platform/organizations/:id", platformMW[0], platformMW[1], r.h.UpdateOrganization)
 	protected.Post("/platform/organizations/:id/active", platformMW[0], platformMW[1], r.h.SetOrganizationActive)
 	protected.Get("/platform/organizations/:id/detail", platformMW[0], platformMW[1], r.h.GetOrganizationDetail)
+	// Phase G: safe organization deletion lifecycle — schedules deletion
+	// (30-day retention, soft state transition) rather than deleting
+	// anything immediately. Gated the same as every other platform/organizations
+	// route (platform admin auth), plus its own dependency/confirmation
+	// checks in the handler/service.
+	protected.Post("/platform/organizations/:id/deletion", platformMW[0], platformMW[1], r.h.PlatformScheduleOrganizationDeletion)
 
 	// ── Disaster Recovery (Milestone 13) — coordinated backup/restore
 	// on top of the existing internal/backup mechanics and restorecoord

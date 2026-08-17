@@ -73,6 +73,22 @@ func passwordStrength(pw string) error {
 	return nil
 }
 
+// emailBelongsToPlatformIdentity reports whether the given (already
+// normalized) email belongs to an existing platform_super_admin or
+// superadmin user. Used to stop self-signup from ever creating a
+// tenant/user/subscription under a platform identity's address.
+func (h *Handler) emailBelongsToPlatformIdentity(sqlDB *sql.DB, dial *dbdialect.Info, normalizedEmail string) (bool, error) {
+	var count int64
+	err := sqlDB.QueryRow(
+		fmt.Sprintf("SELECT COUNT(*) FROM users WHERE email = %s AND role IN ('platform_super_admin','superadmin')", dial.Placeholder(1)),
+		normalizedEmail,
+	).Scan(&count)
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
 // Signup creates a new customer portal account with a default subscription.
 // POST /auth/signup
 func (h *Handler) Signup(c fiber.Ctx) error {
@@ -106,6 +122,21 @@ func (h *Handler) Signup(c fiber.Ctx) error {
 	}
 	if existing > 0 {
 		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": "an account with this email already exists"})
+	}
+
+	// Phase C: platform identity protection. A self-signup must never be
+	// able to create a shadow tenant/user under an email that already
+	// belongs to a platform_super_admin/superadmin identity — that would
+	// let an attacker who knows (or guesses) a platform admin's address
+	// register a look-alike account. The response is deliberately generic
+	// (same shape as any other signup failure) so an anonymous caller
+	// cannot use it to fingerprint which emails belong to admin accounts.
+	if blocked, err := h.emailBelongsToPlatformIdentity(sqlDB, dial, email); err != nil {
+		h.logger.Error("signup: platform identity check", zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "internal error"})
+	} else if blocked {
+		h.logger.Warn("signup: rejected — email matches a platform identity", zap.String("email", email))
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": "unable to complete signup"})
 	}
 
 	tx, err := sqlDB.Begin()
