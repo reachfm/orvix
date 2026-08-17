@@ -100,19 +100,23 @@ func initTransactionalMailSender(cfgSMTPHost string, cfgSMTPPort int, cfgSubmiss
 	from := fmt.Sprintf("noreply@%s", resolveHostname(cfgHostname))
 
 	if cfgUsername != "" && cfgPassword != "" {
-		host := cfgSubmissionHost
-		if host == "" {
-			host = cfgSMTPHost
-		}
+		// The authenticated client MUST connect using the server's real
+		// mail hostname, not cfgSubmissionHost/cfgSMTPHost — those are
+		// LISTEN bind addresses (commonly "0.0.0.0"), which is never a
+		// valid TLS ServerName: 0.0.0.0 doesn't appear in the
+		// certificate's SANs, so verification fails even though the TCP
+		// connection itself succeeds. auth.DialSMTPWithTLS uses the same
+		// host value for both the dial address and the TLS ServerName,
+		// so this must be the hostname the certificate was actually
+		// issued for (cfgHostname, e.g. "mail.orvix.email").
+		host := resolveHostname(cfgHostname)
 		port := cfgSubmissionPort
 		if port == 0 {
 			port = 587
 		}
-		if host != "" {
-			sender := newSMTPMailSender(host, port, cfgUsername, cfgPassword, from, logger)
-			logger.Info("transactional mail sender wired via authenticated SMTP submission", zap.String("host", host), zap.Int("port", port))
-			return sender
-		}
+		sender := newSMTPMailSender(host, port, cfgUsername, cfgPassword, from, logger)
+		logger.Info("transactional mail sender wired via authenticated SMTP submission", zap.String("host", host), zap.Int("port", port))
+		return sender
 	}
 
 	host := cfgSMTPHost
