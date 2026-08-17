@@ -55,6 +55,7 @@ import BulkMailboxesPage from "./features/platform/bulk-mailboxes/page";
 import BulkMailboxImportPage from "./features/platform/bulk-mailbox-import/page";
 import { initCSRF, api } from "./api";
 import ThemeToggle from "./shared/theme/ThemeToggle";
+import PlatformShell from "./features/platform/shell/PlatformShell";
 
 type Tab = "dashboard" | "domains" | "users" | "firewall" | "modules" | "audit" | "settings"
   | "enterprise" | "mailboxes" | "organizations" | "health" | "platform-home"
@@ -376,6 +377,26 @@ export default function App() {
       default: return portal === "platform" ? <OverviewPage email={userEmail} onNavigate={setCurrentTab} /> : <Dashboard />;
     }
   };
+
+  // PLATFORM-SHELL-REDESIGN: portal === "platform" renders the premium
+  // PlatformShell (sidebar + top bar with search/alerts/theme). The
+  // organization portal keeps its original layout below completely
+  // unchanged — this is a purely visual branch, not a new
+  // authorization path; filteredTabs/allowedTabIds/renderContent are
+  // exactly the same values either way.
+  if (portal === "platform") {
+    return (
+      <PlatformShell
+        tabs={filteredTabs}
+        currentTab={currentTab}
+        onSelectTab={setCurrentTab}
+        userEmail={userEmail}
+        onLogout={() => { api.logout().catch(() => {}); setAuthenticated(false); }}
+      >
+        {renderContent()}
+      </PlatformShell>
+    );
+  }
 
   return (
     <div className="flex h-screen overflow-hidden">
