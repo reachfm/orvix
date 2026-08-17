@@ -1,7 +1,7 @@
 # Platform Console Capability Matrix
 
 Complete audit of every route gated with `platformMW[0], platformMW[1]`
-in `internal/api/router.go` (223 route registrations, verified by
+in `internal/api/router.go` (224 route registrations, verified by
 `internal/api/capability_matrix_test.go` against the branch head this
 document was written against — updated for the Milestone 13-15 DR,
 retention, platform billing, and signed-update-artifact routes, plus
@@ -40,6 +40,7 @@ frontend consumer, not the route's name.
 | `POST /platform/organizations/:id/active` | platformMW | `SetOrganizationActive` | `SetOrganizationActiveRequest/Response` | Platform | `page.test.tsx` | UI_SUPPORTED |
 | `PATCH /platform/organizations/:id` | platformMW | `UpdateOrganization` | `UpdateOrganizationRequest/Response` | Platform | `page.test.tsx` | UI_SUPPORTED |
 | `GET /platform/organizations/:id` | platformMW | `GetPlatformOrganization` | untyped `map[string]interface{}` from a different service (`platformAdminSvc`) than the typed `/detail` route above | Platform | `page.test.tsx` (regression: proves the client has no function for this route at all) | DUPLICATE_SUPERSEDED_ROUTE |
+| `POST /platform/organizations/:id/deletion` | platformMW | `PlatformScheduleOrganizationDeletion` | `organizations/contract.ts`'s `ScheduleOrganizationDeletionRequest/Response` | Platform | `platform_deletion_test.go`, `platform_deletion_auth_test.go` | UI_SUPPORTED |
 
 MISSING_BACKEND (not a route, so not counted in the 100): the console
 has no way for a Platform Super Admin to create a new organization —
@@ -373,19 +374,19 @@ above (not carried over from an earlier draft) and is enforced equal
 to the router's actual route set by
 `internal/api/capability_matrix_test.go`, which parses
 `platformMW[0], platformMW[1]` registrations straight out of
-`router.go` — currently 223 — and parses every `` `METHOD /path` ``
+`router.go` — currently 224 — and parses every `` `METHOD /path` ``
 occurrence and its row's disposition straight out of this document.
 
 | Disposition | Routes |
 |---|---|
-| UI_SUPPORTED | 65 |
+| UI_SUPPORTED | 66 |
 | READ_ONLY_STATUS | 5 |
 | MACHINE_ONLY | 3 |
 | DEPRECATED | 12 |
 | DUPLICATE_SUPERSEDED_ROUTE | 18 |
 | MISSING_UI | 120 |
 | MISSING_BACKEND | 0 (the one MISSING_BACKEND case — platform-initiated organization creation — is a non-route documented under Organizations, not counted here) |
-| **Total** | **223** |
+| **Total** | **224** |
 
 Three pre-existing MISSING_UI gaps were documented rather than
 silently omitted: `GET /admin/backups/:id` (single-backup fetch; the
