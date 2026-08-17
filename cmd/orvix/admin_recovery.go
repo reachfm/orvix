@@ -783,6 +783,8 @@ func runAdminCommand(args []string, deps adminCLIDeps) int {
 			return 2
 		}
 		return runAdminCreateTenantAdmin(*tenantID, *email, deps)
+	case "provision-transactional-mailbox":
+		return runAdminProvisionTransactionalMailbox(rest, deps)
 	case "-h", "--help", "help":
 		fmt.Fprintln(deps.stdout, adminUsage())
 		return 0
@@ -809,6 +811,14 @@ Usage:
       Provision a brand-new tenant_admin for an existing, active tenant.
       Fails closed if the email already exists — never updates or
       promotes an existing user. Creates no session.
+
+  orvix admin provision-transactional-mailbox --domain <domain> [--local-part noreply] --confirm PROVISION-MAILBOX
+      Create the platform's own outbound transactional mailbox (OTP,
+      password reset, support mail). Resolves an EXISTING coremail_domains
+      row by name and never creates one or touches DKIM. Idempotent —
+      never resets an existing mailbox's password. Generates a random
+      password, writes it once to a root-only env file, and never prints
+      it.
 
 All three commands:
   - must be run as root;
