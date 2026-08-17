@@ -97,8 +97,6 @@ func (n *noopMailSender) Send(to, subject, body string) error {
 // customer_signup_otp.go's Part 1 fix for why that no longer produces a
 // false "sent" response).
 func initTransactionalMailSender(cfgSMTPHost string, cfgSMTPPort int, cfgSubmissionHost string, cfgSubmissionPort int, cfgUsername, cfgPassword, cfgHostname string, logger *zap.Logger) handlers.MailSender {
-	from := fmt.Sprintf("noreply@%s", resolveHostname(cfgHostname))
-
 	if cfgUsername != "" && cfgPassword != "" {
 		// The authenticated client MUST connect using the server's real
 		// mail hostname, not cfgSubmissionHost/cfgSMTPHost — those are
@@ -114,11 +112,21 @@ func initTransactionalMailSender(cfgSMTPHost string, cfgSMTPPort int, cfgSubmiss
 		if port == 0 {
 			port = 587
 		}
+		// The envelope/header From MUST be the authenticated account's
+		// own address, not noreply@<cfgHostname>: cfgHostname is the MTA
+		// hostname (mail.orvix.email), which is neither the mailbox's
+		// domain nor DKIM-configured. CoreMail's relay policy correctly
+		// rejects a MAIL FROM that doesn't match the authenticated
+		// identity ("550 5.7.1 Sender not authorized"), and even if it
+		// didn't, mail.orvix.email has no DKIM key — cfgUsername (e.g.
+		// noreply@orvix.email) is both authorized and DKIM-signed.
+		from := cfgUsername
 		sender := newSMTPMailSender(host, port, cfgUsername, cfgPassword, from, logger)
-		logger.Info("transactional mail sender wired via authenticated SMTP submission", zap.String("host", host), zap.Int("port", port))
+		logger.Info("transactional mail sender wired via authenticated SMTP submission", zap.String("host", host), zap.Int("port", port), zap.String("from", from))
 		return sender
 	}
 
+	from := fmt.Sprintf("noreply@%s", resolveHostname(cfgHostname))
 	host := cfgSMTPHost
 	port := cfgSMTPPort
 	if host == "" || port == 0 {

@@ -13,13 +13,20 @@ import (
 // TCP dial target and the TLS ServerName, so a bind address there means
 // certificate verification fails even though the TCP connection itself
 // succeeds (observed live: "cannot validate certificate for 0.0.0.0").
+//
+// It must also send AS the authenticated account itself (cfgUsername,
+// e.g. noreply@orvix.email), not noreply@<cfgHostname>
+// (noreply@mail.orvix.email): cfgHostname is the MTA hostname, which is
+// neither the mailbox's own domain nor DKIM-configured — the relay
+// correctly rejects a mismatched MAIL FROM with "550 5.7.1 Sender not
+// authorized" (also observed live).
 func TestInitTransactionalMailSender_AuthenticatedUsesHostnameNotBindAddress(t *testing.T) {
 	logger := zap.NewNop()
 
 	sender := initTransactionalMailSender(
 		"0.0.0.0", 25, // cfgSMTPHost, cfgSMTPPort — bind addresses, must never be dialed
 		"0.0.0.0", 0, // cfgSubmissionHost, cfgSubmissionPort — bind address, must never be dialed
-		"svc-user", "svc-pass", // credentials present -> authenticated path
+		"noreply@orvix.email", "svc-pass", // credentials present -> authenticated path
 		"mail.orvix.email", // cfgHostname — the real, cert-matching hostname
 		logger,
 	)
@@ -34,11 +41,11 @@ func TestInitTransactionalMailSender_AuthenticatedUsesHostnameNotBindAddress(t *
 	if smtpSender.port != 587 {
 		t.Fatalf("want default submission port 587, got %d", smtpSender.port)
 	}
-	if smtpSender.username != "svc-user" || smtpSender.password != "svc-pass" {
+	if smtpSender.username != "noreply@orvix.email" || smtpSender.password != "svc-pass" {
 		t.Fatalf("credentials not wired through")
 	}
-	if smtpSender.from != "noreply@mail.orvix.email" {
-		t.Fatalf("want from=noreply@mail.orvix.email, got %q", smtpSender.from)
+	if smtpSender.from != "noreply@orvix.email" {
+		t.Fatalf("want from=noreply@orvix.email (the authenticated account's own address), got %q", smtpSender.from)
 	}
 }
 
