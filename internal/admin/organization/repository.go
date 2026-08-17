@@ -162,6 +162,24 @@ func (r *OrganizationRepo) SetActiveIfCurrentlyIs(ctx context.Context, id uint, 
 	return n > 0, nil
 }
 
+// CountActiveDomains counts non-deleted domains for a tenant (Phase G
+// deletion dependency guard).
+func (r *OrganizationRepo) CountActiveDomains(ctx context.Context, tenantID uint) (int, error) {
+	var count int
+	err := r.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM domains WHERE tenant_id="+r.dialect.Placeholder(1)+" AND deleted_at IS NULL", tenantID).Scan(&count)
+	return count, err
+}
+
+// CountActiveMailboxes counts non-deleted, active mailboxes for a tenant
+// (Phase G deletion dependency guard).
+func (r *OrganizationRepo) CountActiveMailboxes(ctx context.Context, tenantID uint) (int, error) {
+	var count int
+	err := r.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM mailboxes WHERE tenant_id="+r.dialect.Placeholder(1)+" AND deleted_at IS NULL AND is_active = "+r.dialect.TrueLiteral(), tenantID).Scan(&count)
+	return count, err
+}
+
 func (r *OrganizationRepo) ExistsBySlug(ctx context.Context, slug string, excludeID uint) (bool, error) {
 	var count int64
 	err := r.db.QueryRowContext(ctx,
@@ -169,15 +187,17 @@ func (r *OrganizationRepo) ExistsBySlug(ctx context.Context, slug string, exclud
 	return count > 0, err
 }
 
-// CountAdmins counts active, non-deleted tenant admin users for a specific
-// tenant. platform_super_admin (tenant_id IS NULL) is never counted.
-// Legacy admin/superadmin roles remain included for pre-normalization
-// upgrade rows; they are replaced by tenant_admin after startup normalizer
-// completes.
+// CountAdmins counts active, non-deleted tenant owner/admin users for a
+// specific tenant. platform_super_admin (tenant_id IS NULL) is never
+// counted. Legacy admin/superadmin roles remain included for
+// pre-normalization upgrade rows; they are replaced by tenant_admin after
+// startup normalizer completes. 'user' is included because self-signup
+// tenant owners are encoded as role="user" + tenant_id (there is no
+// separate membership table in this schema) — see auth.RoleUser.
 func (r *OrganizationRepo) CountAdmins(ctx context.Context, tenantID uint) (int, error) {
 	var count int
 	err := r.db.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM users WHERE tenant_id="+r.dialect.Placeholder(1)+" AND role IN ('admin','superadmin','tenant_admin') AND active = 1 AND deleted_at IS NULL", tenantID).Scan(&count)
+		"SELECT COUNT(*) FROM users WHERE tenant_id="+r.dialect.Placeholder(1)+" AND role IN ('admin','superadmin','tenant_admin','user') AND active = 1 AND deleted_at IS NULL", tenantID).Scan(&count)
 	return count, err
 }
 

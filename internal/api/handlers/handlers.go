@@ -1262,7 +1262,7 @@ func (h *Handler) Me(c fiber.Ctx) error {
 	switch auth.Role(role) {
 	case auth.RolePlatformSuperAdmin, auth.RoleSuperAdmin:
 		portal = "platform"
-	case auth.RoleTenantAdmin, auth.RoleTenantOperator, auth.RoleTenantSupport, auth.RoleTenantReadOnly:
+	case auth.RoleTenantAdmin, auth.RoleTenantOperator, auth.RoleTenantSupport, auth.RoleTenantReadOnly, auth.RoleUser:
 		if tenantID.Valid && tenantID.Int64 > 0 {
 			portal = "organization"
 			var tName, tSlug string
