@@ -113,8 +113,8 @@ type CoreMailConfig struct {
 	// when empty, the transactional sender falls back to the legacy
 	// unauthenticated MX-port path (which the relay policy will reject for
 	// external recipients; see internal/api/mail_sender.go).
-	TransactionalSMTPUsername string `mapstructure:"transactional_smtp_username"`
-	TransactionalSMTPPassword string `mapstructure:"transactional_smtp_password"`
+	TransactionalSMTPUsername string        `mapstructure:"transactional_smtp_username"`
+	TransactionalSMTPPassword string        `mapstructure:"transactional_smtp_password"`
 	SMTPsEnabled              bool          `mapstructure:"smtps_enabled"`
 	SMTPsHost                 string        `mapstructure:"smtps_host"`
 	SMTPsPort                 int           `mapstructure:"smtps_port"`
