@@ -164,3 +164,27 @@ INTENTIONAL_MACHINE_ONLY, DEPRECATED, DUPLICATE_SUPERSEDED).
 4. **Dashboard**: keep tenant-scoped metrics only; never render platform/global totals.
 5. **API keys**: keep one-time secret reveal at creation; never display secret again after creation.
 6. Do NOT wire platform roles into any member/invitation form (`tenant_admin`/`tenant_operator`/`tenant_support`/`tenant_readonly` only — server rejects the rest).
+
+## 14. Phase 2 addendum (API Platform Engineer) — contract completion
+
+Executed after Phase 1 (backend) on the same branch. Starting SHA:
+`0c9ad30ff801bb9d762036445338aafebf310d84`.
+
+### 14.1 Final CONTRACT_DRIFT disposition (Phase 2, org surface)
+
+| ID | Drift found (proved from source) | Fix (Phase 2) | Status |
+|---|---|---|---|
+| D-3 (invitation resend, R-6) | `POST /enterprise/invitations/:id/resend` returned the raw service error string with no stable code for non-pending invitations, and the one-time token response had no `Cache-Control: no-store` | Stable codes: `VALIDATION_FAILED` (bad id) / `NOT_FOUND` (missing invitation) / `INVALID_STATE_TRANSITION` (accepted/revoked/expired); no-store on the token response; pinned by `TestInvitationResend_ErrorShapeAndNoStore` | FIXED (Phase 2) |
+| R-7 (billing state) | `GET /enterprise/billing/state` — new route; verified in source: real subscription/plan/usage/invoice rows, honest `payment_provider` (`configured:false` + note when no provider), `invoices` never null | Verified consistent; documented in OpenAPI with `BillingStateResponse`; pinned by `TestBillingState_RealDataAndHonestProvider` + the platform-overview envelope test | RESOLVED (no fix needed) |
+
+### 14.2 Deliverables completed (Phase 2)
+
+- OpenAPI spec (`docs/api/openapi.yaml`) documents
+  `POST /enterprise/invitations/{id}/resend` and
+  `GET /enterprise/billing/state` (plus the full platform-side surface);
+  local OpenAPI gate green (both specs lint clean,
+  `TestPublicRouterMatchesOpenAPI` passes).
+- Contract tests added: `TestInvitationResend_ErrorShapeAndNoStore`,
+  `TestPlatformBillingOverview_EnvelopeShapePins` (platform side),
+  `TestAuditLogList_ResultFilterLimitClampAndDetailShape`, and the
+  platform create/groups/DKIM shape tests.

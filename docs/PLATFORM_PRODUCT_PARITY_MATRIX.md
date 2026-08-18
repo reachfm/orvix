@@ -309,12 +309,17 @@
 | 7.2 | Security (MFA status/setup/verify/disable/recovery regenerate; sessions list/revoke; change password) | `components/SecurityPage.tsx` → `/account/mfa/*`, `/account/sessions*`, `/auth/change-password` (CSRF on mutations; MFA rate-limited 10/15min). | COMPLETE |
 | 7.3 | Preferences (get/update + notification prefs) | `components/PreferencesPage.tsx` → `/account/preferences`, `/account/notification-preferences`. | COMPLETE |
 
-## 8. Platform routes not in any visible page (all 224 registered routes dispositioned)
+## 8. Platform routes not in any visible page (all 231 registered routes dispositioned)
 
-The full route-level disposition (224 routes, every one classified) is the canonical
-`docs/deployment/platform-console-capability-matrix.md`, enforced by
-`internal/api/capability_matrix_test.go`. This pass **adds 7 new platformMW routes**
-(total becomes 231) and re-dispositions them in that document. The summary:
+The full route-level disposition (231 routes, every one classified) is
+the canonical `docs/deployment/platform-console-capability-matrix.md`,
+enforced by `internal/api/capability_matrix_test.go` against the actual
+`platformMW[0], platformMW[1]` registrations in `router.go`. This pass
+**adds 7 new platformMW routes** (total becomes 231) and re-dispositions
+them in that document. The parity-matrix taxonomy uses `UI_GAP
+(backend COMPLETE)` for the capability matrix's `MISSING_UI` class —
+they are the same thing, named differently per document. The summary
+below uses the enforced capability-matrix counts:
 
 | Disposition | Before | After (this pass) |
 |---|---|---|
@@ -323,7 +328,7 @@ The full route-level disposition (224 routes, every one classified) is the canon
 | MACHINE_ONLY | 3 | 3 |
 | DEPRECATED | 12 | 12 |
 | DUPLICATE_SUPERSEDED_ROUTE | 18 | 18 |
-| MISSING_UI | 120 | 113 (7 moved to UI_GAP-equivalent rows: new routes + verified backends) |
+| MISSING_UI (== parity-taxonomy UI_GAP rows) | 120 | 127 (7 new backend-COMPLETE routes: `POST /platform/organizations`, groups CRUD ×4, `GET /platform/billing/tenants/:tenant_id/overview`, `POST /platform/domains/:tenant_id/:id/dkim/revoke`) |
 | MISSING_BACKEND | 0 (1 non-route gap) | 0 (gap closed via R-1) |
 | **Total** | **224** | **231** |
 
@@ -337,7 +342,40 @@ The full route-level disposition (224 routes, every one classified) is the canon
 | R-4 | Domains | Platform DKIM revoke: `POST /platform/domains/:tenant_id/:id/dkim/revoke` (mirrors org-side revoke; audited; version-guarded) | `internal/platform/mailcontrol/{repository,service}.go` (if needed), `internal/api/handlers/platform_mail_control.go`, `internal/api/router.go`, tests |
 | R-5 | Audit Log | `GET /audit/logs` contract fix: returns `{entries, total}` with action/actor/tenant_id/result filters + limit/offset pagination (extended entries) | `internal/api/handlers/handlers.go`, tests |
 
-## 10. Frontend handoff notes (for Frontend Developer)
+## 10. Phase 2 addendum (API Platform Engineer) — contract completion
+
+Executed after Phase 1 (backend) on the same branch. Starting SHA:
+`0c9ad30ff801bb9d762036445338aafebf310d84`. Scope: normalize the new/
+changed contracts, OpenAPI spec, capability matrix, and contract tests.
+
+### 10.1 Final CONTRACT_DRIFT disposition (Phase 2)
+
+| ID | Drift found (proved from source) | Fix (Phase 2) | Status |
+|---|---|---|---|
+| R-5 (audit list) | `GET /audit/logs` returned a bare array (fixed in Phase 1) | Verified in source: `{entries, total, limit, offset}` envelope + filters + page/page_size aliases + legacy-store fallback with the same envelope; pinned by `platform_audit_contract_acceptance_test.go` and the new `TestAuditLogList_ResultFilterLimitClampAndDetailShape` | RESOLVED (backend Phase 1 + contract pins Phase 2) |
+| D-1 (org create) | `POST /platform/organizations` one-time invite-token response had no `Cache-Control: no-store` — the platform convention for one-time-secret responses | Handler now sets no-store before the idempotency wrapper, so live AND replay responses carry it; pinned by `TestPlatformCreateOrganization_OneTimeTokenNeverCached` | FIXED (Phase 2) |
+| D-2 (org create) | Second PSA org with an empty/duplicate `domain` failed on the tenants `UNIQUE(domain)` constraint but surfaced as the misleading CONFLICT "an organization with this slug already exists" | Added `ExistsByDomain` pre-check + `ErrOrganizationDomainExists` → truthful 409 CONFLICT "an organization with this domain already exists" (slug conflicts keep their message); pinned by the new duplicate-domain assertion | FIXED (Phase 2) |
+| D-3 (invitation resend) | `POST /enterprise/invitations/:id/resend` non-pending rejection returned the raw service error with no stable code; one-time token response had no no-store | Stable codes: `VALIDATION_FAILED` (bad id) / `NOT_FOUND` (missing) / `INVALID_STATE_TRANSITION` (non-pending); no-store on the token response; pinned by `TestInvitationResend_ErrorShapeAndNoStore` | FIXED (Phase 2) |
+| D-4 (audit detail) | `GET /audit/logs/:id` invalid-id rejection lacked a stable code | Added `code: VALIDATION_FAILED`; pinned by the new audit test | FIXED (Phase 2) |
+
+Verified consistent (no drift found): groups CRUD confirmation/error
+shapes (428 `PRECONDITION_FAILED`, 409 `CONFLICT`, 400
+`VALIDATION_FAILED`, 404 `NOT_FOUND`), DKIM revoke response + 409
+`CONFLICT`, billing overview/state envelopes (non-null arrays, honest
+`payment_provider`), idempotency replay semantics
+(`X-Idempotency-Replay`, token-free stored body, 409
+`IDEMPOTENCY_KEY_REUSE_MISMATCH` on key reuse with a different body).
+
+### 10.2 Deliverables completed (Phase 2)
+
+- OpenAPI spec (`docs/api/openapi.yaml`) documents every new/changed
+  route with request/response schemas, error codes, and header
+  conventions; local gate (`npx @redocly/cli@1.25.0 lint` on both specs
+  + `go test ./internal/api -run TestPublicRouterMatchesOpenAPI`) green.
+- Capability matrix updated (231 routes; this section's counts table).
+- Contract-shape tests added (`platform_contract_shape_acceptance_test.go`).
+
+## 11. Frontend handoff notes (for Frontend Developer)
 
 1. **Organizations**: wire create-org form → `POST /platform/organizations` (R-1). Owner email required; response includes the one-time invitation token — show it once with copy button.
 2. **Platform Billing**: render overview card from R-3; keep "provider not configured" honesty; never show cards/MRR.

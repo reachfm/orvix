@@ -1,7 +1,7 @@
 # Platform Console Capability Matrix
 
 Complete audit of every route gated with `platformMW[0], platformMW[1]`
-in `internal/api/router.go` (224 route registrations, verified by
+in `internal/api/router.go` (231 route registrations, verified by
 `internal/api/capability_matrix_test.go` against the branch head this
 document was written against — updated for the Milestone 13-15 DR,
 retention, platform billing, and signed-update-artifact routes, plus
@@ -10,7 +10,9 @@ plus the DR operation-history and platform-billing reconciliation
 routes added during the M13-15 re-audit gap-closure pass, plus the
 canonical, audited, permanent platform domain delete route added
 alongside deactivate, plus the six audited read-only mailbox
-support-view routes).
+support-view routes, plus the seven routes added by the Enterprise
+Product Completion Pass: PSA organization creation, platform groups
+CRUD (4 routes), platform billing overview, and platform DKIM revoke).
 Every disposition below reflects the actual handler and actual
 frontend consumer, not the route's name.
 
@@ -394,7 +396,7 @@ above (not carried over from an earlier draft) and is enforced equal
 to the router's actual route set by
 `internal/api/capability_matrix_test.go`, which parses
 `platformMW[0], platformMW[1]` registrations straight out of
-`router.go` — currently 224 — and parses every `` `METHOD /path` ``
+`router.go` — currently 231 — and parses every `` `METHOD /path` ``
 occurrence and its row's disposition straight out of this document.
 
 | Disposition | Routes |
@@ -423,7 +425,11 @@ signed update-artifact staging — all thin handlers over already-tested
 service layers, with no console UI built for them in this pass. The
 Milestone 16 pass adds 9 more MISSING_UI rows for the platform import
 routes (bulk tenant provisioning via the durable importer), also
-backend-only and driven through the API and CLI.
+backend-only and driven through the API and CLI. The Enterprise Product
+Completion Pass adds the final 7 MISSING_UI rows (PSA organization
+creation, platform groups CRUD ×4, platform billing overview, platform
+DKIM revoke), all marked "(backend COMPLETE)" — the console wiring is
+the frontend agent's remaining task.
 
 DEPRECATED is 12, not 11, because `POST /firewall/rules` moved from
 UI_SUPPORTED to DEPRECATED / NOT_OPERATIONAL in this pass (see
