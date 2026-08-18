@@ -13,6 +13,7 @@ import (
 	"net/mail"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -89,7 +90,14 @@ type Handler struct {
 	// skipped (never the case in the production router).
 	authLimiter *auth.AuthLimiter
 	auditStore  *audit.Store
-	webmailSvc  *webmailmgmt.Service
+	// auditExtended is the enterprise extended audit store (orvix_audit
+	// table) used by the platform Audit Log list/detail/export surface.
+	// It carries the richer entries (actor_id, actor_role, tenant_id,
+	// ip, user_agent, reason, before/after). nil means the extended
+	// store is unavailable and the handlers fall back to the legacy
+	// coremail_audit store.
+	auditExtended *audit.ExtendedStore
+	webmailSvc    *webmailmgmt.Service
 
 	// mailStore is the same *storage.MailStore instance
 	// used by the coremail runtime module. The webmail
@@ -471,6 +479,12 @@ func (h *Handler) SetMailboxAdminService(s *mailboxadminsvc.Service) {
 // SetOrganizationAdminService wires the organization admin service.
 func (h *Handler) SetOrganizationAdminService(s *orgadminsvc.Service) {
 	h.orgAdminSvc = s
+}
+
+// SetAuditExtendedStore wires the enterprise extended audit store
+// (orvix_audit) used by the platform Audit Log list/detail surface.
+func (h *Handler) SetAuditExtendedStore(s *audit.ExtendedStore) {
+	h.auditExtended = s
 }
 
 // SetDomainAdminService wires the domain admin service.
@@ -3388,38 +3402,137 @@ func (h *Handler) ValidateLicense(c fiber.Ctx) error {
 }
 
 // ListAuditLogs returns audit log entries with safe fields only.
+// ListAuditLogs returns the platform audit log with real filtering
+// (action/actor/tenant_id/result), safe pagination (limit/offset, plus
+// page/page_size aliases the console uses) and the rich extended entry
+// contract {entries, total, limit, offset}. Entries are the extended
+// orvix_audit rows (actor_id, actor_role, tenant_id, ip, user_agent,
+// reason, before/after) — never a lossy projection. When the extended
+// store is unavailable, it falls back to the legacy coremail_audit
+// store with the same envelope (entries carry the legacy fields).
 func (h *Handler) ListAuditLogs(c fiber.Ctx) error {
-	if h.auditStore == nil {
-		return c.JSON([]struct{}{})
+	q := parseAuditQuery(c)
+
+	// Normalize pagination: accept limit/offset or page/page_size.
+	limit, offset := q.Limit, q.Offset
+	if raw := strings.TrimSpace(c.Query("page_size")); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+			limit = n
+		}
 	}
-	logs, _, err := h.auditStore.Search(c.Context(), &audit.Query{Limit: 100})
+	if raw := strings.TrimSpace(c.Query("offset")); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+			offset = n
+		}
+	}
+	if raw := strings.TrimSpace(c.Query("page")); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+			offset = (n - 1) * limit
+		}
+	}
+	if limit <= 0 {
+		limit = 25
+	}
+	if limit > 500 {
+		limit = 500
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
+	if h.auditExtended != nil {
+		eq := &audit.ExtendedQuery{
+			Action: q.Action, Result: q.Result, Target: q.Target,
+			Limit: limit, Offset: offset,
+		}
+		if q.TenantID != 0 {
+			tid := q.TenantID
+			eq.TenantID = &tid
+		}
+		if actorID, err := strconv.ParseUint(q.Actor, 10, 64); err == nil && actorID > 0 {
+			aid := uint(actorID)
+			eq.ActorID = &aid
+		} else if q.Actor != "" {
+			// Non-numeric actor filter: match the actor string prefix
+			// (e.g. "user:42") — the extended store has no LIKE column
+			// for actor, so filter in memory after a bounded query.
+			eq.Limit = 500
+			entries, _, searchErr := h.auditExtended.Search(c.Context(), eq)
+			if searchErr != nil {
+				h.logger.Error("failed to list extended audit logs", zap.Error(searchErr))
+				return c.JSON(fiber.Map{"entries": []audit.ExtendedEntry{}, "total": 0, "limit": limit, "offset": offset})
+			}
+			filtered := make([]audit.ExtendedEntry, 0, len(entries))
+			for _, e := range entries {
+				if strings.Contains(e.Actor, q.Actor) {
+					filtered = append(filtered, e)
+				}
+			}
+			start := offset
+			if start > len(filtered) {
+				start = len(filtered)
+			}
+			end := start + limit
+			if end > len(filtered) {
+				end = len(filtered)
+			}
+			page := filtered[start:end]
+			if page == nil {
+				page = []audit.ExtendedEntry{}
+			}
+			return c.JSON(fiber.Map{"entries": page, "total": len(filtered), "limit": limit, "offset": offset})
+		}
+		entries, total, err := h.auditExtended.Search(c.Context(), eq)
+		if err != nil {
+			h.logger.Error("failed to list extended audit logs", zap.Error(err))
+			return c.JSON(fiber.Map{"entries": []audit.ExtendedEntry{}, "total": 0, "limit": limit, "offset": offset})
+		}
+		if entries == nil {
+			entries = []audit.ExtendedEntry{}
+		}
+		return c.JSON(fiber.Map{"entries": entries, "total": total, "limit": limit, "offset": offset})
+	}
+
+	// Legacy fallback: coremail_audit store, same envelope.
+	if h.auditStore == nil {
+		return c.JSON(fiber.Map{"entries": []struct{}{}, "total": 0, "limit": limit, "offset": offset})
+	}
+	logs, total, err := h.auditStore.Search(c.Context(), &audit.Query{
+		TenantID: q.TenantID, Actor: q.Actor, Action: q.Action, Result: q.Result,
+		Limit: limit, Offset: offset,
+	})
 	if err != nil {
 		h.logger.Error("failed to list audit logs", zap.Error(err))
-		return c.JSON([]struct{}{})
+		return c.JSON(fiber.Map{"entries": []struct{}{}, "total": 0, "limit": limit, "offset": offset})
 	}
 	type safeEntry struct {
 		ID        int64  `json:"id"`
 		Action    string `json:"action"`
 		Actor     string `json:"actor"`
+		Role      string `json:"actor_role"`
 		Target    string `json:"target"`
 		Result    string `json:"result"`
+		TenantID  uint   `json:"tenant_id"`
+		IP        string `json:"ip"`
+		UserAgent string `json:"user_agent"`
 		Timestamp string `json:"timestamp"`
 	}
-	var result []safeEntry
+	result := make([]safeEntry, 0, len(logs))
 	for _, e := range logs {
 		result = append(result, safeEntry{
 			ID:        e.ID,
 			Action:    e.Action,
 			Actor:     e.Actor,
+			Role:      e.Role,
 			Target:    e.Target,
 			Result:    e.Result,
+			TenantID:  e.TenantID,
+			IP:        e.IP,
+			UserAgent: e.UserAgent,
 			Timestamp: e.Timestamp.Format(time.RFC3339),
 		})
 	}
-	if result == nil {
-		result = []safeEntry{}
-	}
-	return c.JSON(result)
+	return c.JSON(fiber.Map{"entries": result, "total": total, "limit": limit, "offset": offset})
 }
 
 // AdminSummary returns aggregate counts for the admin dashboard.
@@ -3820,6 +3933,32 @@ func (h *Handler) writeAuditLog(c fiber.Ctx, action, resource string) {
 		UserAgent: c.Get("User-Agent"),
 	}); err != nil {
 		h.logger.Error("failed to write audit log", zap.Error(err))
+	}
+
+	// Dual-write to the extended audit store (orvix_audit) so the
+	// platform Audit Log surface — which serves the rich ExtendedEntry
+	// contract with actor_id/actor_role/tenant_id/filtering/pagination —
+	// contains the SAME action set the legacy coremail_audit store has
+	// (queue operations, invitations, members, ownership, API keys,
+	// platform billing adjustments, …). Best-effort: a failure here is
+	// logged and never blocks the business action; the legacy write
+	// above remains the authoritative fallback for legacy consumers.
+	if h.auditExtended != nil {
+		role, _ := c.Locals("role").(string)
+		tenantID, _ := c.Locals("tenant_id").(uint)
+		if err := h.auditExtended.Record(c.Context(), &audit.ExtendedEntry{
+			Actor:     fmt.Sprintf("user:%d", userID),
+			ActorID:   userID,
+			ActorRole: role,
+			TenantID:  tenantID,
+			Action:    action,
+			Target:    resource,
+			Result:    "success",
+			IP:        ip,
+			UserAgent: c.Get("User-Agent"),
+		}); err != nil {
+			h.logger.Error("failed to write extended audit log", zap.Error(err))
+		}
 	}
 }
 

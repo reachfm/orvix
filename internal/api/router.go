@@ -287,12 +287,14 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 	}
 
 	// Wire enterprise admin services (mailbox, org, domain, platform, dashboard).
+	var platformSvc *platformpkg.PlatformService
 	if sqlDB, err := db.DB(); err == nil {
 		auditExtendedStore := auditpkg.NewExtendedStore(sqlDB)
 		if err := auditExtendedStore.EnsureTable(context.Background()); err != nil {
 			logger.Error("enterprise admin audit initialization failed; mutation services disabled", zap.Error(err))
 		} else {
 			rbacEval := entrbac.NewEvaluator(sqlDB)
+			router.h.SetAuditExtendedStore(auditExtendedStore)
 
 			adminMailboxRepo := mailboxadminsvc.NewAdminMailboxRepo(sqlDB)
 			if eng == nil {
@@ -301,7 +303,8 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 			mailboxAdminSvc := mailboxadminsvc.NewService(adminMailboxRepo, eng.Auth, auditExtendedStore, rbacEval)
 			router.h.SetMailboxAdminService(mailboxAdminSvc)
 			orgRepo := orgadminsvc.NewOrganizationRepo(sqlDB)
-			router.h.SetOrganizationAdminService(orgadminsvc.NewService(orgRepo, auditExtendedStore, rbacEval))
+			orgAdminSvc := orgadminsvc.NewService(orgRepo, auditExtendedStore, rbacEval)
+			router.h.SetOrganizationAdminService(orgAdminSvc)
 
 			domainAdminRepo := domainadminsvc.NewDomainAdminRepo(sqlDB)
 			dkimRepo := dkim.NewSQLRepo(sqlDB)
@@ -393,7 +396,7 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 			dashboardSvc := dashboardsvc.NewDashboardService(sqlDB)
 			router.h.SetDashboardService(dashboardSvc)
 
-			platformSvc := platformpkg.NewPlatformService(sqlDB, auditExtendedStore, rbacEval)
+			platformSvc = platformpkg.NewPlatformService(sqlDB, auditExtendedStore, rbacEval, orgAdminSvc)
 			router.h.SetPlatformAdminService(platformSvc)
 
 			// Retention/legal-hold/compliance (Milestone 14) — the
@@ -425,6 +428,12 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 			router.h.SetBillingUsageService(usageSvc)
 			router.h.SetBillingQuotaService(quotaSvc)
 			router.h.SetSendEnforcer(enforcer)
+			// PSA-created organizations need the same billing service the
+			// tenant console uses so their subscription initialization is
+			// consistent with self-signup.
+			if billingSvc != nil && platformSvc != nil {
+				platformSvc.SetBillingService(billingSvc)
+			}
 			logger.Info("billing services wired")
 
 			abuseSvc := abuse.NewSignalService(sqlDB, abuse.NewRateLimitService(sqlDB))
@@ -1624,6 +1633,7 @@ func (r *Router) setupRoutes() {
 	enterpriseRead.Get("/invitations", r.h.ListInvitations)
 	enterpriseRead.Post("/invitations", canWriteInvitations, r.h.CreateInvitation)
 	enterpriseRead.Post("/invitations/:id/revoke", canWriteInvitations, r.h.RevokeInvitation)
+	enterpriseRead.Post("/invitations/:id/resend", canWriteInvitations, r.h.ResendInvitation)
 
 	// ── Members ──
 	enterpriseRead.Get("/members", r.h.ListMembers)
@@ -1660,6 +1670,7 @@ func (r *Router) setupRoutes() {
 
 	// ── Billing ──
 	enterpriseRead.Get("/billing/subscription", r.h.GetBillingSubscription)
+	enterpriseRead.Get("/billing/state", r.h.GetBillingState)
 	enterpriseRead.Get("/billing/usage", r.h.GetBillingUsage)
 	enterpriseRead.Get("/billing/quota", r.h.CheckBillingQuota)
 	enterpriseRead.Post("/billing/subscription", canWriteBilling, r.h.CreateBillingSubscription)
@@ -2003,6 +2014,7 @@ func (r *Router) setupRoutes() {
 	// These routes operate on all tenants and require explicit
 	// platform-level authorization — not just tenant membership.
 	protected.Get("/platform/dashboard", platformMW[0], platformMW[1], r.h.PlatformDashboard)
+	protected.Post("/platform/organizations", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermPlatformOrganizationsWrite), r.h.CreatePlatformOrganization)
 	protected.Get("/platform/organizations", platformMW[0], platformMW[1], r.h.ListPlatformOrganizations)
 	protected.Get("/platform/organizations/:id", platformMW[0], platformMW[1], r.h.GetPlatformOrganization)
 	protected.Patch("/platform/organizations/:id", platformMW[0], platformMW[1], r.h.UpdateOrganization)
@@ -2115,6 +2127,7 @@ func (r *Router) setupRoutes() {
 	protected.Post("/platform/domains/:tenant_id/:id/dns/verify", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermDomainsRead), r.h.VerifyPlatformDomainDNS)
 	protected.Post("/platform/domains/:tenant_id/:id/dkim/generate", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermDomainsWrite), r.h.GeneratePlatformDomainDKIM)
 	protected.Post("/platform/domains/:tenant_id/:id/dkim/rotate", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermDomainsWrite), r.h.RotatePlatformDomainDKIM)
+	protected.Post("/platform/domains/:tenant_id/:id/dkim/revoke", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermDomainsWrite), r.h.RevokePlatformDomainDKIM)
 	// Platform domain lifecycle (Phase 8 production-acceptance
 	// remediation): canonical, audited deactivation/soft-delete. See
 	// platform_domain_lifecycle.go for the full contract.
@@ -2182,6 +2195,10 @@ func (r *Router) setupRoutes() {
 	protected.Get("/platform/groups/:tenant_id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermGroupsRead), r.h.ListPlatformGroups)
 	protected.Get("/platform/groups/:tenant_id/:id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermGroupsRead), r.h.GetPlatformGroup)
 	protected.Get("/platform/groups/:tenant_id/:id/members", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermGroupsRead), r.h.ListPlatformGroupMembers)
+	protected.Post("/platform/groups/:tenant_id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermGroupsWrite), r.h.CreatePlatformGroup)
+	protected.Delete("/platform/groups/:tenant_id/:id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermGroupsWrite), r.h.DeletePlatformGroup)
+	protected.Post("/platform/groups/:tenant_id/:id/members", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermGroupsWrite), r.h.AddPlatformGroupMember)
+	protected.Delete("/platform/groups/:tenant_id/:id/members/:member_id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermGroupsWrite), r.h.RemovePlatformGroupMember)
 
 	// Platform suppression + deliverability (Milestone 9 bounded
 	// context; the production service enforces suppression in the real
@@ -2241,6 +2258,7 @@ func (r *Router) setupRoutes() {
 	protected.Post("/platform/automation/jobs/:id/retry", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermJobsWrite), r.h.RetryPlatformAutomationJob)
 
 	// ── Platform billing balances/adjustments (Milestone 15) ───────
+	protected.Get("/platform/billing/tenants/:tenant_id/overview", platformMW[0], platformMW[1], r.h.GetPlatformBillingOverview)
 	protected.Get("/platform/billing/tenants/:tenant_id/balance", platformMW[0], platformMW[1], r.h.GetPlatformBillingBalance)
 	protected.Post("/platform/billing/tenants/:tenant_id/adjustments", platformMW[0], platformMW[1], r.h.PostPlatformBillingAdjustment)
 	protected.Get("/platform/billing/tenants/:tenant_id/adjustments", platformMW[0], platformMW[1], r.h.GetPlatformBillingAdjustments)

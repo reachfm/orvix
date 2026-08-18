@@ -445,6 +445,31 @@ func (h *Handler) RotatePlatformDomainDKIM(c fiber.Ctx) error {
 	return h.platformDKIMMutation(c, true)
 }
 
+// RevokePlatformDomainDKIM handles POST
+// /api/v1/platform/domains/:tenant_id/:id/dkim/revoke — disables the
+// domain's DKIM configuration through the same transactional revoke
+// path the tenant console uses (config disabled, domain DKIM state
+// cleared, DKIM history entry + audit recorded). Never exposes key
+// material; never mutates public DNS.
+func (h *Handler) RevokePlatformDomainDKIM(c fiber.Ctx) error {
+	svc, err := h.mailControl()
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	tenantID, err := parseTenantParam(c)
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	id, err := parseIDParam(c, "id")
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	if err := svc.RevokeDKIM(c.Context(), id, tenantID, h.platformActorID(c)); err != nil {
+		return errorResponse(c, err)
+	}
+	return c.JSON(fiber.Map{"status": "ok", "domain_id": id, "revoked": true})
+}
+
 // ── Platform mailboxes ─────────────────────────────────────────────
 
 func (h *Handler) ListPlatformMailboxes(c fiber.Ctx) error {
@@ -741,6 +766,108 @@ func (h *Handler) ListPlatformGroupMembers(c fiber.Ctx) error {
 		return errorResponse(c, err)
 	}
 	return c.JSON(fiber.Map{"group_id": id, "members": members})
+}
+
+// CreatePlatformGroup provisions a tenant group (POST
+// /api/v1/platform/groups/:tenant_id). The same coremail_groups table
+// the tenant self-service Groups page uses; name required, duplicate
+// name is a stable conflict.
+func (h *Handler) CreatePlatformGroup(c fiber.Ctx) error {
+	svc, err := h.mailControl()
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	tenantID, err := parseTenantParam(c)
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	var req struct {
+		Name        string `json:"name"`
+		Description string `json:"description,omitempty"`
+	}
+	if err := c.Bind().JSON(&req); err != nil || strings.TrimSpace(req.Name) == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "name is required", "code": "VALIDATION_FAILED"})
+	}
+	out, err := svc.CreateGroup(c.Context(), tenantID, req.Name, req.Description, h.platformActorID(c))
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	return c.Status(fiber.StatusCreated).JSON(out)
+}
+
+// DeletePlatformGroup soft-deletes a tenant group. Destructive:
+// requires the typed X-Confirm DELETE-GROUP-<id> and is audited.
+func (h *Handler) DeletePlatformGroup(c fiber.Ctx) error {
+	svc, err := h.mailControl()
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	tenantID, err := parseTenantParam(c)
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	id, err := parseIDParam(c, "id")
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	if confirmation := strings.TrimSpace(c.Get("X-Confirm")); confirmation == "" || confirmation != mailcontrol.ConfirmGroupDelete(id) {
+		return c.Status(fiber.StatusPreconditionRequired).JSON(fiber.Map{"error": "typed confirmation required", "code": "PRECONDITION_FAILED"})
+	}
+	if err := svc.DeleteGroup(c.Context(), id, tenantID, mailcontrol.ConfirmGroupDelete(id), h.platformActorID(c)); err != nil {
+		return errorResponse(c, err)
+	}
+	return c.JSON(fiber.Map{"status": "ok", "id": id})
+}
+
+// AddPlatformGroupMember adds a member email to a tenant-owned group.
+func (h *Handler) AddPlatformGroupMember(c fiber.Ctx) error {
+	svc, err := h.mailControl()
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	tenantID, err := parseTenantParam(c)
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	id, err := parseIDParam(c, "id")
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	var req struct {
+		Email string `json:"email"`
+	}
+	if err := c.Bind().JSON(&req); err != nil || strings.TrimSpace(req.Email) == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "email is required", "code": "VALIDATION_FAILED"})
+	}
+	if err := svc.AddGroupMember(c.Context(), id, tenantID, req.Email, h.platformActorID(c)); err != nil {
+		return errorResponse(c, err)
+	}
+	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"status": "ok", "group_id": id, "email": strings.TrimSpace(strings.ToLower(req.Email))})
+}
+
+// RemovePlatformGroupMember removes one member row from a tenant-owned
+// group; the member is scoped through the group's tenant ownership.
+func (h *Handler) RemovePlatformGroupMember(c fiber.Ctx) error {
+	svc, err := h.mailControl()
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	tenantID, err := parseTenantParam(c)
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	groupID, err := parseIDParam(c, "id")
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	memberID, err := parseIDParam(c, "member_id")
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	if err := svc.RemoveGroupMember(c.Context(), memberID, groupID, tenantID, h.platformActorID(c)); err != nil {
+		return errorResponse(c, err)
+	}
+	return c.JSON(fiber.Map{"status": "ok", "group_id": groupID, "member_id": memberID})
 }
 
 // ── Platform bulk mailbox operations ───────────────────────────────

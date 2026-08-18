@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/orvix/orvix/internal/dbdialect"
+	"github.com/orvix/orvix/internal/platform/kernel"
 )
 
 // Repository owns platform mail-control persistence that has no
@@ -247,6 +248,92 @@ func (r *Repository) ListGroupMembers(ctx context.Context, groupID, tenantID uin
 		out = append(out, email)
 	}
 	return out, rows.Err()
+}
+
+// CreateGroup inserts a new tenant group (coremail_groups, the SAME
+// table the tenant self-service Groups page and the importer use).
+// The UNIQUE(tenant_id, name) constraint is the real duplicate guard;
+// a duplicate surfaces as ErrGroupExists so the service never
+// fabricates a created group.
+func (r *Repository) CreateGroup(ctx context.Context, tenantID uint, name, description string) (*PlatformGroup, error) {
+	now := time.Now().UTC()
+	_, err := r.db.ExecContext(ctx, r.q(`INSERT INTO coremail_groups (tenant_id, name, description, created_at, updated_at)
+		VALUES (`+r.dialect.Placeholders(5)+`)`), tenantID, name, description, now, now)
+	if err != nil {
+		if kernel.IsUniqueViolation(err) {
+			return nil, ErrGroupExists
+		}
+		return nil, fmt.Errorf("create group: %w", err)
+	}
+	// Re-read by name (portable across sqlite/Postgres; avoids a
+	// dialect-dependent RETURNING branch here).
+	row := r.db.QueryRowContext(ctx, r.q(`SELECT g.id, g.tenant_id, g.name, COALESCE(g.description,''), g.created_at, g.updated_at,
+		(SELECT COUNT(*) FROM coremail_group_members m WHERE m.group_id = g.id) AS member_count
+		FROM coremail_groups g WHERE g.tenant_id=`+r.dialect.Placeholder(1)+` AND g.name=`+r.dialect.Placeholder(2)+` AND g.deleted_at IS NULL`), tenantID, name)
+	var out PlatformGroup
+	if err := row.Scan(&out.ID, &out.TenantID, &out.Name, &out.Description, &out.CreatedAt, &out.UpdatedAt, &out.MemberCount); err != nil {
+		return nil, fmt.Errorf("read created group: %w", err)
+	}
+	return &out, nil
+}
+
+// SoftDeleteGroup tombstones a tenant group (deleted_at) without
+// touching its member rows, matching the tenant self-service delete
+// semantics. Returns found=false when the group does not exist in the
+// tenant or is already deleted.
+func (r *Repository) SoftDeleteGroup(ctx context.Context, id, tenantID uint) (found bool, err error) {
+	now := time.Now().UTC()
+	res, err := r.db.ExecContext(ctx, r.q(`UPDATE coremail_groups SET deleted_at=`+r.dialect.Placeholder(1)+`, updated_at=`+r.dialect.Placeholder(2)+`
+		WHERE id=`+r.dialect.Placeholder(3)+` AND tenant_id=`+r.dialect.Placeholder(4)+` AND deleted_at IS NULL`), now, now, id, tenantID)
+	if err != nil {
+		return false, fmt.Errorf("soft delete group: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+// AddGroupMember inserts a member email into a tenant-owned group.
+// The UNIQUE(group_id, email) constraint is the real duplicate guard;
+// a duplicate surfaces as ErrGroupMemberExists.
+func (r *Repository) AddGroupMember(ctx context.Context, groupID, tenantID uint, email string) error {
+	// The group must exist and be tenant-owned — the same predicate
+	// ListGroupMembers uses. Never inserts a member row for a group the
+	// caller cannot see.
+	var exists int
+	err := r.db.QueryRowContext(ctx, r.q(`SELECT COUNT(*) FROM coremail_groups WHERE id=`+r.dialect.Placeholder(1)+` AND tenant_id=`+r.dialect.Placeholder(2)+` AND deleted_at IS NULL`), groupID, tenantID).Scan(&exists)
+	if err != nil {
+		return fmt.Errorf("check group ownership: %w", err)
+	}
+	if exists == 0 {
+		return ErrGroupNotFound
+	}
+	_, err = r.db.ExecContext(ctx, r.q(`INSERT INTO coremail_group_members (group_id, email, added_at) VALUES (`+r.dialect.Placeholders(3)+`)`), groupID, email, time.Now().UTC())
+	if err != nil {
+		if kernel.IsUniqueViolation(err) {
+			return ErrGroupMemberExists
+		}
+		return fmt.Errorf("add group member: %w", err)
+	}
+	return nil
+}
+
+// RemoveGroupMember deletes one member row, scoped to the tenant
+// through the group ownership subquery. Returns found=false when the
+// member row does not exist in that tenant's group.
+func (r *Repository) RemoveGroupMember(ctx context.Context, memberID, groupID, tenantID uint) (found bool, err error) {
+	res, err := r.db.ExecContext(ctx, r.q(`DELETE FROM coremail_group_members WHERE id=`+r.dialect.Placeholder(1)+` AND group_id IN (
+		SELECT id FROM coremail_groups WHERE id=`+r.dialect.Placeholder(2)+` AND tenant_id=`+r.dialect.Placeholder(3)+` AND deleted_at IS NULL)`), memberID, groupID, tenantID)
+	if err != nil {
+		return false, fmt.Errorf("remove group member: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
 }
 
 // ── Bulk mailbox status ────────────────────────────────────────────

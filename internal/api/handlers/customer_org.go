@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/gofiber/fiber/v3"
+	"github.com/orvix/orvix/internal/admin/organization"
 	"github.com/orvix/orvix/internal/auth"
 )
 
@@ -81,6 +82,36 @@ func (h *Handler) RevokeInvitation(c fiber.Ctx) error {
 	}
 	h.writeAuditLog(c, "invitation.revoke", fmt.Sprintf("id:%d", id))
 	return c.JSON(fiber.Map{"status": "revoked"})
+}
+
+// ResendInvitation re-issues the one-time token for a still-pending
+// invitation (POST /enterprise/invitations/:id/resend). The new token
+// is returned exactly once — it replaces the previous token, so any
+// prior copy is invalidated (the same rotate semantics the invitation
+// model uses). Only pending invitations can be re-issued; accepted,
+// revoked, or expired ones are rejected with the underlying status.
+func (h *Handler) ResendInvitation(c fiber.Ctx) error {
+	if h.orgAdminSvc == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "organization service not available"})
+	}
+	idStr := c.Params("id")
+	id, err := strconv.ParseUint(idStr, 10, 64)
+	if err != nil || id == 0 {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid invitation id"})
+	}
+	tenantID, err := auth.RequireTenantID(c)
+	if err != nil {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "tenant context required"})
+	}
+	inv, token, err := h.orgAdminSvc.RotateInvitationToken(c.Context(), uint(id), tenantID)
+	if err != nil {
+		if err == organization.ErrInvitationNotFound {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "invitation not found"})
+		}
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": err.Error()})
+	}
+	h.writeAuditLog(c, "invitation.resend", fmt.Sprintf("id:%d", id))
+	return c.JSON(fiber.Map{"invitation": inv, "token": token, "warning": "This new token replaces the previous one. Save it now - it will not be shown again."})
 }
 
 func (h *Handler) ListMembers(c fiber.Ctx) error {

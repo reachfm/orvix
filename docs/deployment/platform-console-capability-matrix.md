@@ -36,6 +36,7 @@ frontend consumer, not the route's name.
 | Route | Middleware | Handler | Contract | Owner | Test file | Disposition |
 |---|---|---|---|---|---|---|
 | `GET /platform/organizations` | platformMW | `ListPlatformOrganizations` | `organizations/contract.ts`'s `ListOrganizationsResponse` | Platform | `organizations/page.test.tsx` | UI_SUPPORTED |
+| `POST /platform/organizations` | platformMW | `CreatePlatformOrganization` | PSA organization creation: `name`, optional `slug`/`domain`/`plan_id`/`max_domains`/`max_mailboxes`, REQUIRED `owner_email`; one-time `invite_token` in the live response only; Idempotency-Key required | Platform | `platform_org_creation_acceptance_test.go` (RBAC, CSRF, idempotency replay, owner-required, no-ownerless-org, hash-only token storage) | MISSING_UI (backend COMPLETE — the documented MISSING_BACKEND capability, closed by the Enterprise Completion Pass; no frontend consumer yet — the create-org form is the frontend agent's wiring task) |
 | `GET /platform/organizations/:id/detail` | platformMW | `GetOrganizationDetail` | `OrganizationDetail` | Platform | `page.test.tsx` | UI_SUPPORTED |
 | `POST /platform/organizations/:id/active` | platformMW | `SetOrganizationActive` | `SetOrganizationActiveRequest/Response` | Platform | `page.test.tsx` | UI_SUPPORTED |
 | `PATCH /platform/organizations/:id` | platformMW | `UpdateOrganization` | `UpdateOrganizationRequest/Response` | Platform | `page.test.tsx` | UI_SUPPORTED |
@@ -49,6 +50,19 @@ function, and no `POST /platform/organizations` (or equivalent)
 route is registered anywhere in `router.go`. Organizations are
 currently created only via tenant self-signup, never PSA-initiated.
 Not fixed in this pass — flagged, not silently omitted.
+
+**CLOSED by the Enterprise Product Completion Pass**: `POST
+/platform/organizations` is now a real, registered route (row above).
+Product semantics decided and enforced: PSA-created organizations ARE
+product-supported; an initial owner is REQUIRED (`owner_email`) and is
+established via the real tenant_admin invitation/activation model
+(one-time token, hashed at rest, 7-day expiry) — never an invented
+owner user/password, and never an ownerless ACTIVE organization; plan/
+subscription initialized consistently with self-signup (free plan
+default); the org row + owner invitation + audit record commit in ONE
+transaction; creation is Idempotency-Key-guarded with replay returning
+the stored (token-free) result. The console's create-org UI is the
+frontend agent's remaining wiring task.
 
 ## Mail Operations
 
@@ -187,6 +201,7 @@ and `isCoreMailDisabled` (frontend).
 
 | Route | Middleware | Handler | Contract | Owner | Test file | Disposition |
 |---|---|---|---|---|---|---|
+| `GET /platform/billing/tenants/:tenant_id/overview` | platformMW | `GetPlatformBillingOverview` | coherent Platform Billing control-plane view: subscription + plan + billing period, live usage, invoice state, account balance, ledger adjustments, reconciliation, and honest payment/provider configuration (`configured:false` + note when no provider is wired — never MRR/cards/paid-invoice fabrication). Enterprise Completion Pass addition | Platform | `internal/api/handlers/platform_billing_overview_acceptance_test.go` | MISSING_UI (backend COMPLETE) |
 | `GET /platform/billing/tenants/:tenant_id/balance` | platformMW | `GetPlatformBillingBalance` | `platformbilling.Balance` | Platform | `internal/platform/billing` service tests | MISSING_UI |
 | `POST /platform/billing/tenants/:tenant_id/adjustments` | platformMW | `PostPlatformBillingAdjustment` | `platformbilling.Adjustment`, integer minor units + currency only, idempotency-key supported | Platform | `internal/platform/billing` service tests (incl. concurrent-idempotency-key test) | MISSING_UI |
 | `GET /platform/billing/tenants/:tenant_id/adjustments` | platformMW | `GetPlatformBillingAdjustments` | `{adjustments: platformbilling.Adjustment[]}` | Platform | `internal/platform/billing` service tests | MISSING_UI |
@@ -260,6 +275,7 @@ are RBAC-permissioned, audited, and tenant-scoped in SQL.
 | `POST /platform/domains/:tenant_id/:id/dns/verify` | platformMW | `VerifyPlatformDomainDNS` | read-only live public-DNS verification of every record `GetPlatformDomainDNS` presents, via the shared `dnsops.Service.Generate`/`Verify` (the same `Verifier` the existing admin DNS verify route uses); external DNS lookups only — never mutates public DNS, never generates/rotates DKIM, never modifies the domain; DKIM is compared against the CURRENT configured key read fresh on every call; `DomainDetailDrawer.tsx`'s DNS Setup tab auto-triggers it once per domain (gated to `activeTab === "dns"`) and offers an explicit "Re-check DNS" action, rendering per-record Matched/Mismatch/Missing/Check failed status with Expected/Actual on mismatch | Platform | `internal/api/handlers/platform_dns_verify_test.go`, `internal/dnsops/verifier_test.go`, `web/admin/src/features/platform/domains/page.test.tsx`, `web/admin/tests/e2e/platform-domains-contract.spec.ts` | UI_SUPPORTED |
 | `POST /platform/domains/:tenant_id/:id/dkim/generate` | platformMW | `GeneratePlatformDomainDKIM` | canonical, version-guarded DKIM generation for a domain with none configured (`PlatformDKIMForTenant`; tenant-scoped resolution, optimistic concurrency, Idempotency-Key required) | Platform | `internal/api/handlers/platform_domain_lifecycle_acceptance_test.go` | MISSING_UI |
 | `POST /platform/domains/:tenant_id/:id/dkim/rotate` | platformMW | `RotatePlatformDomainDKIM` | canonical, version-guarded DKIM rotation requiring `confirm_rotation: "rotate-dkim-key"` (`PlatformDKIMForTenant`; tenant-scoped resolution, optimistic concurrency, Idempotency-Key required) | Platform | `internal/api/handlers/platform_domain_lifecycle_acceptance_test.go` | MISSING_UI |
+| `POST /platform/domains/:tenant_id/:id/dkim/revoke` | platformMW | `RevokePlatformDomainDKIM` | canonical DKIM revoke through the SAME transactional path the tenant console uses (config disabled, domain DKIM state cleared, DKIM selector-history entry `revoked` + audit; never exposes key material, never mutates public DNS); tenant-scoped; no frontend consumer yet (Enterprise Completion Pass addition) | Platform | `internal/api/handlers/platform_dkim_revoke_acceptance_test.go` | MISSING_UI (backend COMPLETE) |
 | `POST /platform/users/:id/deactivate` | platformMW | `DeactivatePlatformUser` | canonical, audited deactivation of another platform-scoped user account (`PermPlatformUsersWrite`; blocks self-targeting, revokes sessions/API keys/MFA recovery codes/MFA challenges, bumps `token_version`; Idempotency-Key required) | Platform | `internal/api/handlers/platform_user_lifecycle_acceptance_test.go` | MISSING_UI |
 | `GET /platform/mailboxes/:tenant_id` | platformMW | `ListPlatformMailboxes` | paginated platform mailbox list for an explicit tenant/domain | Platform | `internal/platform/mailcontrol/service_test.go` | MISSING_UI |
 | `GET /platform/mailboxes/:tenant_id/:id` | platformMW | `GetPlatformMailbox` | mailbox detail with configured + effective mail-access mode, tenant-scoped | Platform | `internal/platform/mailcontrol/service_test.go` | MISSING_UI |
@@ -283,6 +299,10 @@ are RBAC-permissioned, audited, and tenant-scoped in SQL.
 | `GET /platform/groups/:tenant_id` | platformMW | `ListPlatformGroups` | paginated group list for an explicit tenant | Platform | `internal/platform/mailcontrol/service_test.go` | MISSING_UI |
 | `GET /platform/groups/:tenant_id/:id` | platformMW | `GetPlatformGroup` | group detail with member count, tenant-scoped | Platform | `internal/platform/mailcontrol/service_test.go` | MISSING_UI |
 | `GET /platform/groups/:tenant_id/:id/members` | platformMW | `ListPlatformGroupMembers` | group member emails, tenant-scoped | Platform | `internal/platform/mailcontrol/service_test.go` | MISSING_UI |
+| `POST /platform/groups/:tenant_id` | platformMW | `CreatePlatformGroup` | group creation in the SAME `coremail_groups` table the tenant self-service Groups page uses (name required ≤64 chars, duplicate (tenant_id,name) = 409, audited) — Enterprise Completion Pass addition | Platform | `internal/api/handlers/platform_groups_crud_acceptance_test.go` | MISSING_UI (backend COMPLETE) |
+| `DELETE /platform/groups/:tenant_id/:id` | platformMW | `DeletePlatformGroup` | soft-delete (deleted_at tombstone) requiring typed X-Confirm `DELETE-GROUP-<id>`, audited — Enterprise Completion Pass addition | Platform | `internal/api/handlers/platform_groups_crud_acceptance_test.go` | MISSING_UI (backend COMPLETE) |
+| `POST /platform/groups/:tenant_id/:id/members` | platformMW | `AddPlatformGroupMember` | member add validated + duplicate (group_id,email) = 409; group ownership predicate in SQL — Enterprise Completion Pass addition | Platform | `internal/api/handlers/platform_groups_crud_acceptance_test.go` | MISSING_UI (backend COMPLETE) |
+| `DELETE /platform/groups/:tenant_id/:id/members/:member_id` | platformMW | `RemovePlatformGroupMember` | member removal scoped through the group's tenant ownership — Enterprise Completion Pass addition | Platform | `internal/api/handlers/platform_groups_crud_acceptance_test.go` | MISSING_UI (backend COMPLETE) |
 | `GET /platform/suppressions/:tenant_id` | platformMW | `ListPlatformSuppressions` | paginated/filterable suppression list (domain/state/reason/source/ranges), default active-only | Platform | `internal/platform/deliverability/lifecycle_test.go` | MISSING_UI |
 | `POST /platform/suppressions/:tenant_id` | platformMW | `AddPlatformSuppression` | create a reasoned, tenant-scoped suppression (atomic upsert, idempotent); audited | Platform | `internal/platform/deliverability/lifecycle_test.go` | MISSING_UI |
 | `GET /platform/suppressions/:tenant_id/:id` | platformMW | `GetPlatformSuppression` | suppression detail with state/version/release fields, tenant-scoped | Platform | `internal/platform/deliverability/lifecycle_test.go` | MISSING_UI |
@@ -384,9 +404,9 @@ occurrence and its row's disposition straight out of this document.
 | MACHINE_ONLY | 3 |
 | DEPRECATED | 12 |
 | DUPLICATE_SUPERSEDED_ROUTE | 18 |
-| MISSING_UI | 120 |
-| MISSING_BACKEND | 0 (the one MISSING_BACKEND case — platform-initiated organization creation — is a non-route documented under Organizations, not counted here) |
-| **Total** | **224** |
+| MISSING_UI | 127 |
+| MISSING_BACKEND | 0 (the one MISSING_BACKEND case — platform-initiated organization creation — is documented under Organizations; it is now a real route, closed by the Enterprise Completion Pass) |
+| **Total** | **231** |
 
 Three pre-existing MISSING_UI gaps were documented rather than
 silently omitted: `GET /admin/backups/:id` (single-backup fetch; the

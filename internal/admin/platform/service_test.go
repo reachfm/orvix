@@ -35,7 +35,7 @@ func TestPlatformServiceOrganizationSummaryCounts(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	svc := NewPlatformService(db, nil, nil)
+	svc := NewPlatformService(db, nil, nil, nil)
 	summaries, total, err := svc.ListOrganizationSummaries(context.Background(), "Tenant", 10, 0)
 	if err != nil {
 		t.Fatalf("list summaries: %v", err)

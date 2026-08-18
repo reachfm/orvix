@@ -58,6 +58,35 @@ func hashToken(raw string) string {
 	return hex.EncodeToString(h[:])
 }
 
+// newInvitationToken builds a pending invitation for the given
+// organization/role with a freshly generated one-time token. The
+// role must already be validated by the caller (isValidOrgMemberRole).
+// expiryDays <= 0 falls back to 7 days.
+func newInvitationToken(orgID uint, email, role string, expiryDays int) (*OrganizationInvitation, string, error) {
+	if !isValidOrgMemberRole(role) {
+		return nil, "", fmt.Errorf("invalid organization member role: %s", role)
+	}
+	rawToken, tokenHash, err := generateInviteToken()
+	if err != nil {
+		return nil, "", fmt.Errorf("generate token: %w", err)
+	}
+	if expiryDays <= 0 {
+		expiryDays = 7
+	}
+	now := time.Now().UTC()
+	inv := &OrganizationInvitation{
+		OrganizationID: orgID,
+		Email:          email,
+		TokenHash:      tokenHash,
+		Role:           role,
+		Status:         InvitationPending,
+		ExpiresAt:      now.AddDate(0, 0, expiryDays),
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}
+	return inv, rawToken, nil
+}
+
 func (s *Service) CreateInvitation(ctx context.Context, orgID, inviterID uint, email, role string, expiryDays int) (*OrganizationInvitation, string, error) {
 	org, err := s.repo.GetByID(ctx, orgID)
 	if err != nil || org == nil {
@@ -69,27 +98,11 @@ func (s *Service) CreateInvitation(ctx context.Context, orgID, inviterID uint, e
 	// must never mint an identity that either cannot administer anything
 	// or that carries a role the member-role policy does not allow
 	// (UpdateMemberRole uses the same allowlist via isValidOrgMemberRole).
-	if !isValidOrgMemberRole(role) {
-		return nil, "", fmt.Errorf("invalid organization member role: %s", role)
-	}
-	rawToken, tokenHash, err := generateInviteToken()
+	inv, rawToken, err := newInvitationToken(orgID, email, role, expiryDays)
 	if err != nil {
-		return nil, "", fmt.Errorf("generate token: %w", err)
+		return nil, "", err
 	}
-	if expiryDays <= 0 {
-		expiryDays = 7
-	}
-	inv := &OrganizationInvitation{
-		OrganizationID: orgID,
-		InviterID:      inviterID,
-		Email:          email,
-		TokenHash:      tokenHash,
-		Role:           role,
-		Status:         InvitationPending,
-		ExpiresAt:      time.Now().UTC().AddDate(0, 0, expiryDays),
-		CreatedAt:      time.Now().UTC(),
-		UpdatedAt:      time.Now().UTC(),
-	}
+	inv.InviterID = inviterID
 	if err := s.repo.CreateInvitation(ctx, inv); err != nil {
 		return nil, "", err
 	}
@@ -157,11 +170,27 @@ func (s *Service) RotateInvitationToken(ctx context.Context, invID, orgID uint) 
 }
 
 func (r *OrganizationRepo) CreateInvitation(ctx context.Context, inv *OrganizationInvitation) error {
-	_, err := r.db.ExecContext(ctx,
+	if r.dialect.IsPostgres() {
+		if err := r.db.QueryRowContext(ctx,
+			`INSERT INTO org_invitations (organization_id, inviter_id, email, token_hash, role, status, expires_at, created_at, updated_at)
+			VALUES (`+r.dialect.Placeholders(9)+`) RETURNING id`,
+			inv.OrganizationID, inv.InviterID, inv.Email, inv.TokenHash, inv.Role, inv.Status, inv.ExpiresAt, inv.CreatedAt, inv.UpdatedAt,
+		).Scan(&inv.ID); err != nil {
+			return err
+		}
+		return nil
+	}
+	res, err := r.db.ExecContext(ctx,
 		`INSERT INTO org_invitations (organization_id, inviter_id, email, token_hash, role, status, expires_at, created_at, updated_at)
 		VALUES (`+r.dialect.Placeholders(9)+`)`,
 		inv.OrganizationID, inv.InviterID, inv.Email, inv.TokenHash, inv.Role, inv.Status, inv.ExpiresAt, inv.CreatedAt, inv.UpdatedAt)
-	return err
+	if err != nil {
+		return err
+	}
+	if id, idErr := res.LastInsertId(); idErr == nil {
+		inv.ID = uint(id)
+	}
+	return nil
 }
 
 func (r *OrganizationRepo) GetInvitationByHash(ctx context.Context, tokenHash string) (*OrganizationInvitation, error) {

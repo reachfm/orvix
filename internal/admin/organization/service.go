@@ -3,6 +3,8 @@ package organization
 import (
 	"context"
 	"fmt"
+	"net/mail"
+	"strings"
 
 	"github.com/orvix/orvix/internal/audit"
 	entrbac "github.com/orvix/orvix/internal/enterprise/rbac"
@@ -82,6 +84,82 @@ func (s *Service) CreateOrganization(ctx context.Context, req CreateOrganization
 		return nil, err
 	}
 	return created, nil
+}
+
+// CreateOrganizationWithOwner provisions an organization AND its initial
+// owner invitation in ONE transaction (the org row, the invitation row and
+// the audit record commit or roll back together). It is the platform
+// super-admin organization-creation path: the PSA never invents an owner
+// user or password — the initial tenant_admin owner is established through
+// the same real invitation/activation model members use, so an organization
+// can never be created ownerless AND active. The owner invitation is
+// REQUIRED: a PSA-created organization without a designated owner is
+// rejected before any row is written.
+//
+// The returned rawToken is the one-time invitation token (shown once at
+// creation); only its SHA-256 hash is persisted.
+func (s *Service) CreateOrganizationWithOwner(ctx context.Context, req CreateOrganizationRequest, platformTenantID, actorID uint, ownerEmail string) (*Organization, *OrganizationInvitation, string, error) {
+	ownerEmail = strings.TrimSpace(strings.ToLower(ownerEmail))
+	if ownerEmail == "" {
+		return nil, nil, "", fmt.Errorf("owner_email is required: a PSA-created organization must have a designated owner")
+	}
+	if _, err := mail.ParseAddress(ownerEmail); err != nil {
+		return nil, nil, "", fmt.Errorf("owner_email is not a valid email address")
+	}
+	exists, err := s.repo.ExistsBySlug(ctx, req.Slug, 0)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	if exists {
+		return nil, nil, "", ErrOrganizationExists
+	}
+	if req.Name == "" {
+		req.Name = req.Slug
+	}
+	if req.Plan == "" {
+		req.Plan = "smb"
+	}
+	if req.MaxDomains == 0 {
+		req.MaxDomains = 10
+	}
+	if req.MaxMailboxes == 0 {
+		req.MaxMailboxes = 500
+	}
+	o := &Organization{
+		Name: req.Name, Slug: req.Slug, Domain: req.Domain,
+		Plan: req.Plan, MaxDomains: req.MaxDomains, MaxMailboxes: req.MaxMailboxes, Active: true,
+	}
+	inv, rawToken, err := newInvitationToken(0, ownerEmail, "tenant_admin", 7)
+	if err != nil {
+		return nil, nil, "", fmt.Errorf("generate owner invitation: %w", err)
+	}
+	inv.InviterID = actorID
+
+	var created *Organization
+	entry := &audit.ExtendedEntry{
+		Action: "organization.create", TenantID: platformTenantID, ActorID: actorID, Result: "success",
+		Reason: "platform-initiated organization creation",
+	}
+	if err := s.mutateWithAudit(ctx, entry, func(repo *OrganizationRepo) error {
+		var createErr error
+		created, createErr = repo.Create(ctx, o)
+		if createErr != nil {
+			return createErr
+		}
+		inv.OrganizationID = created.ID
+		inv.InviterID = actorID
+		if err := repo.CreateInvitation(ctx, inv); err != nil {
+			return fmt.Errorf("create owner invitation: %w", err)
+		}
+		entry.Target, entry.TargetID = fmt.Sprintf("tenant:%d", created.ID), created.ID
+		return nil
+	}); err != nil {
+		if kernel.IsUniqueViolation(err) {
+			return nil, nil, "", ErrOrganizationExists
+		}
+		return nil, nil, "", err
+	}
+	return created, inv, rawToken, nil
 }
 
 func (s *Service) UpdateOrganization(ctx context.Context, id uint, req UpdateOrganizationRequest) (*Organization, error) {

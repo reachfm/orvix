@@ -16,7 +16,10 @@
 //     NOT the PSA authorization model.
 package mailcontrol
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 // ── Platform domain views ──────────────────────────────────────────
 
@@ -433,3 +436,17 @@ var (
 	ErrTenantDeleted   = &mailControlError{"tenant is deleted"}
 	ErrProvisionFailed = &mailControlError{"provisioning failed"}
 )
+
+// Group mutation errors (platform groups CRUD).
+var (
+	ErrGroupExists        = &mailControlError{"a group with this name already exists in the tenant"}
+	ErrGroupNotFound      = &mailControlError{"group not found"}
+	ErrGroupMemberExists  = &mailControlError{"this email is already a member of the group"}
+	ErrGroupMemberMissing = &mailControlError{"group member not found"}
+)
+
+// ConfirmGroupDelete is the typed confirmation for platform group
+// deletion: DELETE-GROUP-<id>.
+func ConfirmGroupDelete(id uint) string {
+	return fmt.Sprintf("DELETE-GROUP-%d", id)
+}

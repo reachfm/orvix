@@ -218,6 +218,26 @@ func (s *ExtendedStore) Search(ctx context.Context, q *ExtendedQuery) ([]Extende
 	return entries, total, rows.Err()
 }
 
+// GetEntry returns a single audit entry by id. It exists so the
+// platform audit detail route can serve the same rich ExtendedEntry
+// contract the list route returns (actor_id/actor_role/tenant_id/ip/
+// user_agent/…), never a second, poorer projection.
+func (s *ExtendedStore) GetEntry(ctx context.Context, id int64) (*ExtendedEntry, error) {
+	var e ExtendedEntry
+	err := s.db.QueryRowContext(ctx, `SELECT id, actor, actor_id, actor_role, tenant_id, action, target, target_id, result, reason, before, after, request_id, ip, user_agent, timestamp
+		FROM orvix_audit WHERE id = `+s.dialect.Placeholder(1), id).
+		Scan(&e.ID, &e.Actor, &e.ActorID, &e.ActorRole, &e.TenantID,
+			&e.Action, &e.Target, &e.TargetID, &e.Result, &e.Reason,
+			&e.Before, &e.After, &e.RequestID, &e.IP, &e.UserAgent, &e.Timestamp)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get extended audit entry: %w", err)
+	}
+	return &e, nil
+}
+
 func sanitizeEntry(e *ExtendedEntry) {
 	e.After = sanitizeJSON(e.After, sensitiveFields)
 	e.Before = sanitizeJSON(e.Before, sensitiveFields)

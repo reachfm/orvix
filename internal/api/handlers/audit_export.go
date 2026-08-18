@@ -32,6 +32,18 @@ func (h *Handler) GetAuditEntry(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid id"})
 	}
+	// Prefer the extended store so the detail contract matches the
+	// list contract (actor_id/actor_role/tenant_id/ip/user_agent/…).
+	if h.auditExtended != nil {
+		entry, err := h.auditExtended.GetEntry(c.Context(), id)
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to load audit entry"})
+		}
+		if entry == nil {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "entry not found"})
+		}
+		return c.JSON(entry)
+	}
 	entry, err := h.auditStore.GetEntry(c.Context(), id)
 	if err != nil {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "entry not found"})

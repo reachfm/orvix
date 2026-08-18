@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/mail"
 	"strings"
 	"time"
 
@@ -394,6 +395,29 @@ func (s *Service) GenerateOrRotateDKIM(ctx context.Context, id, tenantID uint, s
 		DNSRecordName: result.DNSRecordName,
 		Version:       result.Version,
 	}, nil
+}
+
+// RevokeDKIM disables a domain's DKIM configuration through the
+// production domain service (same transactional revoke path the
+// tenant console uses: config disabled, domain DKIM state cleared,
+// DKIM history entry + audit recorded). Idempotent in the sense that
+// revoking an already-revoked domain reports success with no new
+// mutation; revoking with NO configured DKIM is a stable conflict.
+func (s *Service) RevokeDKIM(ctx context.Context, id, tenantID uint, actorID uint) error {
+	if err := s.requireTenant(tenantID); err != nil {
+		return err
+	}
+	if err := s.domains.RevokeDKIM(ctx, id, tenantID); err != nil {
+		switch {
+		case errors.Is(err, admindomain.ErrDomainNotFound):
+			return kernel.NotFound("domain")
+		case errors.Is(err, admindomain.ErrDKIMNotConfigured):
+			return kernel.Conflict("dkim is not configured for this domain")
+		}
+		return kernel.Wrap(kernel.ErrCodeInternal, "revoke platform domain dkim", err)
+	}
+	s.auditRecord(ctx, actorID, "platform.domain.dkim.revoke", fmt.Sprintf("domain:%d", id), tenantID, "success", "")
+	return nil
 }
 
 // SetDomainStatus applies an allowed lifecycle transition for an
@@ -840,6 +864,103 @@ func (s *Service) ListGroupMembers(ctx context.Context, id, tenantID uint) ([]st
 		}
 	}
 	return s.repo.ListGroupMembers(ctx, id, tenantID)
+}
+
+// ── Group mutations (platform groups CRUD) ─────────────────────────
+
+// CreateGroup provisions a tenant group in the SAME coremail_groups
+// table the tenant self-service Groups page and the importer use — one
+// storage, no platform shadow copy. Name must be non-empty and bounded;
+// a duplicate (tenant_id, name) is a stable conflict.
+func (s *Service) CreateGroup(ctx context.Context, tenantID uint, name, description string, actorID uint) (*PlatformGroup, error) {
+	if err := s.requireTenant(tenantID); err != nil {
+		return nil, err
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil, kernel.ValidationError(map[string]string{"name": "name is required"})
+	}
+	if len(name) > 64 {
+		return nil, kernel.ValidationError(map[string]string{"name": "name must be 64 characters or fewer"})
+	}
+	if len(description) > 500 {
+		return nil, kernel.ValidationError(map[string]string{"description": "description must be 500 characters or fewer"})
+	}
+	g, err := s.repo.CreateGroup(ctx, tenantID, name, strings.TrimSpace(description))
+	if err != nil {
+		if err == ErrGroupExists {
+			return nil, kernel.Conflict("a group with this name already exists in the tenant")
+		}
+		return nil, kernel.Wrap(kernel.ErrCodeInternal, "create platform group", err)
+	}
+	s.auditRecord(ctx, actorID, "platform.group.create", fmt.Sprintf("group:%d name:%s", g.ID, g.Name), tenantID, "success", "")
+	return g, nil
+}
+
+// DeleteGroup soft-deletes a tenant group (deleted_at tombstone, same
+// semantics as the tenant self-service delete). Requires the typed
+// confirmation DELETE-GROUP-<id> — never a one-click destructive
+// action — and is audited.
+func (s *Service) DeleteGroup(ctx context.Context, id, tenantID uint, confirm string, actorID uint) error {
+	if err := s.requireTenant(tenantID); err != nil {
+		return err
+	}
+	if confirm != ConfirmGroupDelete(id) {
+		return ErrInvalidConfirmation
+	}
+	found, err := s.repo.SoftDeleteGroup(ctx, id, tenantID)
+	if err != nil {
+		return kernel.Wrap(kernel.ErrCodeInternal, "delete platform group", err)
+	}
+	if !found {
+		return kernel.NotFound("group")
+	}
+	s.auditRecord(ctx, actorID, "platform.group.delete", fmt.Sprintf("group:%d", id), tenantID, "success", "")
+	return nil
+}
+
+// AddGroupMember adds a member email to a tenant-owned group. The
+// email is validated; a duplicate (group_id, email) is a stable
+// conflict; membership is scoped to the tenant through the group
+// ownership predicate.
+func (s *Service) AddGroupMember(ctx context.Context, groupID, tenantID uint, email string, actorID uint) error {
+	if err := s.requireTenant(tenantID); err != nil {
+		return err
+	}
+	email = strings.TrimSpace(strings.ToLower(email))
+	if _, err := mail.ParseAddress(email); err != nil || email == "" {
+		return kernel.ValidationError(map[string]string{"email": "a valid email address is required"})
+	}
+	if err := s.repo.AddGroupMember(ctx, groupID, tenantID, email); err != nil {
+		switch err {
+		case ErrGroupNotFound:
+			return kernel.NotFound("group")
+		case ErrGroupMemberExists:
+			return kernel.Conflict("this email is already a member of the group")
+		default:
+			return kernel.Wrap(kernel.ErrCodeInternal, "add group member", err)
+		}
+	}
+	s.auditRecord(ctx, actorID, "platform.group.member_add", fmt.Sprintf("group:%d email:%s", groupID, email), tenantID, "success", "")
+	return nil
+}
+
+// RemoveGroupMember removes one member row from a tenant-owned group.
+// The member row is scoped through the group's tenant ownership, so a
+// cross-tenant member id can never be removed.
+func (s *Service) RemoveGroupMember(ctx context.Context, memberID, groupID, tenantID uint, actorID uint) error {
+	if err := s.requireTenant(tenantID); err != nil {
+		return err
+	}
+	found, err := s.repo.RemoveGroupMember(ctx, memberID, groupID, tenantID)
+	if err != nil {
+		return kernel.Wrap(kernel.ErrCodeInternal, "remove group member", err)
+	}
+	if !found {
+		return kernel.NotFound("group member")
+	}
+	s.auditRecord(ctx, actorID, "platform.group.member_remove", fmt.Sprintf("group:%d member:%d", groupID, memberID), tenantID, "success", "")
+	return nil
 }
 
 // ── Bulk mailbox operations ────────────────────────────────────────
