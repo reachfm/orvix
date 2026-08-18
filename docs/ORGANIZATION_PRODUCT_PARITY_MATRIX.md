@@ -129,8 +129,11 @@ INTENTIONAL_MACHINE_ONLY, DEPRECATED, DUPLICATE_SUPERSEDED).
 
 | # | Feature/action | Trace | Disposition |
 |---|---|---|---|
-| 10.1 | Submit support request (category/subject/message; rate-limited 5/10min per user; confirmation) | `components/SupportPage.tsx` → `POST /account/support-requests` (`supportLimiter` 5/10min) → `SubmitSupportRequest` — sends real mail via transactional sender; fails honestly on send failure (no false "sent"). | COMPLETE |
-| 10.2 | Ticket history | **No ticket/history backend exists** (no `support_tickets` table, no list endpoint). Not invented: frontend must NOT render a history concept; if a history surface is desired it requires a new bounded context (backend-first). Documented disposition — the Support page currently submits only. | INTENTIONAL_READ_ONLY (submission only; history is NOT implemented — do not fabricate) |
+| 10.1 | Submit support request (category/subject/description/priority; rate-limited 5/10min per user; confirmation) | `components/SupportPage.tsx` → `POST /account/support-requests` (`supportLimiter` 5/10min) → `support.Repository.CreateTicket` — persistent row + reference_id + status="open". Transactional mail best-effort with honest delivery_status (sent/failed/disabled — never a lying "queued"). | COMPLETE |
+| 10.2 | Own ticket list (paginated, filter by status) | `components/SupportPage.tsx` "Your Support Tickets" → `GET /account/support-requests` → `support.Repository.ListTickets` (tenant + owner scope; envelope `{entries, total, limit, offset}`). | COMPLETE |
+| 10.3 | Own ticket detail (ticket row + reply thread) | `GET /account/support-requests/:ref` → `support.Repository.GetTicketByReference` + `ListMessages` (tenant scope; defense-in-depth: also enforces owner == caller). | COMPLETE |
+| 10.4 | Reply on own ticket (drives tenant-side status transition) | `POST /account/support-requests/:ref/reply` (`supportLimiter`) → `support.Repository.AddReply` (author_kind="tenant"). Closed / resolved tickets reject further replies (409 INVALID_STATE_TRANSITION). | COMPLETE |
+| 10.5 | Round-trip invariant | TenantAdmin creates Ticket X (POST /account/support-requests persists + returns X), reads own X (GET /account/support-requests/:ref), platform reads SAME X (GET /platform/support/tickets/:ref). Tenant B cannot see X (tenant scope in repository). | COMPLETE |
 
 ## 11. Org-side routes outside visible pages (dispositioned)
 

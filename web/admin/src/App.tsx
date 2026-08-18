@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { LayoutDashboard, Globe, Users, Shield, Zap, Activity, Settings, Server, Building, Mail, Monitor, HardDrive, HeartPulse, CreditCard, Keyboard, User, AtSign, BarChart, AlertTriangle, UserPlus, Send, LogOut, FileText, Bell, ShieldAlert, Upload } from "lucide-react";
+import { LayoutDashboard, Globe, Users, Shield, Zap, Activity, Settings, Server, Building, Mail, Monitor, HardDrive, HeartPulse, CreditCard, Keyboard, User, AtSign, BarChart, AlertTriangle, UserPlus, Send, LogOut, FileText, Bell, ShieldAlert, Upload, MessageSquare } from "lucide-react";
 import Dashboard from "./components/Dashboard";
 import Domains from "./components/Domains";
 import UsersPage from "./components/UsersPage";
@@ -54,6 +54,7 @@ import PlatformSuppressionsPage from "./features/platform/suppressions/page";
 import PlatformDeliverabilityPage from "./features/platform/deliverability/page";
 import BulkMailboxesPage from "./features/platform/bulk-mailboxes/page";
 import BulkMailboxImportPage from "./features/platform/bulk-mailbox-import/page";
+import SupportInboxPage from "./features/platform/support-inbox/page";
 import { initCSRF, api } from "./api";
 import ThemeToggle from "./shared/theme/ThemeToggle";
 import PlatformShell from "./features/platform/shell/PlatformShell";
@@ -71,7 +72,7 @@ type Tab = "dashboard" | "domains" | "users" | "firewall" | "modules" | "audit" 
   | "platform-config-truth" | "platform-domains" | "platform-mailboxes"
   | "platform-aliases" | "platform-groups" | "platform-relays"
   | "platform-suppressions" | "platform-deliverability" | "platform-bulk-mailboxes"
-  | "platform-bulk-mailbox-import";
+  | "platform-bulk-mailbox-import" | "platform-support-inbox";
 
 // PORTAL-SEPARATION-PHASE1 / PLATFORM-SHELL: the explicit allow-list for
 // each portal. portal="platform" (Platform Super Admin, tenant_id=NULL)
@@ -124,7 +125,7 @@ type Tab = "dashboard" | "domains" | "users" | "firewall" | "modules" | "audit" 
 const PLATFORM_TAB_IDS: Tab[] = [
   "platform-home", "organizations", "platform-billing", "platform-imports", "automation-jobs",
   "platform-incidents", "platform-retention", "platform-dr", "enterprise", "mail-operations",
-  "reliability", "health", "platform-audit", "support-access",
+  "reliability", "health", "platform-audit", "platform-support-inbox", "support-access",
   "platform-security", "modules", "platform-configuration", "platform-config-truth",
   "platform-domains", "platform-mailboxes", "platform-aliases", "platform-groups",
   "platform-relays", "platform-suppressions", "platform-deliverability", "platform-bulk-mailboxes",
@@ -166,6 +167,7 @@ const tabs: { id: Tab; label: string; icon: typeof LayoutDashboard; section?: st
   { id: "health", label: "Health", icon: HeartPulse },
   { id: "platform-audit", label: "Audit Log", icon: Activity, section: "Security" },
   { id: "support-access", label: "Support Access", icon: ShieldAlert },
+  { id: "platform-support-inbox", label: "Support Inbox", icon: MessageSquare },
   { id: "platform-security", label: "Security", icon: ShieldAlert },
   { id: "modules", label: "Modules", icon: Zap, section: "System" },
   { id: "platform-configuration", label: "Configuration", icon: Settings },
@@ -350,6 +352,7 @@ export default function App() {
       case "platform-deliverability": return <PlatformDeliverabilityPage />;
       case "platform-bulk-mailboxes": return <BulkMailboxesPage />;
       case "platform-bulk-mailbox-import": return <BulkMailboxImportPage />;
+      case "platform-support-inbox": return <SupportInboxPage />;
       case "health": return <SystemHealth />;
       case "mail-operations": return <MailOperationsPage />;
       case "reliability": return <ReliabilityPage />;

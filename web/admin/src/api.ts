@@ -354,8 +354,32 @@ export const api = {
   getProfile: () => request<any>("/account/profile"),
   updateProfile: (data: any) =>
     request("/account/profile", { method: "PATCH", body: JSON.stringify(data) }),
-  submitSupportRequest: (data: { category: string; subject: string; message: string }) =>
+  submitSupportRequest: (data: {
+    category: string;
+    subject: string;
+    description?: string;
+    message?: string;
+    priority?: string;
+  }) =>
     request<any>("/account/support-requests", { method: "POST", body: JSON.stringify(data) }),
+  // Tenant-side support ticket history (own tickets).
+  listOwnSupportRequests: (params: { limit?: number; offset?: number; status?: string } = {}) => {
+    const qs = new URLSearchParams();
+    if (params.limit) qs.set("limit", String(params.limit));
+    if (params.offset) qs.set("offset", String(params.offset));
+    if (params.status) qs.set("status", params.status);
+    const tail = qs.toString();
+    return request<{ entries: any[]; total: number; limit: number; offset: number }>(
+      `/account/support-requests${tail ? `?${tail}` : ""}`,
+    );
+  },
+  getOwnSupportRequest: (ref: string) =>
+    request<{ ticket: any; messages: any[] }>(`/account/support-requests/${encodeURIComponent(ref)}`),
+  replyOnOwnSupportRequest: (ref: string, body: string) =>
+    request<{ message: any }>(
+      `/account/support-requests/${encodeURIComponent(ref)}/reply`,
+      { method: "POST", body: JSON.stringify({ body }) },
+    ),
   changePassword: (data: any) =>
     request("/auth/change-password", { method: "POST", body: JSON.stringify(data) }),
 

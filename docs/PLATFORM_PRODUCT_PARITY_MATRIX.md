@@ -263,6 +263,16 @@
 | 5.2.4 | Mailbox support viewer | `SupportMailboxViewer.tsx` (session-based read-only viewer; end-session route idempotent, audited). | COMPLETE |
 | 5.2.5 | Immutable operator identity | Grant rows record `granted_by_id`; sessions bind operator to mailbox; audit records actor on every session action. | COMPLETE |
 
+### 5.2a Platform Support Inbox (`platform-support-inbox`)
+
+| # | Feature/action | Trace | Disposition |
+|---|---|---|---|
+| 5.2a.1 | List tickets (paginated, filters: status / category / tenant_id / search) | `features/platform/support-inbox/page.tsx` → `GET /platform/support/tickets` → `support.Repository.ListTickets` (`support_requests` table, no tenant scope at platform layer). RBAC: platformMW. | COMPLETE |
+| 5.2a.2 | Ticket detail (ticket row + reply thread) | `GET /platform/support/tickets/:ref` → `support.Repository.GetTicketByReference` + `ListMessages` (`support_ticket_messages` table). | COMPLETE |
+| 5.2a.3 | Reply as platform operator (drives canonical status transition) | `POST /platform/support/tickets/:ref/reply` → `support.Repository.AddReply` (CSRF). Closed / resolved tickets reject further replies. | COMPLETE |
+| 5.2a.4 | Status transition (canonical graph: open → in_progress → waiting_for_customer → customer_replied → resolved → closed) | `POST /platform/support/tickets/:ref/status` (CSRF). Closed is terminal; transitions outside the graph return 409 `INVALID_STATE_TRANSITION`. | COMPLETE |
+| 5.2a.5 | Round-trip invariant | TenantAdmin creates Ticket X (POST /account/support-requests persists + returns X), reads own X (GET /account/support-requests/:ref), platform reads SAME X (GET /platform/support/tickets/:ref — same org / creator / subject / category / priority / status). Tenant B cannot see X. | COMPLETE |
+
 ### 5.3 Security (`platform-security`)
 
 | # | Feature/action | Trace | Disposition |
@@ -307,6 +317,7 @@
 |---|---|---|---|
 | 7.1 | Account profile (get/update) | `components/AccountSettingsPage.tsx` → `GET/PATCH /account/profile` (self-scoped, tenant-agnostic). | COMPLETE |
 | 7.2 | Security (MFA status/setup/verify/disable/recovery regenerate; sessions list/revoke; change password) | `components/SecurityPage.tsx` → `/account/mfa/*`, `/account/sessions*`, `/auth/change-password` (CSRF on mutations; MFA rate-limited 10/15min). | COMPLETE |
+| 7.2a | Change-password consistency (FINAL-ENTERPRISE-COMPLETION live acceptance blocker) | `POST /auth/change-password` was using a GORM `h.db.Table("users").First(&user, userID)` pattern that silently returned no rows in some SQLite/Postgres combinations. The handler now uses the SAME raw-SQL `sqlDB.QueryRow("SELECT password_hash FROM users WHERE id = ?")` pattern that Login uses, plus raw-SQL `UPDATE ... RowsAffected`-checked write. The same canonical `auth.VerifyPasswordWithRehash` (called through `h.auth.VerifyPassword`) verifies both — Argon2id (canonical) + bcrypt (legacy / reset-script) — so a password accepted by `/auth/login` is now guaranteed to be accepted as `current_password` here, for every active identity (PSA / tenant_admin / operator / support / readonly / RoleUser). | COMPLETE |
 | 7.3 | Preferences (get/update + notification prefs) | `components/PreferencesPage.tsx` → `/account/preferences`, `/account/notification-preferences`. | COMPLETE |
 
 ## 8. Platform routes not in any visible page (all 231 registered routes dispositioned)
@@ -328,9 +339,9 @@ below uses the enforced capability-matrix counts:
 | MACHINE_ONLY | 3 | 3 |
 | DEPRECATED | 12 | 12 |
 | DUPLICATE_SUPERSEDED_ROUTE | 18 | 18 |
-| MISSING_UI (== parity-taxonomy UI_GAP rows) | 120 | 127 (7 new backend-COMPLETE routes: `POST /platform/organizations`, groups CRUD ×4, `GET /platform/billing/tenants/:tenant_id/overview`, `POST /platform/domains/:tenant_id/:id/dkim/revoke`) |
-| MISSING_BACKEND | 0 (1 non-route gap) | 0 (gap closed via R-1) |
-| **Total** | **224** | **231** |
+| MISSING_UI (== parity-taxonomy UI_GAP rows) | 120 | 127 (Phase 1/2/3) → 122 after R-7 (5 new backend-COMPLETE routes: Support Inbox list / detail / reply / status, tenant reply) |
+| MISSING_BACKEND | 0 (1 non-route gap) | 0 (gap closed via R-1, R-7) |
+| **Total** | **224** | **231** → **236** after R-7 |
 
 ## 9. Remediation log (backend fixes in this pass)
 
@@ -341,6 +352,8 @@ below uses the enforced capability-matrix counts:
 | R-3 | Platform Billing | `GET /platform/billing/tenants/:tenant_id/overview` — subscription/plan/period/usage/invoices/balance/ledger/reconciliation + honest provider state | `internal/api/handlers/platform_billing_admin.go`, `internal/api/router.go`, tests |
 | R-4 | Domains | Platform DKIM revoke: `POST /platform/domains/:tenant_id/:id/dkim/revoke` (mirrors org-side revoke; audited; version-guarded) | `internal/platform/mailcontrol/{repository,service}.go` (if needed), `internal/api/handlers/platform_mail_control.go`, `internal/api/router.go`, tests |
 | R-5 | Audit Log | `GET /audit/logs` contract fix: returns `{entries, total}` with action/actor/tenant_id/result filters + limit/offset pagination (extended entries) | `internal/api/handlers/handlers.go`, tests |
+| R-6 | Change Password (FINAL-ENTERPRISE-COMPLETION live acceptance blocker) | `POST /auth/change-password` was using a GORM `.Table("users").First()` pattern that silently returned no rows in some SQLite/Postgres combinations, causing the PSA's current password to be rejected by the Security page despite being accepted by /auth/login. Replaced with the same raw-SQL `sqlDB.QueryRow("SELECT password_hash FROM users WHERE id = ?")` + `UPDATE` + `RowsAffected`-checked pattern Login uses, sharing the canonical `auth.VerifyPasswordWithRehash` (Argon2id + bcrypt). One canonical hasher/verifier, no special-casing of any identity. | `internal/api/handlers/handlers.go` |
+| R-7 | Platform Support Inbox + Tenant Ticket History | Built a real round-trip Support Ticket bounded context: `internal/support` package (Repository + canonical model + lifecycle graph), platform routes `GET/POST /platform/support/tickets[/:ref[/reply|/status]]`, tenant routes `GET /account/support-requests[/:ref[/reply]]`. New `support_ticket_messages` table for the reply thread. Honest delivery_status (sent/failed/disabled — never a lying "queued"). Round-trip invariant: TenantAdmin creates X → persists + returns X → TenantAdmin reads own X → Platform reads SAME X; Tenant B cannot see X. | `internal/support/repository.go`, `internal/models/support_request.go`, `internal/api/handlers/handlers_support.go`, `internal/api/router.go`, `internal/models/{models.go,postgres_migrations.go}` (migration), `web/admin/src/features/platform/support-inbox/`, `web/admin/src/api.ts`, `web/admin/src/components/SupportPage.tsx`, `web/admin/src/App.tsx` |
 
 ## 10. Phase 2 addendum (API Platform Engineer) — contract completion
 

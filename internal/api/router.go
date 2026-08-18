@@ -58,6 +58,7 @@ import (
 	"github.com/orvix/orvix/internal/ruler"
 	orvixruntime "github.com/orvix/orvix/internal/runtime"
 	settingsbridge "github.com/orvix/orvix/internal/settings/bridge"
+	"github.com/orvix/orvix/internal/support"
 	"github.com/orvix/orvix/internal/tlsmgmt"
 	"github.com/orvix/orvix/internal/trust"
 	"github.com/orvix/orvix/internal/trustmgmt"
@@ -398,6 +399,13 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 
 			platformSvc = platformpkg.NewPlatformService(sqlDB, auditExtendedStore, rbacEval, orgAdminSvc)
 			router.h.SetPlatformAdminService(platformSvc)
+
+			// Support Tickets (FINAL-ENTERPRISE-COMPLETION): shared by
+			// the tenant Support page and the Platform Support Inbox.
+			// Wired unconditionally — the schema migration runs in
+			// MigrateAllRaw / MigrateAllPostgresRaw so the repository
+			// never sees a missing table.
+			router.h.SetSupportRepository(support.NewRepository(sqlDB, router.db))
 
 			// Retention/legal-hold/compliance (Milestone 14) — the
 			// purge target is the REAL mailbox soft-delete lifecycle
@@ -1314,6 +1322,12 @@ func (r *Router) setupRoutes() {
 	// Support requests: dedicated rate limit — 5 requests per 10 minutes per user.
 	supportLimiter := newUserRateLimiter("support_req", 5, 10*time.Minute, 600, "too many support requests, please try again later")
 	protected.Post("/account/support-requests", supportLimiter, r.h.SubmitSupportRequest)
+	// Tenant-side ticket history: list / detail / reply on own tickets.
+	// Tenant isolation is enforced in the handlers via tenant_id from
+	// the JWT (never from the request body or URL).
+	protected.Get("/account/support-requests", r.h.ListOwnSupportRequests)
+	protected.Get("/account/support-requests/:ref", r.h.GetOwnSupportRequest)
+	protected.Post("/account/support-requests/:ref/reply", supportLimiter, r.h.ReplyOnOwnSupportRequest)
 	// MFA: dedicated per-user rate limit — 10 attempts per 15 minutes.
 	mfaLimiter := newUserRateLimiter("mfa_req", 10, 15*time.Minute, 900, "too many MFA attempts, please try again later")
 	protected.Get("/account/mfa/status", r.h.AccountMFAStatus)
@@ -2082,6 +2096,16 @@ func (r *Router) setupRoutes() {
 	protected.Get("/platform/support/grants/:id", platformMW[0], platformMW[1], r.h.GetSupportAccessGrant)
 	protected.Post("/platform/support/grants/:id/activate", platformMW[0], platformMW[1], r.h.ActivateSupportAccessGrant)
 	protected.Post("/platform/support/grants/:id/revoke", platformMW[0], platformMW[1], r.h.RevokeSupportAccessGrant)
+
+	// ── Platform Support Inbox (FINAL-ENTERPRISE-COMPLETION) ───────
+	// Distinct from /platform/support/grants (Support Access). The
+	// ticket inbox is the read-write view of every tenant support
+	// ticket; /grants is the audit-scoped, time-boxed tenant access
+	// mechanism the inbox does NOT depend on.
+	protected.Get("/platform/support/tickets", platformMW[0], platformMW[1], r.h.ListPlatformSupportTickets)
+	protected.Get("/platform/support/tickets/:ref", platformMW[0], platformMW[1], r.h.GetPlatformSupportTicket)
+	protected.Post("/platform/support/tickets/:ref/reply", platformMW[0], platformMW[1], r.h.ReplyOnPlatformSupportTicket)
+	protected.Post("/platform/support/tickets/:ref/status", platformMW[0], platformMW[1], r.h.UpdatePlatformSupportTicketStatus)
 
 	// ── Support-access enforcement (Milestone 16) ─────────────────
 	// These routes demonstrate the support-access middleware enforcing

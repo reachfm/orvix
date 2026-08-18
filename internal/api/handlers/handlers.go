@@ -60,6 +60,7 @@ import (
 	"github.com/orvix/orvix/internal/ruler"
 	"github.com/orvix/orvix/internal/runtime"
 	settingsbridge "github.com/orvix/orvix/internal/settings/bridge"
+	"github.com/orvix/orvix/internal/support"
 	"github.com/orvix/orvix/internal/supportaccess"
 	"github.com/orvix/orvix/internal/tlsmgmt"
 	"github.com/orvix/orvix/internal/trustmgmt"
@@ -279,6 +280,13 @@ type Handler struct {
 	mailControlSvc *mailcontrol.Service
 
 	deliverabilitySvc *deliverability.Service
+
+	// supportRepo is the canonical Support Ticket repository shared
+	// by the tenant-facing Support page and the Platform Support
+	// Inbox. Wired via SetSupportRepository. nil falls back to a
+	// repository built lazily on the underlying sql.DB so the
+	// handlers never panic on a misconfigured router.
+	supportRepo *support.Repository
 
 	// mailPolicy is the canonical mailbox-level mail-access policy
 	// (internal/coremail/mailpolicy), enforced on the webmail send
@@ -597,6 +605,13 @@ func (h *Handler) SetPlatformBillingService(s *platformbilling.Service) {
 // SetPlatformAdminService wires the platform admin service.
 func (h *Handler) SetPlatformAdminService(s *platformsvc.PlatformService) {
 	h.platformAdminSvc = s
+}
+
+// SetSupportRepository wires the canonical support-ticket repository
+// (shared by the tenant-facing Support page and the Platform Support
+// Inbox). Wired by the router at boot.
+func (h *Handler) SetSupportRepository(r *support.Repository) {
+	h.supportRepo = r
 }
 
 // SetDashboardService wires the dashboard aggregation service.
@@ -1095,6 +1110,17 @@ func (h *Handler) LogoutAll(c fiber.Ctx) error {
 }
 
 // ChangePassword changes the user's password and invalidates all sessions except current.
+//
+// Architecture: the same identity that logs in via /auth/login MUST be
+// accepted as current_password here. Both paths now share ONE canonical
+// password verifier (auth.VerifyPasswordWithRehash, called through
+// h.auth.VerifyPassword), supporting both Argon2id (canonical) and bcrypt
+// (legacy / reset-script) hashes. The user lookup uses raw SQL with the
+// dialect placeholder — matching the Login handler exactly — so the same
+// `users.password_hash` column is read the same way both endpoints read
+// it. The update is also raw SQL with RowsAffected-checked: a previous
+// GORM .Table().Update() path silently affected 0 rows in some
+// SQLite/Postgres combinations.
 func (h *Handler) ChangePassword(c fiber.Ctx) error {
 	userID := c.Locals("user_id").(uint)
 
@@ -1112,15 +1138,18 @@ func (h *Handler) ChangePassword(c fiber.Ctx) error {
 		})
 	}
 
-	var user struct {
-		ID           uint
-		PasswordHash string
+	sqlDB, err := h.db.DB()
+	if err != nil {
+		h.logger.Error("change-password: failed to get underlying DB", zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "internal error"})
 	}
-	if err := h.db.Table("users").First(&user, userID).Error; err != nil {
+	var passwordHash string
+	err = sqlDB.QueryRow("SELECT password_hash FROM users WHERE id = "+h.dialect.Placeholder(1), userID).Scan(&passwordHash)
+	if err != nil {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "user not found"})
 	}
 
-	if !h.auth.VerifyPassword(req.CurrentPassword, user.PasswordHash) {
+	if !h.auth.VerifyPassword(req.CurrentPassword, passwordHash) {
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "current password is incorrect"})
 	}
 
@@ -1130,8 +1159,13 @@ func (h *Handler) ChangePassword(c fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "password change failed"})
 	}
 
-	if err := h.db.Table("users").Where("id = ?", userID).Update("password_hash", newHash).Error; err != nil {
+	res, err := sqlDB.Exec("UPDATE users SET password_hash = "+h.dialect.Placeholder(1)+" WHERE id = "+h.dialect.Placeholder(2), newHash, userID)
+	if err != nil {
 		h.logger.Error("failed to update password", zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "password change failed"})
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		h.logger.Error("password update affected 0 rows", zap.Uint("user_id", userID))
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "password change failed"})
 	}
 

@@ -599,6 +599,20 @@ func MigrateAllRaw(db *gorm.DB) error {
 			delivery_status TEXT NOT NULL DEFAULT 'pending',
 			delivery_error TEXT NOT NULL DEFAULT ''
 		)`,
+		// support_ticket_messages — reply thread backing the Platform
+		// Support Inbox. The parent ticket row in support_requests
+		// carries tenant_id; tenant isolation is enforced in the handler
+		// via the parent ticket's tenant_id predicate.
+		`CREATE TABLE IF NOT EXISTS support_ticket_messages (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL,
+			ticket_id INTEGER NOT NULL,
+			author_user_id INTEGER NOT NULL,
+			author_email TEXT NOT NULL DEFAULT '',
+			author_kind TEXT NOT NULL DEFAULT '',
+			body TEXT NOT NULL DEFAULT ''
+		)`,
 		`CREATE TABLE IF NOT EXISTS invoices (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			created_at DATETIME NOT NULL,
@@ -1209,6 +1223,9 @@ func MigrateAllRaw(db *gorm.DB) error {
 	if err := migrateDomainsLifecycleSchema(ctx, sqlDB); err != nil {
 		return err
 	}
+	if err := migrateSupportTicketsSchema(ctx, sqlDB); err != nil {
+		return err
+	}
 
 	// Create indexes
 	indexes := []string{
@@ -1535,6 +1552,74 @@ func migrateDomainsLifecycleSchema(ctx context.Context, db *sql.DB) error {
 		columns[addition.name] = true
 	}
 
+	return nil
+}
+
+// migrateSupportTicketsSchema extends the legacy `support_requests` table
+// with the columns the canonical SupportTicket model + Platform Support
+// Inbox need (priority, assignment, last-reply, resolved/closed
+// timestamps), and creates the new `support_ticket_messages` table for
+// reply threads.
+//
+// Why this lives next to migrateDomainsLifecycleSchema: every additive
+// column is idempotent (CREATE TABLE / ALTER TABLE IF NOT EXISTS) so a
+// restart on an old DB picks up the new shape, and a fresh DB also
+// picks it up — same single migration entrypoint as everything else.
+func migrateSupportTicketsSchema(ctx context.Context, db *sql.DB) error {
+	// 1. New columns on the existing support_requests table. The
+	// legacy table already has `status` (was: 'received'); we keep the
+	// column but re-default its initial state to the canonical 'open'
+	// for newly-created tickets and let any existing rows keep whatever
+	// value they already carry — admins reading an old ticket still see
+	// its real status, not a fabricated new one.
+	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS support_ticket_messages (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		created_at DATETIME NOT NULL,
+		updated_at DATETIME NOT NULL,
+		ticket_id INTEGER NOT NULL,
+		author_user_id INTEGER NOT NULL,
+		author_email TEXT NOT NULL,
+		author_kind TEXT NOT NULL,
+		body TEXT NOT NULL
+	)`); err != nil {
+		return fmt.Errorf("create support_ticket_messages: %w", err)
+	}
+	if _, err := db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_support_ticket_messages_ticket_id ON support_ticket_messages(ticket_id)`); err != nil {
+		return fmt.Errorf("idx support_ticket_messages.ticket_id: %w", err)
+	}
+
+	// 2. Additive columns on support_requests. Mirrors the
+	// migrateDomainsLifecycleSchema pattern: read the existing column
+	// set, ALTER only the missing ones.
+	columns, err := sqliteColumns(ctx, db, "support_requests")
+	if err != nil {
+		// If the table is missing entirely (fresh DB before 001 ran
+		// in this code path), the CREATE TABLE block above already
+		// ran; an "inspect" error here would mean the table truly
+		// does not exist, which the next CREATE will fix. Return
+		// nil so a missing pre-migration table doesn't block startup.
+		return nil
+	}
+	additions := []struct {
+		name string
+		sql  string
+	}{
+		{"priority", "ALTER TABLE support_requests ADD COLUMN priority TEXT NOT NULL DEFAULT 'normal'"},
+		{"assigned_to_id", "ALTER TABLE support_requests ADD COLUMN assigned_to_id INTEGER"},
+		{"last_reply_at", "ALTER TABLE support_requests ADD COLUMN last_reply_at DATETIME"},
+		{"last_reply_by", "ALTER TABLE support_requests ADD COLUMN last_reply_by TEXT NOT NULL DEFAULT ''"},
+		{"resolved_at", "ALTER TABLE support_requests ADD COLUMN resolved_at DATETIME"},
+		{"closed_at", "ALTER TABLE support_requests ADD COLUMN closed_at DATETIME"},
+	}
+	for _, addition := range additions {
+		if columns[addition.name] {
+			continue
+		}
+		if _, err := db.ExecContext(ctx, addition.sql); err != nil {
+			return fmt.Errorf("add support_requests.%s: %w", addition.name, err)
+		}
+		columns[addition.name] = true
+	}
 	return nil
 }
 
