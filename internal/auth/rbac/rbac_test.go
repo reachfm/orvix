@@ -119,34 +119,43 @@ func TestHasPermission_Matrix(t *testing.T) {
 		{auth.RoleReadOnly, PermUsersWrite, false},
 		{auth.RoleReadOnly, PermAuditRead, true},
 
-		// RoleUser (tenant owner/member): full tenant-scoped access,
-		// no platform privileges.
-		{auth.RoleUser, PermDashboardRead, true},
-		{auth.RoleUser, PermDomainsRead, true},
-		{auth.RoleUser, PermDomainsWrite, true},
-		{auth.RoleUser, PermMailboxesRead, true},
-		{auth.RoleUser, PermMailboxesWrite, true},
-		{auth.RoleUser, PermOrganizationsRead, true},
-		{auth.RoleUser, PermOrganizationsWrite, true},
-		{auth.RoleUser, PermUsersRead, true},
-		{auth.RoleUser, PermUsersWrite, true},
-		{auth.RoleUser, PermAliasesRead, true},
-		{auth.RoleUser, PermAliasesWrite, true},
-		{auth.RoleUser, PermGroupsWrite, true},
-		{auth.RoleUser, PermInvitationsWrite, true},
-		{auth.RoleUser, PermOwnershipTransfer, true},
-		{auth.RoleUser, PermAPIKeysWrite, true},
-		{auth.RoleUser, PermBillingWrite, true},
-		{auth.RoleUser, PermAuditRead, true},
-		{auth.RoleUser, PermSettingsRead, true},
-		{auth.RoleUser, PermCredentialsReset, true},
-		{auth.RoleUser, PermSessionsRevoke, true},
-		// Platform permissions denied.
+		// RoleUser (per-mailbox webmail end-user): NO tenant admin
+		// privileges. The signup-created Organization owner is persisted
+		// as tenant_admin (customer_auth.go / customer_signup_otp.go), so
+		// RoleUser must not gain organization writes, domain/mailbox
+		// administration, member management, billing changes, API key
+		// administration, or ownership transfer.
+		{auth.RoleUser, PermDashboardRead, false},
+		{auth.RoleUser, PermDomainsRead, false},
+		{auth.RoleUser, PermDomainsWrite, false},
+		{auth.RoleUser, PermMailboxesRead, false},
+		{auth.RoleUser, PermMailboxesWrite, false},
+		{auth.RoleUser, PermOrganizationsRead, false},
+		{auth.RoleUser, PermOrganizationsWrite, false},
+		{auth.RoleUser, PermUsersRead, false},
+		{auth.RoleUser, PermUsersWrite, false},
+		{auth.RoleUser, PermAliasesRead, false},
+		{auth.RoleUser, PermAliasesWrite, false},
+		{auth.RoleUser, PermGroupsRead, false},
+		{auth.RoleUser, PermGroupsWrite, false},
+		{auth.RoleUser, PermInvitationsRead, false},
+		{auth.RoleUser, PermInvitationsWrite, false},
+		{auth.RoleUser, PermOwnershipTransfer, false},
+		{auth.RoleUser, PermAPIKeysRead, false},
+		{auth.RoleUser, PermAPIKeysWrite, false},
+		{auth.RoleUser, PermBillingRead, false},
+		{auth.RoleUser, PermBillingWrite, false},
+		{auth.RoleUser, PermAuditRead, false},
+		{auth.RoleUser, PermSettingsRead, false},
+		{auth.RoleUser, PermCredentialsReset, false},
+		{auth.RoleUser, PermSessionsRevoke, false},
+		{auth.RoleUser, PermSecurityRead, false},
+		// Platform permissions denied (unchanged).
 		{auth.RoleUser, PermPlatformOrganizationsRead, false},
 		{auth.RoleUser, PermPlatformOrganizationsWrite, false},
 		{auth.RoleUser, PermPlatformSecurityRead, false},
 		{auth.RoleUser, PermPlatformSessionsRevoke, false},
-		// License/admin-only denied.
+		// License/admin-only denied (unchanged).
 		{auth.RoleUser, PermLicenseRead, false},
 		{auth.RoleUser, PermLicenseWrite, false},
 		{auth.RoleUser, PermBackupsWrite, false},

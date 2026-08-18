@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/gofiber/fiber/v3"
+	"github.com/orvix/orvix/internal/billing"
 	platformbilling "github.com/orvix/orvix/internal/platform/billing"
 	"go.uber.org/zap"
 )
@@ -125,6 +126,115 @@ func parseUintParam(c fiber.Ctx, name string) (uint, error) {
 		return 0, fmt.Errorf("invalid %s", name)
 	}
 	return uint(v), nil
+}
+
+// GetPlatformBillingOverview is the coherent Platform Billing control-
+// plane view for one tenant (GET /api/v1/platform/billing/tenants/
+// :tenant_id/overview): subscription + plan + billing period, live
+// usage, invoice state, account balance, ledger adjustments,
+// reconciliation, and the payment/provider configuration state.
+//
+// EVERY field is read from the real billing/usage/invoice/ledger
+// stores. Nothing is fabricated: when no payment provider is
+// configured, payment_provider.configured=false is surfaced honestly
+// ("provider not configured") — no MRR, no card info, no invented paid
+// invoices, no payment-success claims. Subscriptions/usage/invoices
+// that do not exist are returned as null/empty, never as placeholders.
+func (h *Handler) GetPlatformBillingOverview(c fiber.Ctx) error {
+	tenantID, err := parseUintParam(c, "tenant_id")
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid tenant id"})
+	}
+
+	out := fiber.Map{"tenant_id": tenantID}
+
+	// Subscription + plan + period (real rows only).
+	if h.billingSvc != nil {
+		if sub, subErr := h.billingSvc.GetSubscription(tenantID); subErr == nil && sub != nil {
+			out["subscription"] = sub
+			if plan, planErr := h.billingSvc.GetPlan(sub.PlanID); planErr == nil && plan != nil {
+				out["plan"] = plan
+			}
+		} else {
+			out["subscription"] = nil
+			out["plan"] = nil
+		}
+	} else {
+		out["subscription"] = nil
+		out["plan"] = nil
+	}
+
+	// Live usage for the current period.
+	if h.usageSvc != nil {
+		if usage, usageErr := h.usageSvc.GetCurrentUsage(tenantID); usageErr == nil && usage != nil {
+			out["usage"] = usage
+		} else {
+			out["usage"] = nil
+		}
+	} else {
+		out["usage"] = nil
+	}
+
+	// Invoice state (real provider/webhook rows; empty when none).
+	invoices := []billing.InvoiceRecord{}
+	if h.invoiceSvc != nil {
+		if list, _, invErr := h.invoiceSvc.ListTenantInvoices(c.Context(), &billing.InvoiceFilter{TenantID: tenantID, Limit: 50}); invErr == nil {
+			invoices = list
+		}
+	}
+	out["invoices"] = invoices
+
+	// Account balance + ledger adjustments + reconciliation.
+	if h.platformBillSvc != nil {
+		if bal, balErr := h.platformBillSvc.GetBalance(c.Context(), tenantID); balErr == nil {
+			out["balance"] = bal
+		} else {
+			out["balance"] = nil
+		}
+		adjustments, adjErr := h.platformBillSvc.ListAdjustments(c.Context(), tenantID, 50)
+		if adjErr != nil {
+			adjustments = []platformbilling.Adjustment{}
+		}
+		if adjustments == nil {
+			adjustments = []platformbilling.Adjustment{}
+		}
+		out["adjustments"] = adjustments
+		if rep, repErr := h.platformBillSvc.Reconcile(c.Context(), tenantID); repErr == nil {
+			out["reconciliation"] = rep
+		} else {
+			out["reconciliation"] = nil
+		}
+	} else {
+		out["balance"] = nil
+		out["adjustments"] = []platformbilling.Adjustment{}
+		out["reconciliation"] = nil
+	}
+
+	// Payment/provider state — honest configuration read, never a
+	// fabricated success. A provider that is not configured (or
+	// configured but disabled) is surfaced as such.
+	provider := ""
+	enabled := false
+	configured := false
+	note := ""
+	if h.cfg != nil && h.cfg.Payment.Provider != "" {
+		provider = h.cfg.Payment.Provider
+		enabled = h.cfg.Payment.Enabled
+		configured = h.cfg.Payment.Enabled
+		if !h.cfg.Payment.Enabled {
+			note = "payment provider is configured but disabled"
+		}
+	} else {
+		note = "payment provider not configured"
+	}
+	out["payment_provider"] = fiber.Map{
+		"provider":   provider,
+		"enabled":    enabled,
+		"configured": configured,
+		"note":       note,
+	}
+
+	return c.JSON(out)
 }
 
 func platformBillingActionError(c fiber.Ctx, err error) error {

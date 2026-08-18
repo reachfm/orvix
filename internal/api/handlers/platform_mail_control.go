@@ -225,6 +225,251 @@ func (h *Handler) SetPlatformDomainMailAccessMode(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{"status": "ok", "id": id, "mail_access_mode": req.MailAccessMode})
 }
 
+// GetPlatformDomainDNS handles GET
+// /api/v1/platform/domains/:tenant_id/:id/dns — a read-only snapshot
+// of an existing domain's public DNS/DKIM configuration. DKIM fields
+// come from the canonical read path (never generates a key); DNS
+// requirement records reuse the exact same dnsops generator
+// CreatePlatformDomain uses, so this route can never drift into a
+// second, conflicting DNS-requirements implementation.
+func (h *Handler) GetPlatformDomainDNS(c fiber.Ctx) error {
+	svc, err := h.mailControl()
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	tenantID, err := parseTenantParam(c)
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	id, err := parseIDParam(c, "id")
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	out, err := svc.GetDomainDNS(c.Context(), id, tenantID)
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	if dnsSvc := h.dnsOpsService(); dnsSvc != nil {
+		if inputs, inErr := h.dnsOpsInputsForDomain(c.Context(), out.Domain); inErr == nil {
+			if plan, planErr := dnsSvc.Generate(inputs); planErr == nil {
+				out.DNSRequirements = mapDNSPlanRequirements(plan)
+				out.DNSNextStep = "publish_and_verify_dns"
+			}
+		}
+	}
+	return c.JSON(out)
+}
+
+// VerifyPlatformDomainDNS handles POST
+// /api/v1/platform/domains/:tenant_id/:id/dns/verify — a READ-ONLY
+// verification pass that looks up every record the canonical
+// dnsops.Generate() plan requires against REAL public DNS (via
+// dnsops.Service.Verify, the same Verifier the existing admin DNS
+// verify route uses) and reports per-record matched/mismatch/missing/
+// error. Tenant ownership is re-verified through GetDomainDNS exactly
+// like GetPlatformDomainDNS above, so a cross-tenant id can never
+// leak another tenant's domain into a verification result.
+//
+// This route:
+//   - performs external DNS lookups only — it never mutates public
+//     DNS, never generates or rotates DKIM, and never modifies the
+//     domain (status, mail-access-mode, deactivation) in any way;
+//   - compares DKIM against the CURRENT configured public key, read
+//     fresh via dnsOpsInputsForDomain on every call — an old or
+//     unrelated DKIM record at the same selector name is a genuine
+//     mismatch, never a false positive;
+//   - never returns private key material (dnsOpsInputsForDomain's
+//     DKIMPubKey is already public-only, matching every other DKIM
+//     read path in the codebase).
+func (h *Handler) VerifyPlatformDomainDNS(c fiber.Ctx) error {
+	svc, err := h.mailControl()
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	tenantID, err := parseTenantParam(c)
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	id, err := parseIDParam(c, "id")
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	// Ownership + domain name resolution: identical tenant-scoped path
+	// GetPlatformDomainDNS uses. A cross-tenant id yields NOT_FOUND
+	// here exactly as it does there.
+	out, err := svc.GetDomainDNS(c.Context(), id, tenantID)
+	if err != nil {
+		return errorResponse(c, err)
+	}
+
+	dnsSvc := h.dnsOpsService()
+	if dnsSvc == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+			"error": "dns ops service unavailable", "code": string(kernel.ErrCodeUnavailable),
+		})
+	}
+	inputs, err := h.dnsOpsInputsForDomain(c.Context(), out.Domain)
+	if err != nil {
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{
+			"error": err.Error(), "code": string(kernel.ErrCodeValidation),
+		})
+	}
+	if inputs.ServerIPv4 == "" {
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{
+			"error": "public mail IPv4 is not configured; set dns.public_ipv4 in the server config",
+			"code":  string(kernel.ErrCodeValidation),
+		})
+	}
+	plan, err := dnsSvc.Generate(inputs)
+	if err != nil {
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{
+			"error": err.Error(), "code": string(kernel.ErrCodeValidation),
+		})
+	}
+
+	// Bounded external DNS lookups — never let a slow/hung resolver
+	// block the request indefinitely.
+	ctx, cancel := context.WithTimeout(c.Context(), 8*time.Second)
+	defer cancel()
+	report, err := dnsSvc.Verify(ctx, plan)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "dns verification failed", "code": string(kernel.ErrCodeInternal),
+		})
+	}
+
+	records := mapDNSVerifyReport(report)
+	total, matched := 0, 0
+	for _, r := range records {
+		if !r.Required {
+			continue
+		}
+		total++
+		if r.Status == "verified" {
+			matched++
+		}
+	}
+
+	c.Set("Cache-Control", "no-store")
+	return c.JSON(mailcontrol.PlatformDNSVerifyResult{
+		TenantID:     tenantID,
+		DomainID:     id,
+		Domain:       out.Domain,
+		CheckedAt:    report.CheckedAt,
+		Records:      records,
+		TotalCount:   total,
+		MatchedCount: matched,
+		IssueCount:   total - matched,
+		AllVerified:  report.Verified,
+		Warnings:     report.Warnings,
+	})
+}
+
+// platformDKIMMutation is the shared body/validation/idempotency path
+// for generate and rotate — the only difference between the two
+// routes is confirmRotation's expected value, matching the existing
+// enterprise DKIM handler's own generate-vs-rotate contract.
+func (h *Handler) platformDKIMMutation(c fiber.Ctx, requireRotationConfirm bool) error {
+	svc, err := h.mailControl()
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	tenantID, err := parseTenantParam(c)
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	id, err := parseIDParam(c, "id")
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	body, err := platformMutationBody(c)
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	var req struct {
+		Selector        string `json:"selector"`
+		ConfirmRotation string `json:"confirm_rotation"`
+		ExpectedVersion int    `json:"expected_version"`
+	}
+	if err := bindStrictJSONBytes(body, &req); err != nil {
+		return strictJSONError(c, err)
+	}
+	selector, err := validateDKIMSelector(req.Selector)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error(), "code": "VALIDATION_FAILED"})
+	}
+	if req.ExpectedVersion < 1 {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "a positive expected_version is required", "code": "VALIDATION_FAILED",
+		})
+	}
+	if requireRotationConfirm && req.ConfirmRotation != "rotate-dkim-key" {
+		return c.Status(fiber.StatusPreconditionFailed).JSON(fiber.Map{
+			"error": `rotation requires confirm_rotation: "rotate-dkim-key"`, "code": "PRECONDITION_FAILED",
+		})
+	}
+	confirmRotation := ""
+	if requireRotationConfirm {
+		confirmRotation = req.ConfirmRotation
+	}
+
+	actorID := h.platformActorID(c)
+	action := "generate"
+	if requireRotationConfirm {
+		action = "rotate"
+	}
+	scope := "platform.domain.dkim." + action + ":POST:/platform/domains/" + strconv.FormatUint(uint64(tenantID), 10) + "/" + strconv.FormatUint(uint64(id), 10) + ":actor:" + strconv.FormatUint(uint64(actorID), 10)
+
+	return h.platformIdempotent(c, scope, func() (int, any, any, error) {
+		result, err := svc.GenerateOrRotateDKIM(c.Context(), id, tenantID, selector, confirmRotation, req.ExpectedVersion, actorID)
+		if err != nil {
+			return 0, nil, nil, err
+		}
+		return fiber.StatusOK, result, result, nil
+	})
+}
+
+// GeneratePlatformDomainDKIM handles POST
+// /api/v1/platform/domains/:tenant_id/:id/dkim/generate — provisions
+// a new DKIM key pair for a domain that does not already have one.
+func (h *Handler) GeneratePlatformDomainDKIM(c fiber.Ctx) error {
+	return h.platformDKIMMutation(c, false)
+}
+
+// RotatePlatformDomainDKIM handles POST
+// /api/v1/platform/domains/:tenant_id/:id/dkim/rotate — replaces an
+// existing DKIM key pair. Requires the explicit typed confirmation
+// confirm_rotation: "rotate-dkim-key", matching the existing
+// enterprise DKIM rotation contract.
+func (h *Handler) RotatePlatformDomainDKIM(c fiber.Ctx) error {
+	return h.platformDKIMMutation(c, true)
+}
+
+// RevokePlatformDomainDKIM handles POST
+// /api/v1/platform/domains/:tenant_id/:id/dkim/revoke — disables the
+// domain's DKIM configuration through the same transactional revoke
+// path the tenant console uses (config disabled, domain DKIM state
+// cleared, DKIM history entry + audit recorded). Never exposes key
+// material; never mutates public DNS.
+func (h *Handler) RevokePlatformDomainDKIM(c fiber.Ctx) error {
+	svc, err := h.mailControl()
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	tenantID, err := parseTenantParam(c)
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	id, err := parseIDParam(c, "id")
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	if err := svc.RevokeDKIM(c.Context(), id, tenantID, h.platformActorID(c)); err != nil {
+		return errorResponse(c, err)
+	}
+	return c.JSON(fiber.Map{"status": "ok", "domain_id": id, "revoked": true})
+}
+
 // ── Platform mailboxes ─────────────────────────────────────────────
 
 func (h *Handler) ListPlatformMailboxes(c fiber.Ctx) error {
@@ -521,6 +766,108 @@ func (h *Handler) ListPlatformGroupMembers(c fiber.Ctx) error {
 		return errorResponse(c, err)
 	}
 	return c.JSON(fiber.Map{"group_id": id, "members": members})
+}
+
+// CreatePlatformGroup provisions a tenant group (POST
+// /api/v1/platform/groups/:tenant_id). The same coremail_groups table
+// the tenant self-service Groups page uses; name required, duplicate
+// name is a stable conflict.
+func (h *Handler) CreatePlatformGroup(c fiber.Ctx) error {
+	svc, err := h.mailControl()
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	tenantID, err := parseTenantParam(c)
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	var req struct {
+		Name        string `json:"name"`
+		Description string `json:"description,omitempty"`
+	}
+	if err := c.Bind().JSON(&req); err != nil || strings.TrimSpace(req.Name) == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "name is required", "code": "VALIDATION_FAILED"})
+	}
+	out, err := svc.CreateGroup(c.Context(), tenantID, req.Name, req.Description, h.platformActorID(c))
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	return c.Status(fiber.StatusCreated).JSON(out)
+}
+
+// DeletePlatformGroup soft-deletes a tenant group. Destructive:
+// requires the typed X-Confirm DELETE-GROUP-<id> and is audited.
+func (h *Handler) DeletePlatformGroup(c fiber.Ctx) error {
+	svc, err := h.mailControl()
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	tenantID, err := parseTenantParam(c)
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	id, err := parseIDParam(c, "id")
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	if confirmation := strings.TrimSpace(c.Get("X-Confirm")); confirmation == "" || confirmation != mailcontrol.ConfirmGroupDelete(id) {
+		return c.Status(fiber.StatusPreconditionRequired).JSON(fiber.Map{"error": "typed confirmation required", "code": "PRECONDITION_FAILED"})
+	}
+	if err := svc.DeleteGroup(c.Context(), id, tenantID, mailcontrol.ConfirmGroupDelete(id), h.platformActorID(c)); err != nil {
+		return errorResponse(c, err)
+	}
+	return c.JSON(fiber.Map{"status": "ok", "id": id})
+}
+
+// AddPlatformGroupMember adds a member email to a tenant-owned group.
+func (h *Handler) AddPlatformGroupMember(c fiber.Ctx) error {
+	svc, err := h.mailControl()
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	tenantID, err := parseTenantParam(c)
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	id, err := parseIDParam(c, "id")
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	var req struct {
+		Email string `json:"email"`
+	}
+	if err := c.Bind().JSON(&req); err != nil || strings.TrimSpace(req.Email) == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "email is required", "code": "VALIDATION_FAILED"})
+	}
+	if err := svc.AddGroupMember(c.Context(), id, tenantID, req.Email, h.platformActorID(c)); err != nil {
+		return errorResponse(c, err)
+	}
+	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"status": "ok", "group_id": id, "email": strings.TrimSpace(strings.ToLower(req.Email))})
+}
+
+// RemovePlatformGroupMember removes one member row from a tenant-owned
+// group; the member is scoped through the group's tenant ownership.
+func (h *Handler) RemovePlatformGroupMember(c fiber.Ctx) error {
+	svc, err := h.mailControl()
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	tenantID, err := parseTenantParam(c)
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	groupID, err := parseIDParam(c, "id")
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	memberID, err := parseIDParam(c, "member_id")
+	if err != nil {
+		return errorResponse(c, err)
+	}
+	if err := svc.RemoveGroupMember(c.Context(), memberID, groupID, tenantID, h.platformActorID(c)); err != nil {
+		return errorResponse(c, err)
+	}
+	return c.JSON(fiber.Map{"status": "ok", "group_id": groupID, "member_id": memberID})
 }
 
 // ── Platform bulk mailbox operations ───────────────────────────────

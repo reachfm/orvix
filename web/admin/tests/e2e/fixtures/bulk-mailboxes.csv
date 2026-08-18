@@ -1,0 +1,3 @@
+email,name,quota_mb,access_mode
+new1@acme.example,New One,1024,internal_only
+new2@acme.example,New Two,1024,internal_external

@@ -10,12 +10,14 @@ import (
 	"sync"
 	"time"
 
+	domainpkg "github.com/orvix/orvix/internal/admin/domain"
 	"github.com/orvix/orvix/internal/antivirus"
 	"github.com/orvix/orvix/internal/audit"
 	"github.com/orvix/orvix/internal/config"
 	"github.com/orvix/orvix/internal/coremail"
 	"github.com/orvix/orvix/internal/coremail/antispam"
 	"github.com/orvix/orvix/internal/coremail/delivery"
+	"github.com/orvix/orvix/internal/coremail/dkim"
 	"github.com/orvix/orvix/internal/coremail/imap"
 	"github.com/orvix/orvix/internal/coremail/jmap"
 	"github.com/orvix/orvix/internal/coremail/mailpolicy"
@@ -186,6 +188,42 @@ func (m *Module) initCore(cfg *config.Config, sqlDB *sql.DB) error {
 	m.queue = queueEngine
 	m.obs = observability.NewObservability(1000, 5000)
 
+	// ── Mail acceptance orphan recovery (S-2) ──────────────────
+	// A process crash between the staging of mail bytes and the
+	// acceptance commit can leave unreferenced files inside the
+	// storage root (abandoned staging attempts and renamed-but-
+	// uncommitted final files). CleanupOrphanedFiles is bounded,
+	// path-safe, tenant-safe, and idempotent; it only removes files
+	// with no committed row reference and older than the grace
+	// period. At startup no acceptance transaction of this process
+	// is in flight, so the grace only needs to cover other processes
+	// sharing the storage root; 24h is deliberately conservative —
+	// orphan reclaim latency is far less important than never
+	// deleting a live message file.
+	if m.logger != nil {
+		m.logger.Info("coremail mailstore: running orphan file cleanup",
+			zap.String("path", cfg.CoreMail.MailStorePath))
+	}
+	cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	stats, cleanupErr := m.store.CleanupOrphanedFiles(cleanupCtx, time.Now().UTC().Add(-24*time.Hour))
+	cleanupCancel()
+	if cleanupErr != nil {
+		// Cleanup failure must NOT block startup: the acceptance
+		// paths are still safe (staging is per-attempt and bounded),
+		// and the operator can run the cleanup again at the next
+		// restart. Log it so the failure is observable.
+		if m.logger != nil {
+			m.logger.Warn("coremail mailstore: orphan file cleanup failed (startup continues)",
+				zap.Error(cleanupErr))
+		}
+	} else if m.logger != nil {
+		m.logger.Info("coremail mailstore: orphan file cleanup complete",
+			zap.Int("staging_entries", stats.StagingEntries),
+			zap.Int("orphan_files", stats.OrphanFiles),
+			zap.Int("orphan_dirs", stats.OrphanDirs),
+			zap.Int("referenced_files", stats.ReferencedFiles))
+	}
+
 	// Initialize licensing service (retained for SaaS quota enforcement).
 	// Local product-license files are retired; no license file is loaded.
 	m.licenseSvc = licensing.NewService("")
@@ -282,6 +320,7 @@ func (m *Module) initCore(cfg *config.Config, sqlDB *sql.DB) error {
 		Forwarding:       m.store.Forwarding,
 		Logger:           m.logger,
 		MailAccessPolicy: m.mailPolicy,
+		Hostname:         cfg.CoreMail.Hostname,
 	})
 
 	// ── Antivirus engine ───────────────────────────────────
@@ -361,6 +400,7 @@ func (m *Module) initCore(cfg *config.Config, sqlDB *sql.DB) error {
 	m.smtpServer.SetLocalDomainChecker(identity.IsLocalDomain)
 	m.smtpServer.SetMailAccessModeChecker(identity.MailAccessMode)
 	m.smtpServer.SetMailAccessPolicy(m.smtpMailAccessPolicy)
+	m.smtpServer.PreAcceptFn = m.smtpPreAcceptRecheck
 	m.smtpServer.Observability = m.obs
 
 	// ── Submission SMTP (port 587, STARTTLS) ───────────────
@@ -398,6 +438,7 @@ func (m *Module) initCore(cfg *config.Config, sqlDB *sql.DB) error {
 			m.submissionServer.SetLocalDomainChecker(identity.IsLocalDomain)
 			m.submissionServer.SetMailAccessModeChecker(identity.MailAccessMode)
 			m.submissionServer.SetMailAccessPolicy(m.smtpMailAccessPolicy)
+			m.submissionServer.PreAcceptFn = m.smtpPreAcceptRecheck
 			m.submissionServer.SenderValidator = identity.ResolveSender
 			m.submissionServer.Observability = m.obs
 		}
@@ -687,6 +728,16 @@ func (m *Module) initCore(cfg *config.Config, sqlDB *sql.DB) error {
 		m.securitySvc = security.NewService(securityRepo, nil)
 	}
 
+	// Canonical DKIM signer + repository, bound to the SAME sqlDB used by
+	// the admin/platform DKIM lifecycle (router.go's dkimRepo). Every
+	// delivery worker reads through this repository, so a
+	// generate/rotate change becomes visible to outbound signing
+	// immediately, without a server rebuild — and, critically, the
+	// worker's signWithDKIM nil-guard no longer fails open for every
+	// message in production (the root cause of unsigned outbound mail).
+	dkimRepo := dkim.NewSQLRepo(sqlDB)
+	dkimSigner := dkim.NewSigner()
+
 	m.workers = make([]*delivery.DeliveryWorker, 0, workerCount)
 	for i := 0; i < workerCount; i++ {
 		worker := delivery.NewDeliveryWorker(
@@ -699,6 +750,8 @@ func (m *Module) initCore(cfg *config.Config, sqlDB *sql.DB) error {
 		)
 		worker.Observability = m.obs
 		worker.PreferIPv4 = cfg.Outbound.PreferIPv4
+		worker.DKIMSigner = dkimSigner
+		worker.DKIMConfigs = dkimRepo
 		// Canonical mail-access policy on the worker: every outbound
 		// delivery (initial, relay, retry) is policy-checked before
 		// any network I/O.
@@ -1143,6 +1196,10 @@ func (m *Module) RulesRunner() *rules.Runner {
 	// share no state, so the API runner's rule evaluations
 	// never interfere with the SMTP-side runner's per-message
 	// evaluation.
+	hostname := ""
+	if m.cfg != nil {
+		hostname = m.cfg.CoreMail.Hostname
+	}
 	return rules.NewRunner(rules.Dependencies{
 		MailStore:        m.store,
 		QueueEngine:      m.queue,
@@ -1150,6 +1207,7 @@ func (m *Module) RulesRunner() *rules.Runner {
 		Forwarding:       m.store.Forwarding,
 		Logger:           m.logger,
 		MailAccessPolicy: m.mailPolicy,
+		Hostname:         hostname,
 	})
 }
 
@@ -1191,6 +1249,20 @@ func (m *Module) smtpMailAccessPolicy(ctx context.Context, session *smtp.Session
 		return true, "", nil
 	}
 
+	// Canonical domain operability guard (Phase 8 C3A), checked for
+	// the RECIPIENT's local domain — never MAIL FROM, which a client
+	// fully controls and could spoof to try to bypass this. Runs
+	// before alias/group expansion, before mailAccessPolicy's
+	// mailbox-level check, before DATA is ever accepted: RCPT is
+	// evaluated per-recipient before the message body is read at all,
+	// so refusing here means no spool write, no queue enqueue, and no
+	// delivery record for this recipient ever happens.
+	if allow, reason, err := m.checkRecipientDomainOperability(ctx, rcptAddr); err != nil {
+		return false, "", err
+	} else if !allow {
+		return false, reason, nil
+	}
+
 	sender := mailpolicy.Sender{Authenticated: session.Authenticated}
 	if session.AuthIdentity != nil {
 		sender.MailboxEmail = session.AuthIdentity.Username
@@ -1205,6 +1277,125 @@ func (m *Module) smtpMailAccessPolicy(ctx context.Context, session *smtp.Session
 		return false, string(decision.Reason), nil
 	}
 	return true, "", nil
+}
+
+// checkRecipientDomainOperability resolves the recipient address's
+// local domain by name (global lookup — there is no caller tenant to
+// scope an inbound SMTP recipient against; the domain's OWN tenant,
+// from the resolved row, is what CheckOperabilityByIDTx checks) and
+// applies the canonical C1 guard. An unknown domain preserves the
+// existing anti-enumeration/open-relay behavior by allowing (the
+// isLocalDomain check upstream of this hook is the actual existence
+// gate; this function only refuses an EXISTING domain that is
+// disabled/suspended/locked, and never distinguishes "doesn't exist"
+// from "exists but not owned here" in its own right). A repository
+// failure returns errPolicyUnavailable, which handleRCPT maps to a
+// temporary (4.x) SMTP failure — never a permanent rejection and
+// never silent acceptance.
+func (m *Module) checkRecipientDomainOperability(ctx context.Context, rcptAddr string) (allow bool, reason string, err error) {
+	at := strings.LastIndex(rcptAddr, "@")
+	if at < 0 || at == len(rcptAddr)-1 {
+		return true, "", nil
+	}
+	domainName := strings.ToLower(rcptAddr[at+1:])
+	return m.checkDomainNameOperability(ctx, domainName)
+}
+
+// checkDomainNameOperability is the domain-name-keyed core shared by
+// the RCPT-time check (checkRecipientDomainOperability, one address)
+// and the pre-DATA-acceptance recheck (checkRecipientDomainsOperable,
+// a deduplicated set of addresses gathered over the whole
+// transaction). Only this function touches the database.
+func (m *Module) checkDomainNameOperability(ctx context.Context, domainName string) (allow bool, reason string, err error) {
+	if m.db == nil {
+		// Fail closed: this hook only runs once mailPolicy is wired
+		// (smtpMailAccessPolicy's earlier nil-mailPolicy check already
+		// short-circuits otherwise), which in production implies a db
+		// is present too. A nil db here is an unexpected wiring state,
+		// not "no policy needed" — treat it like a repository failure
+		// so the caller maps it to a transient SMTP rejection instead
+		// of silently accepting the recipient.
+		return false, "", errPolicyUnavailable
+	}
+
+	var domainID, tenantID uint
+	var status string
+	var deletedAt sql.NullTime
+	qerr := m.db.QueryRowContext(ctx,
+		`SELECT id, tenant_id, status, deleted_at FROM coremail_domains WHERE name = ? AND deleted_at IS NULL`,
+		domainName).Scan(&domainID, &tenantID, &status, &deletedAt)
+	if qerr == sql.ErrNoRows {
+		// No row -- either genuinely unknown or already soft-deleted;
+		// preserve existing anti-enumeration behavior (allow; the
+		// isLocalDomain gate upstream is the real existence check).
+		return true, "", nil
+	}
+	if qerr != nil {
+		return false, "", errPolicyUnavailable
+	}
+
+	if err := domainpkg.StatusError(domainpkg.DomainStatus(status)); err != nil {
+		return false, "recipient domain unavailable", nil
+	}
+	return true, "", nil
+}
+
+// checkRecipientDomainsOperable is the pre-commit/pre-enqueue recheck
+// (Phase 8 C3A #4): the RCPT-time check only proves a domain was
+// operable at RCPT, but a concurrent disable can commit any time
+// before DATA finishes. This re-validates every distinct local
+// recipient domain gathered over the whole transaction, immediately
+// before the caller accepts the completed message into spool/queue —
+// it never trusts MAIL FROM, and it dedupes by domain name so a
+// message with many recipients on the same domain issues one query
+// per distinct domain, not one per recipient.
+func (m *Module) checkRecipientDomainsOperable(ctx context.Context, rcptAddrs []string) error {
+	seen := make(map[string]struct{}, len(rcptAddrs))
+	for _, addr := range rcptAddrs {
+		at := strings.LastIndex(addr, "@")
+		if at < 0 || at == len(addr)-1 {
+			continue
+		}
+		domainName := strings.ToLower(addr[at+1:])
+		if _, ok := seen[domainName]; ok {
+			continue
+		}
+		seen[domainName] = struct{}{}
+
+		allow, _, err := m.checkDomainNameOperability(ctx, domainName)
+		if err != nil {
+			return err
+		}
+		if !allow {
+			return errRecipientDomainInoperable
+		}
+	}
+	return nil
+}
+
+// errRecipientDomainInoperable is returned by the pre-accept recheck
+// when a recipient's domain has become disabled/suspended/locked
+// since RCPT time. The SMTP server maps it to a permanent (5.x)
+// rejection at DATA — the message is never spooled or queued.
+var errRecipientDomainInoperable = errors.New("recipient domain no longer operable")
+
+// smtpPreAcceptRecheck is wired as smtp.Server.PreAcceptFn (Phase 8
+// C3A #4): called with the full accumulated session.Recipients set
+// right after the DATA body has been fully read but before
+// Receiver.AcceptMessage ever runs, so a rejection here persists no
+// partial message and never touches spool/queue. Translates the
+// internal not-operable sentinel to the exported smtp sentinel so the
+// server can distinguish a permanent (5.x) domain-policy rejection
+// from a transient (4.x) infrastructure failure.
+func (m *Module) smtpPreAcceptRecheck(ctx context.Context, session *smtp.Session) error {
+	if session == nil {
+		return nil
+	}
+	err := m.checkRecipientDomainsOperable(ctx, session.Recipients)
+	if err == errRecipientDomainInoperable {
+		return smtp.ErrRecipientDomainInoperable
+	}
+	return err
 }
 
 // errPolicyUnavailable is returned by the SMTP policy adapter when the

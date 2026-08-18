@@ -1,4 +1,4 @@
-import { type Page, type Route } from "@playwright/test";
+import { type Page, type Route, expect } from "@playwright/test";
 
 /**
  * End-to-end coverage for the Platform Super Admin Mail Control pages,
@@ -42,18 +42,42 @@ export const DOMAINS_LIST_FIXTURE = {
       id: 1, tenant_id: 7, name: "acme.example", status: "active", plan: "business",
       mailbox_count: 12, alias_count: 3, dkim_enabled: true, dkim_selector: "mail",
       dmarc_enabled: true, mail_access_mode: "internal_external",
-      created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-02T00:00:00Z",
+      created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-02T00:00:00Z", version: 3,
     },
     {
       id: 2, tenant_id: 7, name: "beta.example", status: "suspended", plan: "starter",
       mailbox_count: 0, alias_count: 0, dkim_enabled: false, dmarc_enabled: false,
       mail_access_mode: "internal_only",
-      created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-03T00:00:00Z",
+      created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-03T00:00:00Z", version: 1,
     },
   ],
   total: 2,
   limit: 25,
   offset: 0,
+};
+
+/**
+ * GET /platform/domains/:tenant_id/:id/dns — mailcontrol.PlatformDomainDNSResult.
+ * Modelled explicitly rather than falling through to the domain-detail
+ * catch-all: the DNS/DKIM tabs read dkim_configured/dkim_* from THIS
+ * shape, so serving a domain object here would silently misreport DKIM
+ * as unconfigured.
+ */
+export const DOMAIN_DNS_FIXTURE = {
+  tenant_id: 7,
+  domain_id: 1,
+  domain: "acme.example",
+  version: 3,
+  status: "active",
+  dkim_configured: true,
+  dkim_selector: "mail",
+  dkim_dns_record_name: "mail._domainkey.acme.example",
+  dkim_public_dns_txt: "v=DKIM1; k=rsa; p=CURRENTPUBLICKEYDATA",
+  dns_requirements: [
+    { name: "acme.example", type: "MX", value: "mail.orvix.email", ttl: 3600, priority: 10, required: true, purpose: "inbound mail routing" },
+    { name: "acme.example", type: "TXT", value: "v=spf1 include:orvix.email ~all", ttl: 3600, required: true, purpose: "SPF" },
+  ],
+  dns_next_step: "publish_and_verify_dns",
 };
 
 export const MAILBOXES_LIST_FIXTURE = {
@@ -221,6 +245,8 @@ export async function mockMailControlAPI(page: Page, opts: { portal: "platform" 
     const platformFixtures: Array<{ match: RegExp; body: unknown }> = [
       { match: /\/platform\/organizations\?/, body: ORGANIZATIONS_FIXTURE },
       { match: /\/platform\/organizations$/, body: ORGANIZATIONS_FIXTURE },
+      { match: /\/platform\/domains\/7\/1\/dns$/, body: DOMAIN_DNS_FIXTURE },
+      { match: /\/platform\/domains\/7\/2\/dns$/, body: { tenant_id: 7, domain_id: 2, domain: "beta.example", version: 1, status: "suspended", dkim_configured: false } },
       { match: /\/platform\/domains\/7\/1$/, body: DOMAINS_LIST_FIXTURE.domains[0] },
       { match: /\/platform\/domains\/7\//, body: DOMAINS_LIST_FIXTURE.domains[0] },
       { match: /\/platform\/domains\/7$/, body: DOMAINS_LIST_FIXTURE },
@@ -283,7 +309,30 @@ export async function mockMailControlAPI(page: Page, opts: { portal: "platform" 
 
 export async function openPlatformShell(page: Page) {
   await page.goto("/admin", { waitUntil: "domcontentloaded" });
-  await page.getByRole("heading", { name: /Orvix Admin/i }).waitFor();
+  await page.getByRole("heading", { name: "Orvix", exact: true }).waitFor();
+  await ensurePlatformSidebarOpen(page);
+}
+
+/**
+ * PlatformShell collapses its sidebar off-screen below the `lg`
+ * breakpoint (per the mission's "small viewport: sidebar becomes
+ * usable/collapsible" requirement) — at narrow test viewports the nav
+ * buttons are not clickable until the mobile menu toggle opens it.
+ * Idempotent: does nothing if the sidebar is already visible (e.g.
+ * desktop-width tests).
+ */
+export async function ensurePlatformSidebarOpen(page: Page) {
+  const toggle = page.getByRole("button", { name: /toggle sidebar/i });
+  if (!(await toggle.isVisible().catch(() => false))) return; // desktop: static sidebar, no toggle
+  // PlatformShell reflects its open/closed state on the aside via
+  // data-sidebar-open — reading that directly avoids racing the CSS
+  // slide-in transition (isVisible()/boundingBox() during the
+  // transition can report a stale/partial position).
+  const aside = page.locator('aside[data-sidebar-open="true"]');
+  if (await aside.count() > 0) return;
+  await toggle.click();
+  await expect(page.locator('aside[data-sidebar-open="true"]')).toHaveCount(1, { timeout: 5000 });
+  await expect(page.getByRole("navigation", { name: /platform navigation/i })).toBeInViewport({ timeout: 5000 });
 }
 
 /** Applies the tenant scope selector to tenant 7 (idempotent). */

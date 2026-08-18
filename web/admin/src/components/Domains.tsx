@@ -7,6 +7,7 @@ import {
 import { api, domainErrorMessage } from "../api";
 import DNSRecordsModal from "./DNSRecordsModal";
 import DomainWizardModal, { type ProvisionResult } from "./DomainWizardModal";
+import { ErrorOrAccessDenied, isAccessDenied } from "./AccessDenied";
 
 /**
  * Mirrors admin/domain.AdminDomain as returned by GET /enterprise/domains.
@@ -223,7 +224,8 @@ export default function Domains() {
   if (error && items.length === 0) {
     return (
       <div className="flex flex-col gap-3">
-        <p className="text-[var(--danger)]">{errorMessage(error, "Failed to load domains.")}</p>
+        <ErrorOrAccessDenied err={error} />
+        {!isAccessDenied(error) && <p className="text-[var(--danger)]">{errorMessage(error, "Failed to load domains.")}</p>}
         <button onClick={() => refetch()} className="text-sm text-[var(--accent)] hover:underline text-left">
           Retry
         </button>

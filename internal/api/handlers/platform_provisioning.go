@@ -140,6 +140,32 @@ func mapDNSPlanRequirements(plan *dnsops.Plan) []mailcontrol.PlatformDNSRequirem
 	return out
 }
 
+// mapDNSVerifyReport converts a dnsops.VerifyReport (already run
+// against live public DNS via dnsops.Service.Verify) into the Platform
+// wire contract's record list.
+func mapDNSVerifyReport(report *dnsops.VerifyReport) []mailcontrol.PlatformDNSVerifyRecord {
+	if report == nil {
+		return nil
+	}
+	out := make([]mailcontrol.PlatformDNSVerifyRecord, 0, len(report.Plan.Records))
+	for _, r := range report.Plan.Records {
+		out = append(out, mailcontrol.PlatformDNSVerifyRecord{
+			Name:     r.Name,
+			Type:     string(r.Type),
+			Value:    r.Value,
+			TTL:      r.TTL,
+			Priority: r.Priority,
+			Required: r.Required,
+			Purpose:  string(r.Purpose),
+			Status:   string(r.Status),
+			Verified: r.Verified,
+			Reason:   r.Reason,
+			Observed: r.Observed,
+		})
+	}
+	return out
+}
+
 // ── Platform mailbox creation ──────────────────────────────────────
 
 // CreatePlatformMailbox handles

@@ -46,6 +46,7 @@ type provEnv struct {
 	otherAdm   string
 	psaCSRF    string
 	tenantCSRF string
+	otherCSRF  string
 	db         *sql.DB
 }
 
@@ -118,6 +119,7 @@ func buildPlatformProvisioningEnv(t *testing.T) *provEnv {
 		otherAdm:   importRouteLogin(t, router, provOtherEmail, provOtherPass),
 		psaCSRF:    importRouteCSRF(t, router, psaToken),
 		tenantCSRF: importRouteCSRF(t, router, importRouteLogin(t, router, provTenantEmail, provTenantPass)),
+		otherCSRF:  importRouteCSRF(t, router, importRouteLogin(t, router, provOtherEmail, provOtherPass)),
 		db:         sqlDB,
 	}
 }

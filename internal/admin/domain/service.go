@@ -2,10 +2,7 @@ package domain
 
 import (
 	"context"
-	"crypto/rsa"
-	"crypto/x509"
 	"database/sql"
-	"encoding/pem"
 	"fmt"
 	"strings"
 	"time"
@@ -93,7 +90,7 @@ func (r *DomainAdminRepo) List(ctx context.Context, filter DomainFilter) ([]Admi
 		(SELECT v.status FROM customer_domain_verifications v WHERE v.domain_id=d.id ORDER BY v.created_at DESC LIMIT 1),
 		COALESCE((SELECT v.score FROM customer_domain_verifications v WHERE v.domain_id=d.id ORDER BY v.created_at DESC LIMIT 1),0),
 		(SELECT v.checked_at FROM customer_domain_verifications v WHERE v.domain_id=d.id ORDER BY v.created_at DESC LIMIT 1),
-		d.created_at, d.updated_at
+		d.created_at, d.updated_at, COALESCE(d.version,1)
 		FROM coremail_domains d WHERE ` + clause + ` ORDER BY d.name ASC LIMIT ` + r.dialect.Placeholder(len(args)+1) + ` OFFSET ` + r.dialect.Placeholder(len(args)+2)
 	args = append(args, filter.Limit, filter.Offset)
 
@@ -115,7 +112,7 @@ func (r *DomainAdminRepo) List(ctx context.Context, filter DomainFilter) ([]Admi
 			&d.MailboxCount, &d.AliasCount,
 			&d.StorageUsedBytes, &d.MessageCount,
 			&dnsHealth, &d.DNSScore, &dnsCheckedAt,
-			&d.CreatedAt, &d.UpdatedAt); err != nil {
+			&d.CreatedAt, &d.UpdatedAt, &d.Version); err != nil {
 			return nil, 0, err
 		}
 		d.DKIMEnabled = dkimEnabled != 0
@@ -143,7 +140,7 @@ func (r *DomainAdminRepo) GetByID(ctx context.Context, id, tenantID uint) (*Admi
 			d.dkim_enabled, COALESCE(d.dkim_selector,'mail'), d.dmarc_enabled,
 			COALESCE((SELECT COUNT(*) FROM coremail_mailboxes m WHERE m.domain_id=d.id AND m.deleted_at IS NULL),0),
 			COALESCE((SELECT COUNT(*) FROM coremail_aliases a WHERE a.domain_id=d.id AND a.deleted_at IS NULL),0),
-			d.created_at, d.updated_at
+			d.created_at, d.updated_at, COALESCE(d.version,1)
 		FROM coremail_domains d WHERE d.id = `+r.dialect.Placeholder(1)+` AND d.tenant_id = `+r.dialect.Placeholder(2)+` AND d.deleted_at IS NULL`, id, tenantID)
 	return scanAdminDomain(row)
 }
@@ -167,9 +164,14 @@ func (r *DomainAdminRepo) Create(ctx context.Context, d *AdminDomain) (*AdminDom
 	// unchanged. The legacy CreateDomain entrypoint applies the historic
 	// 500/50/10240 defaults itself so its behaviour is untouched.
 
-	insert := "INSERT INTO coremail_domains (tenant_id, name, status, plan, description, max_mailboxes, max_aliases, max_quota_mb, dkim_enabled, dkim_selector, dmarc_enabled, created_at, updated_at) VALUES (" + r.dialect.Placeholders(13) + ")"
+	// version is explicitly inserted as 1 (matching the column's own
+	// DEFAULT 1) rather than left to the default so the freshly
+	// created row's real starting version is unambiguous — the same
+	// value the row would get anyway, not a fabricated one.
+	d.Version = 1
+	insert := "INSERT INTO coremail_domains (tenant_id, name, status, plan, description, max_mailboxes, max_aliases, max_quota_mb, dkim_enabled, dkim_selector, dmarc_enabled, created_at, updated_at, version) VALUES (" + r.dialect.Placeholders(14) + ")"
 	args := []any{d.TenantID, d.Name, d.Status, d.Plan, d.Description, d.MaxMailboxes, d.MaxAliases, d.MaxQuotaMB,
-		r.databaseBool(d.DKIMEnabled), d.DKIMSelector, r.databaseBool(d.DMARCEnabled), d.CreatedAt, d.UpdatedAt}
+		r.databaseBool(d.DKIMEnabled), d.DKIMSelector, r.databaseBool(d.DMARCEnabled), d.CreatedAt, d.UpdatedAt, d.Version}
 	if r.dialect.IsPostgres() {
 		// PostgreSQL has no LastInsertId: the id is returned by the
 		// INSERT itself. This is the same dialect-aware pattern the
@@ -227,7 +229,7 @@ func (r *DomainAdminRepo) GetByName(ctx context.Context, name string, tenantID u
 			d.dkim_enabled, COALESCE(d.dkim_selector,'mail'), d.dmarc_enabled,
 			COALESCE((SELECT COUNT(*) FROM coremail_mailboxes m WHERE m.domain_id=d.id AND m.deleted_at IS NULL),0),
 			COALESCE((SELECT COUNT(*) FROM coremail_aliases a WHERE a.domain_id=d.id AND a.deleted_at IS NULL),0),
-			d.created_at, d.updated_at
+			d.created_at, d.updated_at, COALESCE(d.version,1)
 		FROM coremail_domains d WHERE d.name = `+r.dialect.Placeholder(1)+` AND d.tenant_id = `+r.dialect.Placeholder(2)+` AND d.deleted_at IS NULL`, name, tenantID)
 	return scanAdminDomain(row)
 }
@@ -271,7 +273,7 @@ func (r *DomainAdminRepo) GetDomainForVerification(ctx context.Context, domainID
 			d.dkim_enabled, COALESCE(d.dkim_selector,'mail'), d.dmarc_enabled,
 			COALESCE((SELECT COUNT(*) FROM coremail_mailboxes m WHERE m.domain_id=d.id AND m.deleted_at IS NULL),0),
 			COALESCE((SELECT COUNT(*) FROM coremail_aliases a WHERE a.domain_id=d.id AND a.deleted_at IS NULL),0),
-			d.created_at, d.updated_at
+			d.created_at, d.updated_at, COALESCE(d.version,1)
 		FROM coremail_domains d WHERE d.id = `+r.dialect.Placeholder(1)+` AND d.tenant_id = `+r.dialect.Placeholder(2)+` AND d.deleted_at IS NULL`, domainID, tenantID)
 	return scanAdminDomain(row)
 }
@@ -318,7 +320,7 @@ func (r *DomainAdminRepo) GetByNameGlobalDomain(ctx context.Context, name string
 			d.dkim_enabled, COALESCE(d.dkim_selector,'mail'), d.dmarc_enabled,
 			COALESCE((SELECT COUNT(*) FROM coremail_mailboxes m WHERE m.domain_id=d.id AND m.deleted_at IS NULL),0),
 			COALESCE((SELECT COUNT(*) FROM coremail_aliases a WHERE a.domain_id=d.id AND a.deleted_at IS NULL),0),
-			d.created_at, d.updated_at
+			d.created_at, d.updated_at, COALESCE(d.version,1)
 		FROM coremail_domains d WHERE d.name = `+r.dialect.Placeholder(1)+` AND d.deleted_at IS NULL`, name)
 	return scanAdminDomain(row)
 }
@@ -341,6 +343,17 @@ type Service struct {
 	dkimHistory *dkimSelectorHistoryRepo
 	tlsSvc      tlsStatusSource
 	webhooks    webhookPublisher
+	// dkimKeyGen is the injectable key-generation dependency (Phase 8
+	// C2 Part 1). Defaults to the real cryptographic generator
+	// (dkim.GenerateKeyPair) in NewService. It is deliberately
+	// unexported with no setter: this package's own tests assign it
+	// directly (package-private field access) to substitute a
+	// counting/failing stand-in and prove the domain operability guard
+	// refuses BEFORE any key material is generated — not merely that
+	// the call returns an error. No exported API, mutable global, or
+	// environment variable can reach this from outside the package;
+	// production always gets the real generator.
+	dkimKeyGen func(selector, domainName string) (privateKeyPEM string, dnsRecord string, err error)
 }
 
 type webhookPublisher interface {
@@ -353,7 +366,7 @@ func NewService(repo *DomainAdminRepo, dkimRepo dkim.Repository, auditStore *aud
 		hist = newDKIMSelectorHistoryRepo(repo.root)
 		_ = hist.ensureSchema(context.Background())
 	}
-	return &Service{repo: repo, dkimRepo: dkimRepo, auditStore: auditStore, rbac: rbac, dkimHistory: hist}
+	return &Service{repo: repo, dkimRepo: dkimRepo, auditStore: auditStore, rbac: rbac, dkimHistory: hist, dkimKeyGen: dkim.GenerateKeyPair}
 }
 
 // SetWebhookPublisher wires the transactional webhook event adapter. It is
@@ -393,7 +406,9 @@ func (s *Service) ListDKIMHistory(ctx context.Context, id, tenantID uint) ([]DKI
 // verification of already-queued mail and for an eventual restore),
 // clears the domain's dkim_enabled flag, and records the revocation in
 // the selector history. A domain with no configured DKIM returns
-// ErrDKIMNotConfigured.
+// ErrDKIMNotConfigured. Revoking an ALREADY-revoked (disabled) config is
+// an idempotent success with NO new mutation: no duplicate history entry,
+// no duplicate audit row, no key rotation, no DNS change.
 func (s *Service) RevokeDKIM(ctx context.Context, id, tenantID uint) error {
 	d, err := s.repo.GetByID(ctx, id, tenantID)
 	if err != nil {
@@ -417,6 +432,12 @@ func (s *Service) RevokeDKIM(ctx context.Context, id, tenantID uint) error {
 	}
 	if existing == nil {
 		return ErrDKIMNotConfigured
+	}
+	if !existing.Enabled {
+		// Already revoked: the real state is already what this endpoint
+		// promises. Commit nothing — a repeated revoke must not pile up
+		// history/audit rows claiming a change that did not happen.
+		return tx.Commit()
 	}
 
 	existing.Enabled = false
@@ -627,6 +648,11 @@ type DKIMResult struct {
 	Selector      string `json:"selector"`
 	PublicDNSTxt  string `json:"public_dns_txt"`
 	DNSRecordName string `json:"dns_record_name"`
+	// Version is populated only by tenant-scoped, version-guarded
+	// callers (PlatformDKIMForTenant); zero for the legacy
+	// GetDKIM/PlatformDKIM callers that predate optimistic concurrency
+	// on this route family.
+	Version int `json:"version,omitempty"`
 }
 
 // GenerateDKIM atomically provisions a DKIM key pair for a domain:
@@ -699,6 +725,16 @@ func (s *Service) generateDKIMTx(ctx context.Context, tx *sql.Tx, repo *DomainAd
 	if s.dkimRepo == nil {
 		return nil, fmt.Errorf("dkim repository unavailable")
 	}
+	// Canonical domain operability guard (Phase 8 C2), inside the same
+	// transaction the key generation and persistence run in, FOR
+	// UPDATE-locked on Postgres. Refuses BEFORE any key material is
+	// generated or persisted — a rejected request never touches
+	// dkim.GenerateKeyPair. Both the standalone GenerateDKIM
+	// entrypoint and the domain-provisioning wizard call this shared
+	// function, so both get the same enforcement automatically.
+	if opOut := repo.CheckOperabilityByIDTx(ctx, domainID, tenantID, true); !opOut.Operational() {
+		return nil, opOut.Err
+	}
 	if selector == "" {
 		selector = "mail"
 	}
@@ -714,7 +750,7 @@ func (s *Service) generateDKIMTx(ctx context.Context, tx *sql.Tx, repo *DomainAd
 		return nil, ErrDKIMAlreadyConfigured
 	}
 
-	privPEM, dnsValue, err := dkim.GenerateKeyPair(selector, domainName)
+	privPEM, dnsValue, err := s.dkimKeyGen(selector, domainName)
 	if err != nil {
 		return nil, fmt.Errorf("dkim keygen: %w", err)
 	}
@@ -774,6 +810,13 @@ func (s *Service) RotateDKIM(ctx context.Context, id, tenantID uint, selector st
 
 	repo := s.repo.WithTx(tx)
 
+	// Canonical domain operability guard (Phase 8 C2) — refuses before
+	// any key material is generated or the existing key is touched.
+	// Rotation never mutates the stored key when this rejects.
+	if opOut := repo.CheckOperabilityByIDTx(ctx, id, tenantID, true); !opOut.Operational() {
+		return nil, opOut.Err
+	}
+
 	existing, err := s.dkimRepo.GetByDomain(ctx, d.Name, tx)
 	if err != nil {
 		return nil, fmt.Errorf("check dkim config: %w", err)
@@ -782,7 +825,7 @@ func (s *Service) RotateDKIM(ctx context.Context, id, tenantID uint, selector st
 		return nil, ErrDKIMNotConfigured
 	}
 
-	privPEM, dnsValue, err := dkim.GenerateKeyPair(selector, d.Name)
+	privPEM, dnsValue, err := s.dkimKeyGen(selector, d.Name)
 	if err != nil {
 		return nil, fmt.Errorf("dkim keygen: %w", err)
 	}
@@ -845,12 +888,21 @@ func (s *Service) GetDKIM(ctx context.Context, id, tenantID uint) (*DKIMResult, 
 		return nil, nil
 	}
 
-	pubKey, ok := deriveDKIMPublicKey(cfg.PrivateKeyPEM)
+	// Single canonical PEM -> public-key-TXT derivation, matching every
+	// other DKIM read path in the codebase. The prior implementation
+	// derived the p= value via deriveDKIMPublicKey and then piped that
+	// ALREADY-base64 string back through dkim.GenerateDNSRecord, which
+	// base64-encodes its input again — a real double-encoding bug
+	// (production symptom: DNS Setup and the DKIM tab disagreed on the
+	// same domain/selector's public TXT value). DerivePublicKeyRecordValue
+	// returns the complete "v=DKIM1; k=rsa; p=..." string directly, so
+	// there is no second encoding pass and no separate hostname builder
+	// call needed here.
+	dnsValue, ok := dkim.DerivePublicKeyRecordValue(cfg.PrivateKeyPEM)
 	if !ok {
 		return nil, fmt.Errorf("public key derivation failed")
 	}
-
-	dnsName, dnsValue := dkim.GenerateDNSRecord(cfg.Selector, d.Name, pubKey)
+	dnsName := fmt.Sprintf("%s._domainkey.%s", cfg.Selector, d.Name)
 
 	return &DKIMResult{
 		Selector:      cfg.Selector,
@@ -898,6 +950,15 @@ func (s *Service) PlatformDKIM(ctx context.Context, domainName, selector, confir
 
 	repo := s.repo.WithTx(tx)
 
+	// Canonical domain operability guard (Phase 8 C2). PlatformDKIM
+	// resolves the domain by name globally (no caller-supplied
+	// tenantID to isolate against), so the guard is scoped to the
+	// resolved row's own tenant — refuses before any key material is
+	// generated or the existing key is touched.
+	if opOut := repo.CheckOperabilityByIDTx(ctx, d.ID, d.TenantID, true); !opOut.Operational() {
+		return nil, opOut.Err
+	}
+
 	existing, err := s.dkimRepo.GetByDomain(ctx, d.Name, tx)
 	if err != nil {
 		return nil, fmt.Errorf("check dkim config: %w", err)
@@ -906,7 +967,7 @@ func (s *Service) PlatformDKIM(ctx context.Context, domainName, selector, confir
 		return nil, ErrDKIMAlreadyConfigured
 	}
 
-	privPEM, dnsValue, err := dkim.GenerateKeyPair(selector, d.Name)
+	privPEM, dnsValue, err := s.dkimKeyGen(selector, d.Name)
 	if err != nil {
 		return nil, fmt.Errorf("dkim keygen: %w", err)
 	}
@@ -964,6 +1025,162 @@ func (s *Service) PlatformDKIM(ctx context.Context, domainName, selector, confir
 		Selector:      selector,
 		PublicDNSTxt:  dnsValue,
 		DNSRecordName: fmt.Sprintf("%s._domainkey.%s", selector, d.Name),
+	}, nil
+}
+
+// PlatformDKIMForTenant is the tenant-scoped, version-guarded sibling
+// of PlatformDKIM used by the Platform Super Admin generate/rotate
+// routes. It reuses the exact same DKIM repository, key-generation
+// hook, operability guard, and audit pattern as PlatformDKIM — this
+// is a second ENTRY POINT, not a second DKIM subsystem — but adds two
+// things PlatformDKIM's global-by-name resolution cannot provide:
+//
+//  1. explicit tenant ownership: the domain is resolved by
+//     (id, tenantID) through the same tenant-scoped repository every
+//     other platform route uses, so a foreign tenant's domain id
+//     yields ErrDomainNotFound before any DKIM action runs — never a
+//     cross-tenant generate/rotate;
+//  2. optimistic concurrency: expectedVersion is checked against the
+//     real coremail_domains.version INSIDE the same locked
+//     transaction the operability guard already opens (CheckOperabilityByIDTx
+//     with lock=true takes the row's FOR UPDATE lock on PostgreSQL), and
+//     the domain's version is bumped by exactly one on success — a
+//     stale value is rejected with ErrStaleVersion (409) before any
+//     key material is generated or the existing key is touched.
+//
+// Both PlatformDKIM and this method commit or roll back their DKIM
+// write, domain-state update, version bump, and audit record as one
+// transaction; the private key is never returned, logged, or crosses
+// out of this function.
+func (s *Service) PlatformDKIMForTenant(ctx context.Context, id, tenantID uint, selector, confirmRotation string, expectedVersion int) (*DKIMResult, error) {
+	if s.dkimRepo == nil {
+		return nil, fmt.Errorf("dkim repository unavailable")
+	}
+	if selector == "" {
+		selector = "orvix"
+	}
+	if expectedVersion < 1 {
+		return nil, ErrStaleVersion
+	}
+
+	d, err := s.repo.GetByID(ctx, id, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	if d == nil {
+		return nil, ErrDomainNotFound
+	}
+
+	tx, err := s.repo.BeginTx(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin dkim provision: %w", err)
+	}
+	defer tx.Rollback()
+
+	repo := s.repo.WithTx(tx)
+
+	// Locks the domain row (FOR UPDATE on PostgreSQL) and re-verifies
+	// tenant ownership + operability before anything else — the same
+	// guard PlatformDKIM uses, now scoped to the caller's own tenantID
+	// rather than the resolved row's tenant, so a mismatched tenantID
+	// in the path can never reach this far.
+	if opOut := repo.CheckOperabilityByIDTx(ctx, id, tenantID, true); !opOut.Operational() {
+		return nil, opOut.Err
+	}
+
+	var currentVersion int
+	if err := tx.QueryRow(
+		"SELECT version FROM coremail_domains WHERE id = "+repo.dialect.Placeholder(1)+" AND tenant_id = "+repo.dialect.Placeholder(2),
+		id, tenantID,
+	).Scan(&currentVersion); err != nil {
+		return nil, fmt.Errorf("read domain version: %w", err)
+	}
+	if currentVersion != expectedVersion {
+		return nil, ErrStaleVersion
+	}
+
+	existing, err := s.dkimRepo.GetByDomain(ctx, d.Name, tx)
+	if err != nil {
+		return nil, fmt.Errorf("check dkim config: %w", err)
+	}
+	if existing != nil && confirmRotation != "rotate-dkim-key" {
+		return nil, ErrDKIMAlreadyConfigured
+	}
+
+	privPEM, dnsValue, err := s.dkimKeyGen(selector, d.Name)
+	if err != nil {
+		return nil, fmt.Errorf("dkim keygen: %w", err)
+	}
+
+	action := "domain.dkim.generate"
+	if existing != nil {
+		action = "domain.dkim.rotate"
+		existing.Selector = selector
+		existing.PrivateKeyPEM = privPEM
+		existing.Enabled = true
+		if err := s.dkimRepo.Update(ctx, existing, tx); err != nil {
+			if isUniqueViolation(err) {
+				return nil, ErrDKIMAlreadyConfigured
+			}
+			return nil, fmt.Errorf("update dkim config: %w", err)
+		}
+	} else {
+		cfg := &dkim.DKIMConfig{
+			Domain:        d.Name,
+			Selector:      selector,
+			PrivateKeyPEM: privPEM,
+			Enabled:       true,
+		}
+		if err := s.dkimRepo.Create(ctx, cfg, tx); err != nil {
+			if isUniqueViolation(err) {
+				return nil, ErrDKIMAlreadyConfigured
+			}
+			return nil, fmt.Errorf("save dkim config: %w", err)
+		}
+	}
+
+	if err := repo.UpdateDomainDKIMState(ctx, d.ID, d.TenantID, true, selector); err != nil {
+		return nil, fmt.Errorf("mark domain dkim state: %w", err)
+	}
+
+	newVersion := currentVersion + 1
+	res, err := tx.Exec(
+		"UPDATE coremail_domains SET version = "+repo.dialect.Placeholder(1)+", updated_at = "+repo.dialect.Placeholder(2)+" WHERE id = "+repo.dialect.Placeholder(3)+" AND tenant_id = "+repo.dialect.Placeholder(4)+" AND version = "+repo.dialect.Placeholder(5),
+		newVersion, time.Now().UTC(), id, tenantID, currentVersion,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("bump domain version: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		// A concurrent writer moved the version between the read above
+		// and this guarded UPDATE — reject rather than silently
+		// applying the mutation under a version it no longer matches.
+		return nil, ErrStaleVersion
+	}
+
+	if s.auditStore != nil {
+		entry := &audit.ExtendedEntry{
+			Action:   action,
+			Target:   fmt.Sprintf("domain:%d", d.ID),
+			TargetID: d.ID,
+			TenantID: d.TenantID,
+			Result:   "success",
+			After:    fmt.Sprintf(`{"domain":"%s","selector":"%s"}`, d.Name, selector),
+		}
+		if err := s.auditStore.RecordTx(ctx, tx, entry); err != nil {
+			return nil, err
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit dkim provision: %w", err)
+	}
+
+	return &DKIMResult{
+		Selector:      selector,
+		PublicDNSTxt:  dnsValue,
+		DNSRecordName: fmt.Sprintf("%s._domainkey.%s", selector, d.Name),
+		Version:       newVersion,
 	}, nil
 }
 
@@ -1045,7 +1262,7 @@ func scanAdminDomain(row interface {
 	err := row.Scan(&d.ID, &d.TenantID, &d.Name, &d.Status, &d.Plan, &d.Description,
 		&d.MaxMailboxes, &d.MaxAliases, &d.MaxQuotaMB, &d.DefaultMailboxQuotaMB,
 		&dkimEnabled, &d.DKIMSelector, &dmarcEnabled,
-		&d.MailboxCount, &d.AliasCount, &d.CreatedAt, &d.UpdatedAt)
+		&d.MailboxCount, &d.AliasCount, &d.CreatedAt, &d.UpdatedAt, &d.Version)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
@@ -1055,35 +1272,6 @@ func scanAdminDomain(row interface {
 	d.DKIMEnabled = dkimEnabled != 0
 	d.DMARCEnabled = dmarcEnabled != 0
 	return &d, nil
-}
-
-func deriveDKIMPublicKey(privPEM string) (string, bool) {
-	block, _ := pem.Decode([]byte(privPEM))
-	if block == nil {
-		return "", false
-	}
-	keyAny, err := x509.ParsePKCS8PrivateKey(block.Bytes)
-	if err != nil {
-		if k1, err1 := x509.ParsePKCS1PrivateKey(block.Bytes); err1 == nil {
-			keyAny = k1
-		} else {
-			return "", false
-		}
-	}
-	rsaKey, ok := keyAny.(*rsa.PrivateKey)
-	if !ok {
-		return "", false
-	}
-	pubBytes, err := x509.MarshalPKIXPublicKey(&rsaKey.PublicKey)
-	if err != nil {
-		return "", false
-	}
-	recordName, recordValue := dkim.GenerateDNSRecord("ignored", "ignored", string(pubBytes))
-	_ = recordName
-	if i := strings.Index(recordValue, "p="); i >= 0 {
-		return recordValue[i+2:], true
-	}
-	return "", false
 }
 
 func boolToInt(b bool) int {

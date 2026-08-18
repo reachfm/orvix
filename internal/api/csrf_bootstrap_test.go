@@ -346,3 +346,89 @@ func TestCSRFBootstrapAuthenticatedRefresh(t *testing.T) {
 		t.Fatalf("authenticated csrf refresh returned no token: %v", rec2.Body.String())
 	}
 }
+
+// TestCSRFBootstrapIsolatedFromGeneralAPIBudget is the regression test for
+// the 2026-08-14 live outage: GET /api/v1/csrf-token used to be mounted
+// under the `api` group and shared apiRateLimitMiddleware's general
+// 100-req/min-per-IP budget with every other /api/v1 call. A burst of
+// ordinary (even unauthenticated, even 401) API traffic from one client IP
+// could exhaust that shared budget and then permanently lock that IP out of
+// ever bootstrapping a fresh CSRF token again until the window rolled over
+// — breaking login and webmail for every real user behind that IP, caused
+// entirely by legitimate traffic, not abuse.
+//
+// This drives the general API limiter's in-memory fallback budget (100/min)
+// to exhaustion using only unauthenticated GET /api/v1/me calls (a route
+// that returns 401 without ever touching authThrottle/authThrottleIP), then
+// proves GET /api/v1/csrf-token still returns 200 from the SAME client IP
+// in the SAME window — because it now carries its own separate, isolated
+// budget rather than sharing the exhausted one.
+func TestCSRFBootstrapIsolatedFromGeneralAPIBudget(t *testing.T) {
+	router, _, _ := newCSRFTestRouter(t)
+
+	var last *httptest.ResponseRecorder
+	for i := 0; i < 110; i++ {
+		req := httptest.NewRequest("GET", "/api/v1/me", nil)
+		req.Header.Set("X-Forwarded-For", "203.0.113.77")
+		last = doReq(t, router, req)
+	}
+	if last.Code != 429 {
+		// The general API budget (100/min fallback) must actually have been
+		// exhausted by this point — otherwise this test would not be
+		// exercising the scenario it claims to.
+		t.Fatalf("expected the general API budget to be exhausted (429) after 110 calls, got %d: %s", last.Code, last.Body.String())
+	}
+
+	// The SAME client, in the SAME window, must still be able to bootstrap
+	// a fresh CSRF token — proving the two budgets are genuinely isolated.
+	req := httptest.NewRequest("GET", "/api/v1/csrf-token", nil)
+	req.Header.Set("X-Forwarded-For", "203.0.113.77")
+	rec := doReq(t, router, req)
+	if rec.Code != 200 {
+		t.Fatalf("csrf bootstrap must be isolated from the exhausted general API budget, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		CSRFToken string `json:"csrf_token"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil || body.CSRFToken == "" {
+		t.Fatalf("csrf bootstrap under general-budget exhaustion returned no token: %v", rec.Body.String())
+	}
+}
+
+// TestCSRFBootstrapOwnBudgetFailsClosedWithRetryAfter proves the dedicated
+// CSRF bootstrap budget is itself real and bounded (not simply unlimited),
+// and that exceeding it returns 429 with a Retry-After header rather than
+// hanging or looping.
+func TestCSRFBootstrapOwnBudgetFailsClosedWithRetryAfter(t *testing.T) {
+	router, _, _ := newCSRFTestRouter(t)
+
+	var last *httptest.ResponseRecorder
+	for i := 0; i < 65; i++ {
+		req := httptest.NewRequest("GET", "/api/v1/csrf-token", nil)
+		req.Header.Set("X-Forwarded-For", "203.0.113.88")
+		last = doReq(t, router, req)
+	}
+	if last.Code != 429 {
+		t.Fatalf("csrf bootstrap budget expected to fail closed at 429 after 65 calls, got %d: %s", last.Code, last.Body.String())
+	}
+	if last.Header().Get("Retry-After") == "" {
+		t.Fatalf("429 response missing Retry-After header")
+	}
+}
+
+// NOTE on cross-client-IP bucket isolation (rate-limit isolation
+// requirement D): this property — that two distinct real client IPs
+// behind the same trusted Caddy proxy hop get independent limiter
+// buckets — is NOT unit-testable through Fiber v3's in-process
+// app.Test() harness. Fiber's fasthttp Test() adaptor does not honor
+// http.Request.RemoteAddr the way a real TCP connection would, so
+// TrustProxyConfig's loopback-peer check never sees a genuinely
+// trusted peer here, and c.IP() falls back to one fixed simulated
+// address for every request regardless of X-Forwarded-For — this is
+// the CORRECT, secure-by-default behavior for an untrusted peer, not a
+// bug, but it makes the multi-real-IP scenario unprovable in-process.
+// The actual production topology (cfg.Server.TrustedProxies =
+// ["127.0.0.1","::1"], matching Caddy's loopback listener) was
+// verified live against the deployed VPS during Phase 8 remediation:
+// two curl requests with distinct X-Forwarded-For values through the
+// real Caddy reverse proxy received independent rate-limit budgets.

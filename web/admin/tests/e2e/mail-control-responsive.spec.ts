@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { mockMailControlAPI, openPlatformShell, applyTenantScope } from "./mail-control-fixtures";
+import { mockMailControlAPI, openPlatformShell, applyTenantScope, ensurePlatformSidebarOpen } from "./mail-control-fixtures";
 
 const VIEWPORTS = [
   { name: "iphone-375x812", width: 375, height: 812 },
@@ -31,6 +31,7 @@ test.describe("Mail Control responsive sweep", () => {
         { label: "Bulk Mailboxes", scoped: true },
       ];
       for (const p of pages) {
+        await ensurePlatformSidebarOpen(page);
         await page.getByRole("button", { name: p.label, exact: true }).click();
         if (p.scoped) await applyTenantScope(page, "Acme");
       }
@@ -61,9 +62,11 @@ test.describe("Mail Control accessibility", () => {
     await expect(table).toBeVisible();
     // Status badges carry a text label plus a non-color signal (the dot + word).
     await expect(page.getByRole("status", { name: "Status Active" })).toBeVisible();
+    await ensurePlatformSidebarOpen(page);
     await page.getByRole("button", { name: "Mailboxes", exact: true }).click();
     await applyTenantScope(page, "Acme");
     await expect(page.getByRole("table", { name: "Platform mailboxes" })).toBeVisible();
+    await ensurePlatformSidebarOpen(page);
     await page.getByRole("button", { name: "Bulk Mailboxes", exact: true }).click();
     await applyTenantScope(page, "Acme");
     await expect(page.getByRole("table", { name: "Bulk mailbox selection" })).toBeVisible();

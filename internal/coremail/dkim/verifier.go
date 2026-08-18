@@ -186,10 +186,13 @@ func (v *Verifier) verifyOne(ctx context.Context, rfc822 []byte, sigValue string
 		hdrText.WriteString(fmt.Sprintf("%s:%s\r\n", h.Name, h.Value))
 	}
 
-	// Append DKIM-Signature with b= removed.
+	// Append DKIM-Signature with b= removed — via the SAME helper the
+	// signer uses (RFC 6376 §3.7: relaxed canonicalization, lowercased
+	// field name, no trailing CRLF), so signer and verifier can never
+	// again silently diverge from each other.
 	sigWithoutB := fmt.Sprintf("v=1; a=%s; c=%s/%s; d=%s; s=%s; h=%s; bh=%s; b=",
 		alg, CanonRelaxed, CanonRelaxed, domain, selector, hlist, bh)
-	hdrText.WriteString(fmt.Sprintf("DKIM-Signature:%s\r\n", sigWithoutB))
+	hdrText.WriteString(dkimSignatureFieldForHashing(sigWithoutB, CanonRelaxed))
 	sigData := hdrText.String()
 
 	// Decode signature.

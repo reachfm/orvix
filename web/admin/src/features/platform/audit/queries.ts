@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { exportAuditLogs, getAuditEntry, listAuditLogs } from "./api";
+import { getAuditEntry, listAuditLogs } from "./api";
 
 export const auditKeys = {
   list: (params: string) => ["audit", "list", params] as const,
@@ -13,13 +13,4 @@ export function useAuditLogs(params: { page?: number; page_size?: number; action
 
 export function useAuditEntry(id: number) {
   return useQuery({ queryKey: auditKeys.detail(id), queryFn: () => getAuditEntry(id) });
-}
-
-export function useAuditExport(params: { action?: string; tenant_id?: number; since?: string; until?: string; format?: "json" | "csv" }) {
-  const key = JSON.stringify(params);
-  return useQuery({
-    queryKey: ["audit", "export", key],
-    queryFn: () => exportAuditLogs(params),
-    enabled: false,
-  });
 }

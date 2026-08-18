@@ -94,6 +94,15 @@ const CODE_MESSAGES: Readonly<Record<string, { title: string; detail: string }>>
     title: "Queue unavailable",
     detail: "The queue backend is unavailable. Try again later.",
   },
+  // Platform domain delete guards (platform_domain_lifecycle.go).
+  DOMAIN_NOT_DEACTIVATED: {
+    title: "Deactivate first",
+    detail: "Deactivate the domain before deleting it permanently.",
+  },
+  DOMAIN_DELETE_BLOCKED: {
+    title: "Cannot delete yet",
+    detail: "This domain has live dependencies that must be removed first.",
+  },
   // Relay mutation guards (platform_relay_admin.go).
   STALE_VERSION: {
     title: "Stale version",

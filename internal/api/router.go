@@ -58,6 +58,7 @@ import (
 	"github.com/orvix/orvix/internal/ruler"
 	orvixruntime "github.com/orvix/orvix/internal/runtime"
 	settingsbridge "github.com/orvix/orvix/internal/settings/bridge"
+	"github.com/orvix/orvix/internal/support"
 	"github.com/orvix/orvix/internal/tlsmgmt"
 	"github.com/orvix/orvix/internal/trust"
 	"github.com/orvix/orvix/internal/trustmgmt"
@@ -287,12 +288,14 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 	}
 
 	// Wire enterprise admin services (mailbox, org, domain, platform, dashboard).
+	var platformSvc *platformpkg.PlatformService
 	if sqlDB, err := db.DB(); err == nil {
 		auditExtendedStore := auditpkg.NewExtendedStore(sqlDB)
 		if err := auditExtendedStore.EnsureTable(context.Background()); err != nil {
 			logger.Error("enterprise admin audit initialization failed; mutation services disabled", zap.Error(err))
 		} else {
 			rbacEval := entrbac.NewEvaluator(sqlDB)
+			router.h.SetAuditExtendedStore(auditExtendedStore)
 
 			adminMailboxRepo := mailboxadminsvc.NewAdminMailboxRepo(sqlDB)
 			if eng == nil {
@@ -301,7 +304,8 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 			mailboxAdminSvc := mailboxadminsvc.NewService(adminMailboxRepo, eng.Auth, auditExtendedStore, rbacEval)
 			router.h.SetMailboxAdminService(mailboxAdminSvc)
 			orgRepo := orgadminsvc.NewOrganizationRepo(sqlDB)
-			router.h.SetOrganizationAdminService(orgadminsvc.NewService(orgRepo, auditExtendedStore, rbacEval))
+			orgAdminSvc := orgadminsvc.NewService(orgRepo, auditExtendedStore, rbacEval)
+			router.h.SetOrganizationAdminService(orgAdminSvc)
 
 			domainAdminRepo := domainadminsvc.NewDomainAdminRepo(sqlDB)
 			dkimRepo := dkim.NewSQLRepo(sqlDB)
@@ -393,8 +397,15 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 			dashboardSvc := dashboardsvc.NewDashboardService(sqlDB)
 			router.h.SetDashboardService(dashboardSvc)
 
-			platformSvc := platformpkg.NewPlatformService(sqlDB, auditExtendedStore, rbacEval)
+			platformSvc = platformpkg.NewPlatformService(sqlDB, auditExtendedStore, rbacEval, orgAdminSvc)
 			router.h.SetPlatformAdminService(platformSvc)
+
+			// Support Tickets (FINAL-ENTERPRISE-COMPLETION): shared by
+			// the tenant Support page and the Platform Support Inbox.
+			// Wired unconditionally — the schema migration runs in
+			// MigrateAllRaw / MigrateAllPostgresRaw so the repository
+			// never sees a missing table.
+			router.h.SetSupportRepository(support.NewRepository(sqlDB, router.db))
 
 			// Retention/legal-hold/compliance (Milestone 14) — the
 			// purge target is the REAL mailbox soft-delete lifecycle
@@ -425,6 +436,12 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 			router.h.SetBillingUsageService(usageSvc)
 			router.h.SetBillingQuotaService(quotaSvc)
 			router.h.SetSendEnforcer(enforcer)
+			// PSA-created organizations need the same billing service the
+			// tenant console uses so their subscription initialization is
+			// consistent with self-signup.
+			if billingSvc != nil && platformSvc != nil {
+				platformSvc.SetBillingService(billingSvc)
+			}
 			logger.Info("billing services wired")
 
 			abuseSvc := abuse.NewSignalService(sqlDB, abuse.NewRateLimitService(sqlDB))
@@ -746,9 +763,18 @@ func NewRouter(cfg *config.Config, authenticator *auth.Authenticator, logger *za
 		}
 	}
 
-	// Wire transactional mail sender for password resets.
-	// Uses the CoreMail SMTP host/port when configured.
-	ms := initTransactionalMailSender(cfg.CoreMail.SMTPHost, cfg.CoreMail.SMTPPort, cfg.CoreMail.Hostname, logger)
+	// Wire transactional mail sender for signup OTP, password resets, and
+	// support requests. Prefers authenticated TLS submission when
+	// transactional submission credentials are configured; falls back to
+	// the legacy unauthenticated MX-port path otherwise (see
+	// initTransactionalMailSender for why that path is relay-rejected for
+	// external recipients).
+	ms := initTransactionalMailSender(
+		cfg.CoreMail.SMTPHost, cfg.CoreMail.SMTPPort,
+		cfg.CoreMail.SubmissionHost, cfg.CoreMail.SubmissionPort,
+		cfg.CoreMail.TransactionalSMTPUsername, cfg.CoreMail.TransactionalSMTPPassword,
+		cfg.CoreMail.Hostname, logger,
+	)
 	router.h.SetMailSender(ms)
 
 	if sqlDB, err := db.DB(); err == nil {
@@ -849,6 +875,14 @@ func (r *Router) SetTrustPersistence(ok bool, errMsg string) {
 // mirrors SetQueueEngine/SetTrustService above.
 func (r *Router) SetClusterService(s *cluster.Service) {
 	r.h.SetClusterService(s)
+}
+
+// SetMailSender overrides the router's transactional mail sender — mirrors
+// SetQueueEngine/SetTrustService/SetClusterService above. Primarily for test
+// setups that need a deterministic fake MailSender instead of the real
+// SMTP-dialing sender initTransactionalMailSender wires by default.
+func (r *Router) SetMailSender(m handlers.MailSender) {
+	r.h.SetMailSender(m)
 }
 
 func (r *Router) App() *fiber.App { return r.app }
@@ -1011,23 +1045,76 @@ func (r *Router) setupMiddleware() {
 	// the limit changed.
 }
 
+// csrfBootstrapPath is the one route explicitly exempted from the general
+// API budget below — see apiRateLimitMiddleware's doc comment for why.
+const csrfBootstrapPath = "/api/v1/csrf-token"
+
 // apiRateLimitMiddleware returns the general API rate limiter
 // middleware for the /api/v1 group. It is built once in setupRoutes
 // and mounted only on the API group, so SPA static routes are
 // never counted against the per-IP budget. Credential endpoints get
 // the dedicated multi-dimensional throttle and do NOT also pass
 // through this handler, by mounting order.
+//
+// GET /api/v1/csrf-token is explicitly exempted here. Fiber v3's
+// Group(prefix, middleware) registers that middleware as a
+// prefix-matching USE route (see (*fiber.App).Group -> app.register
+// with methodUse): it matches every request whose path starts with
+// the prefix, regardless of which Router object the final route was
+// added through. Simply registering /api/v1/csrf-token outside the
+// `api` group variable (e.g. directly on r.app) does NOT exempt it,
+// because its path still starts with "/api/v1" and this middleware is
+// still mounted on that whole prefix. The only real way to exempt one
+// path from a prefix-mounted middleware is an explicit check inside
+// the middleware itself, as done here.
+//
+// This exemption exists because /api/v1/csrf-token previously shared
+// this general 100-req/min-per-IP budget with EVERY other /api/v1
+// call. A burst of ordinary API traffic (or one heavy admin/testing
+// session) could exhaust it and then lock every client behind that IP
+// out of ever bootstrapping a fresh CSRF token again until the window
+// rolled over — breaking login and webmail for legitimate traffic, not
+// abuse. Observed live 2026-08-14. csrf-token now relies solely on its
+// own dedicated, isolated budget — see csrfBootstrapRateLimitMiddleware,
+// mounted directly on that route.
 func (r *Router) apiRateLimitMiddleware() fiber.Handler {
+	var inner fiber.Handler
 	if r.redisLimiter != nil {
-		return r.redisLimiter.Middleware()
+		inner = r.redisLimiter.Middleware()
+	} else {
+		// NOTE: Expiration is a time.Duration. The previous literal
+		// `60 * 1000` was 60,000 NANOSECONDS (0.06 ms), so the
+		// no-Redis fallback window expired between consecutive
+		// requests and the general API limiter never actually limited
+		// anything — a silently-open API budget for single-node
+		// deployments. A real 1-minute window is intended.
+		inner = limiter.New(limiter.Config{Max: 100, Expiration: time.Minute})
 	}
-	// NOTE: Expiration is a time.Duration. The previous literal
-	// `60 * 1000` was 60,000 NANOSECONDS (0.06 ms), so the
-	// no-Redis fallback window expired between consecutive
-	// requests and the general API limiter never actually limited
-	// anything — a silently-open API budget for single-node
-	// deployments. A real 1-minute window is intended.
-	return limiter.New(limiter.Config{Max: 100, Expiration: time.Minute})
+	return func(c fiber.Ctx) error {
+		if c.Path() == csrfBootstrapPath {
+			return c.Next()
+		}
+		return inner(c)
+	}
+}
+
+// csrfBootstrapRateLimitMiddleware returns a DEDICATED, generous per-IP
+// budget for GET /api/v1/csrf-token, isolated from both the general API
+// budget (apiRateLimitMiddleware) and every credential-attempt budget
+// (authThrottle/authThrottleIP). Mounted directly on the csrf-token
+// route in place of the general limiter — see RedisRateLimiter.
+// CSRFBootstrapMiddleware's doc comment for why sharing that budget was
+// a real outage risk: a burst of ordinary API traffic could exhaust it
+// and lock every client behind that IP out of ever obtaining a fresh
+// CSRF token. Same fail-open-on-Redis-error behavior as the general
+// limiter (never block login/webmail bootstrap on a Redis outage); the
+// in-memory fallback uses the exact same newUserRateLimiter helper and
+// budget as the Redis path for parity on a single-node deployment.
+func (r *Router) csrfBootstrapRateLimitMiddleware() fiber.Handler {
+	if r.redisLimiter != nil {
+		return r.redisLimiter.CSRFBootstrapMiddleware()
+	}
+	return newUserRateLimiter("ratelimit:csrf", 60, time.Minute, 60, "too many token requests, try again later")
 }
 
 func (r *Router) setupRoutes() {
@@ -1137,6 +1224,20 @@ func (r *Router) setupRoutes() {
 	loginGroup.Post("/forgot-password", r.authThrottle(), r.h.ForgotPassword)
 	loginGroup.Post("/reset-password", r.authThrottleIP(), r.h.ResetPassword)
 
+	// Phase D/E: email-OTP-verified signup (two-step flow). All three
+	// endpoints carry an email in the body, so the full IP+account+combo
+	// throttle applies, same as /auth/signup.
+	loginGroup.Post("/signup/start", r.authThrottle(), r.h.SignupStart)
+	loginGroup.Post("/signup/resend", r.authThrottle(), r.h.SignupResend)
+	loginGroup.Post("/signup/verify", r.authThrottle(), r.h.SignupVerify)
+
+	// Invitation acceptance (public — no auth middleware): the invited
+	// member has no account yet, and for a PSA-created organization the
+	// owner invitation IS the activation credential. The one-time token is
+	// in the body, so the IP budget (authThrottleIP) applies — same class
+	// as MFA verify / password reset.
+	loginGroup.Post("/invitations/accept", r.authThrottleIP(), r.h.AcceptInvitationHTTP)
+
 	// H-6: /admin/login is the admin SPA's form target. It was registered on
 	// the ROOT app, outside the API group, and so carried no limiter at all —
 	// unbounded password guessing against the highest-value accounts on the
@@ -1160,7 +1261,21 @@ func (r *Router) setupRoutes() {
 	// protected group (otherwise the auth middleware returns 401 and the
 	// login page can never obtain a double-submit CSRF token).
 	//
-	// Security posture:
+	// Registered on r.app directly (full path), NOT via the `api` group,
+	// for the same reason /admin/login is above: the `api` group carries
+	// apiRateLimitMiddleware()'s general 100-req/min-per-IP budget shared
+	// by every /api/v1 route. Every ordinary page load/reload — plus every
+	// automatic 403-retry-with-fresh-token on a mutation — calls this
+	// endpoint, so that shared budget meant a burst of ordinary API
+	// traffic from one client IP could exhaust it and lock every user
+	// behind that IP out of ever obtaining a CSRF token again until the
+	// window rolled over: a full login/webmail outage caused by
+	// legitimate traffic, observed live on 2026-08-14. This route now
+	// gets its own dedicated, generous, isolated budget instead — see
+	// csrfBootstrapRateLimitMiddleware / RedisRateLimiter.
+	// CSRFBootstrapMiddleware.
+	//
+	// Security posture (unchanged from before this move):
 	//   - Reuses the existing CSRFManager.GenerateToken (random token stored
 	//     as a SHA-256 hash + double-submit cookie). CSRF validation is
 	//     unchanged and never weakened.
@@ -1173,7 +1288,7 @@ func (r *Router) setupRoutes() {
 	//     token to a different user.
 	//   - The response body contains only the CSRF token; no user, tenant,
 	//     or session data is ever included.
-	api.Get("/csrf-token", func(c fiber.Ctx) error {
+	r.app.Get("/api/v1/csrf-token", r.csrfBootstrapRateLimitMiddleware(), func(c fiber.Ctx) error {
 		if origin := c.Get("Origin"); origin != "" && !r.isAllowedOrigin(origin) {
 			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
 				"error": "origin not allowed",
@@ -1207,6 +1322,12 @@ func (r *Router) setupRoutes() {
 	// Support requests: dedicated rate limit — 5 requests per 10 minutes per user.
 	supportLimiter := newUserRateLimiter("support_req", 5, 10*time.Minute, 600, "too many support requests, please try again later")
 	protected.Post("/account/support-requests", supportLimiter, r.h.SubmitSupportRequest)
+	// Tenant-side ticket history: list / detail / reply on own tickets.
+	// Tenant isolation is enforced in the handlers via tenant_id from
+	// the JWT (never from the request body or URL).
+	protected.Get("/account/support-requests", r.h.ListOwnSupportRequests)
+	protected.Get("/account/support-requests/:ref", r.h.GetOwnSupportRequest)
+	protected.Post("/account/support-requests/:ref/reply", supportLimiter, r.h.ReplyOnOwnSupportRequest)
 	// MFA: dedicated per-user rate limit — 10 attempts per 15 minutes.
 	mfaLimiter := newUserRateLimiter("mfa_req", 10, 15*time.Minute, 900, "too many MFA attempts, please try again later")
 	protected.Get("/account/mfa/status", r.h.AccountMFAStatus)
@@ -1359,9 +1480,12 @@ func (r *Router) setupRoutes() {
 	// Enterprise customer administration (tenant-scoped, CSRF-protected).
 	// All operations are scoped to the caller's tenant_id.
 	//
-	// GET routes (enterpriseRead): any authenticated user with valid tenant
-	// context. RoleUser (signup-created owner), RoleBilling, RoleReadOnly,
-	// RoleOperator, RoleAdmin, and RoleSuperAdmin all have dashboard read.
+	// GET routes (enterpriseRead): role-gated to the canonical tenant
+	// administration family (tenant_admin, tenant_operator,
+	// tenant_support, tenant_readonly) with valid tenant context. RoleUser
+	// (per-mailbox webmail end-user) and RoleBilling (unsupported billing
+	// persona) are denied the entire console — reads of domains, mailboxes
+	// and members are still Organization administration surface.
 	//
 	// POST/PATCH/DELETE routes: each capability group has its own exact
 	// permission guard. A caller with domains.write cannot reach mailbox
@@ -1422,25 +1546,43 @@ func (r *Router) setupRoutes() {
 	// read_only grant for platform actors.
 	protected.Get("/enterprise/organizations/current", r.h.SupportAccessMiddlewareForScope("read_only"), r.csrf.Middleware(), r.h.GetCurrentOrganization)
 
+	// The /enterprise/* group IS the customer Organization Admin console.
+	// It is role-gated to the canonical tenant administration family
+	// (tenant_admin, tenant_operator, tenant_support, tenant_readonly) —
+	// the same family tenantCompatMW admits. RoleUser (per-mailbox webmail
+	// end-user) and RoleBilling (unsupported billing-only persona) must
+	// NOT reach any of these endpoints, even read-only ones: reads of
+	// domains/mailboxes/members are still Organization administration
+	// surface. Per-route authrbac.Require(...) gates below decide read vs
+	// write within the family; this gate keeps non-administrative roles
+	// entirely out of the console.
 	enterpriseRead := protected.Group("/enterprise",
+		auth.RequireAnyRole(auth.RoleTenantAdmin, auth.RoleTenantOperator, auth.RoleTenantSupport, auth.RoleTenantReadOnly),
 		requireTenantContext,
 		r.csrf.Middleware(),
 		requireTenantActive,
 	)
 
-	// Per-capability write guards: each guards only its own resource.
-	canWriteDomains := enterpriseRead.Group("", authrbac.Require(authrbac.PermDomainsWrite))
-	canWriteMailboxes := enterpriseRead.Group("", authrbac.Require(authrbac.PermMailboxesWrite))
-	canWriteOrgs := enterpriseRead.Group("", authrbac.Require(authrbac.PermOrganizationsWrite))
-	canWriteUsers := enterpriseRead.Group("", authrbac.Require(authrbac.PermUsersWrite))
-	canWriteInvitations := enterpriseRead.Group("", authrbac.Require(authrbac.PermInvitationsWrite))
-	canTransferOwnership := enterpriseRead.Group("", authrbac.Require(authrbac.PermOwnershipTransfer))
-	canWriteAPIKeys := enterpriseRead.Group("", authrbac.Require(authrbac.PermAPIKeysWrite))
-	canWriteBilling := enterpriseRead.Group("", authrbac.Require(authrbac.PermBillingWrite))
-	canWriteAliases := enterpriseRead.Group("", authrbac.Require(authrbac.PermAliasesWrite))
-	canWriteGroups := enterpriseRead.Group("", authrbac.Require(authrbac.PermGroupsWrite))
-	canWriteImports := enterpriseRead.Group("", authrbac.Require(authrbac.PermImportsWrite))
-	canExecuteImports := enterpriseRead.Group("", authrbac.Require(authrbac.PermImportsExecute))
+	// Per-capability write guards. IMPORTANT: these are plain middleware
+	// handlers applied PER ROUTE, NOT empty-prefix Group("") objects —
+	// Fiber v3 merges middleware across empty-prefix groups registered on
+	// the same parent (documented in the /protected block below), which
+	// would flatten every write gate onto every route of the console and
+	// deny tenant_operator/tenant_support/tenant_readonly even read-only
+	// access. The per-route slice pattern is the same one tenantCompatMW
+	// uses; it must not drift back to Group("").
+	canWriteDomains := authrbac.Require(authrbac.PermDomainsWrite)
+	canWriteMailboxes := authrbac.Require(authrbac.PermMailboxesWrite)
+	canWriteOrgs := authrbac.Require(authrbac.PermOrganizationsWrite)
+	canWriteUsers := authrbac.Require(authrbac.PermUsersWrite)
+	canWriteInvitations := authrbac.Require(authrbac.PermInvitationsWrite)
+	canTransferOwnership := authrbac.Require(authrbac.PermOwnershipTransfer)
+	canWriteAPIKeys := authrbac.Require(authrbac.PermAPIKeysWrite)
+	canWriteBilling := authrbac.Require(authrbac.PermBillingWrite)
+	canWriteAliases := authrbac.Require(authrbac.PermAliasesWrite)
+	canWriteGroups := authrbac.Require(authrbac.PermGroupsWrite)
+	canWriteImports := authrbac.Require(authrbac.PermImportsWrite)
+	canExecuteImports := authrbac.Require(authrbac.PermImportsExecute)
 
 	// ── Dashboard ──
 	enterpriseRead.Get("/dashboard", r.h.CustomerDashboard)
@@ -1448,57 +1590,57 @@ func (r *Router) setupRoutes() {
 	// ── Domains ──
 	enterpriseRead.Get("/domains", r.h.ListAdminDomains)
 	enterpriseRead.Get("/domains/:id", r.h.GetAdminDomain)
-	canWriteDomains.Post("/domains", r.h.CreateAdminDomain)
-	canWriteDomains.Patch("/domains/:id", r.h.UpdateAdminDomain)
-	canWriteDomains.Post("/domains/:id/status", r.h.SetAdminDomainStatus)
-	canWriteDomains.Delete("/domains/:id", r.h.DeleteAdminDomain)
+	enterpriseRead.Post("/domains", canWriteDomains, r.h.CreateAdminDomain)
+	enterpriseRead.Patch("/domains/:id", canWriteDomains, r.h.UpdateAdminDomain)
+	enterpriseRead.Post("/domains/:id/status", canWriteDomains, r.h.SetAdminDomainStatus)
+	enterpriseRead.Delete("/domains/:id", canWriteDomains, r.h.DeleteAdminDomain)
 	enterpriseRead.Get("/domains/:id/dkim", r.h.GetAdminDomainDKIM)
-	canWriteDomains.Post("/domains/:id/dkim/generate", r.h.PostAdminDomainDKIMGenerate)
-	canWriteDomains.Post("/domains/:id/dkim/rotate", r.h.PostAdminDomainDKIMRotate)
-	canWriteDomains.Post("/domains/:id/dkim/revoke", r.h.PostAdminDomainDKIMRevoke)
+	enterpriseRead.Post("/domains/:id/dkim/generate", canWriteDomains, r.h.PostAdminDomainDKIMGenerate)
+	enterpriseRead.Post("/domains/:id/dkim/rotate", canWriteDomains, r.h.PostAdminDomainDKIMRotate)
+	enterpriseRead.Post("/domains/:id/dkim/revoke", canWriteDomains, r.h.PostAdminDomainDKIMRevoke)
 	enterpriseRead.Get("/domains/:id/dkim/history", r.h.GetAdminDomainDKIMHistory)
 	enterpriseRead.Get("/domains/:id/tls", r.h.GetAdminDomainTLSStatus)
 	enterpriseRead.Get("/domains/:id/mail-access-mode", r.h.GetAdminDomainMailAccessMode)
-	canWriteDomains.Post("/domains/:id/mail-access-mode", r.h.PostAdminDomainMailAccessMode)
+	enterpriseRead.Post("/domains/:id/mail-access-mode", canWriteDomains, r.h.PostAdminDomainMailAccessMode)
 	enterpriseRead.Post("/domains/:id/verify", r.h.VerifyEnterpriseDomain)
 	enterpriseRead.Get("/domains/:id/dns", r.h.GetEnterpriseDomainDNS)
-	canWriteDomains.Post("/domains/:id/dns/verify", r.h.VerifyEnterpriseDomainDNS)
+	enterpriseRead.Post("/domains/:id/dns/verify", canWriteDomains, r.h.VerifyEnterpriseDomainDNS)
 
 	// ── Mailboxes ──
 	enterpriseRead.Get("/mailboxes", r.h.ListAdminMailboxes)
 	enterpriseRead.Get("/mailboxes/:id", r.h.GetAdminMailbox)
-	canWriteMailboxes.Post("/mailboxes", r.h.CreateAdminMailbox)
-	canWriteMailboxes.Patch("/mailboxes/:id", r.h.UpdateAdminMailbox)
-	canWriteMailboxes.Post("/mailboxes/:id/status", r.h.SetAdminMailboxStatus)
-	canWriteMailboxes.Post("/mailboxes/bulk/status", r.h.BulkSetAdminMailboxStatus)
-	canWriteMailboxes.Post("/mailboxes/:id/reset-password", r.h.ResetAdminMailboxPassword)
-	canWriteMailboxes.Delete("/mailboxes/:id", r.h.DeleteMailbox)
-	canWriteMailboxes.Post("/mailboxes/:id/restore", r.h.PostAdminMailboxRestore)
-	canWriteMailboxes.Delete("/mailboxes/:id/purge", r.h.DeleteAdminMailboxPurge)
+	enterpriseRead.Post("/mailboxes", canWriteMailboxes, r.h.CreateAdminMailbox)
+	enterpriseRead.Patch("/mailboxes/:id", canWriteMailboxes, r.h.UpdateAdminMailbox)
+	enterpriseRead.Post("/mailboxes/:id/status", canWriteMailboxes, r.h.SetAdminMailboxStatus)
+	enterpriseRead.Post("/mailboxes/bulk/status", canWriteMailboxes, r.h.BulkSetAdminMailboxStatus)
+	enterpriseRead.Post("/mailboxes/:id/reset-password", canWriteMailboxes, r.h.ResetAdminMailboxPassword)
+	enterpriseRead.Delete("/mailboxes/:id", canWriteMailboxes, r.h.DeleteMailbox)
+	enterpriseRead.Post("/mailboxes/:id/restore", canWriteMailboxes, r.h.PostAdminMailboxRestore)
+	enterpriseRead.Delete("/mailboxes/:id/purge", canWriteMailboxes, r.h.DeleteAdminMailboxPurge)
 
 	// ── Bulk mailbox provisioning (Milestone 6) ──
-	canWriteMailboxes.Post("/domains/:id/mailboxes/bulk/validate", r.h.PostBulkProvisionValidate)
-	canWriteMailboxes.Post("/domains/:id/mailboxes/bulk/jobs", r.h.PostBulkProvisionCreateJob)
+	enterpriseRead.Post("/domains/:id/mailboxes/bulk/validate", canWriteMailboxes, r.h.PostBulkProvisionValidate)
+	enterpriseRead.Post("/domains/:id/mailboxes/bulk/jobs", canWriteMailboxes, r.h.PostBulkProvisionCreateJob)
 	enterpriseRead.Get("/mailboxes/bulk/jobs/:jobId", r.h.GetBulkProvisionJob)
-	canWriteMailboxes.Post("/mailboxes/bulk/jobs/:jobId/execute", r.h.PostBulkProvisionExecute)
-	canWriteMailboxes.Post("/mailboxes/bulk/jobs/:jobId/cancel", r.h.PostBulkProvisionCancel)
-	canWriteMailboxes.Post("/mailboxes/bulk/jobs/:jobId/retry", r.h.PostBulkProvisionRetry)
+	enterpriseRead.Post("/mailboxes/bulk/jobs/:jobId/execute", canWriteMailboxes, r.h.PostBulkProvisionExecute)
+	enterpriseRead.Post("/mailboxes/bulk/jobs/:jobId/cancel", canWriteMailboxes, r.h.PostBulkProvisionCancel)
+	enterpriseRead.Post("/mailboxes/bulk/jobs/:jobId/retry", canWriteMailboxes, r.h.PostBulkProvisionRetry)
 
 	// ── Outbound relay control plane (Milestone 7) ──
-	canWriteDomains.Post("/relay/pools", r.h.PostRelayPool)
-	canWriteDomains.Post("/relay/providers", r.h.PostRelayProvider)
+	enterpriseRead.Post("/relay/pools", canWriteDomains, r.h.PostRelayPool)
+	enterpriseRead.Post("/relay/providers", canWriteDomains, r.h.PostRelayProvider)
 	enterpriseRead.Get("/relay/pools/:id/providers", r.h.GetRelayPoolProviders)
-	canWriteDomains.Post("/relay/providers/:id/test", r.h.PostRelayProviderTest)
-	canWriteDomains.Post("/relay/routing-rules", r.h.PostRelayRoutingRule)
-	canWriteDomains.Post("/relay/emergency-override", r.h.PostRelayEmergencyOverride)
-	canWriteDomains.Delete("/relay/emergency-override/:id", r.h.DeleteRelayEmergencyOverride)
+	enterpriseRead.Post("/relay/providers/:id/test", canWriteDomains, r.h.PostRelayProviderTest)
+	enterpriseRead.Post("/relay/routing-rules", canWriteDomains, r.h.PostRelayRoutingRule)
+	enterpriseRead.Post("/relay/emergency-override", canWriteDomains, r.h.PostRelayEmergencyOverride)
+	enterpriseRead.Delete("/relay/emergency-override/:id", canWriteDomains, r.h.DeleteRelayEmergencyOverride)
 
 	// ── Cluster control plane (Milestone 10) ──
 	enterpriseRead.Get("/cluster/nodes", r.h.GetClusterNodes)
-	canWriteDomains.Post("/cluster/nodes/:id/cordon", r.h.PostClusterNodeCordon)
-	canWriteDomains.Post("/cluster/nodes/:id/uncordon", r.h.PostClusterNodeUncordon)
-	canWriteDomains.Post("/cluster/nodes/:id/drain", r.h.PostClusterNodeDrain)
-	canWriteDomains.Post("/cluster/nodes/:id/resume", r.h.PostClusterNodeResume)
+	enterpriseRead.Post("/cluster/nodes/:id/cordon", canWriteDomains, r.h.PostClusterNodeCordon)
+	enterpriseRead.Post("/cluster/nodes/:id/uncordon", canWriteDomains, r.h.PostClusterNodeUncordon)
+	enterpriseRead.Post("/cluster/nodes/:id/drain", canWriteDomains, r.h.PostClusterNodeDrain)
+	enterpriseRead.Post("/cluster/nodes/:id/resume", canWriteDomains, r.h.PostClusterNodeResume)
 
 	// ── Organizations ──
 	enterpriseRead.Get("/organizations/:id", r.h.GetOrganization)
@@ -1510,73 +1652,75 @@ func (r *Router) setupRoutes() {
 
 	// ── Invitations ──
 	enterpriseRead.Get("/invitations", r.h.ListInvitations)
-	canWriteInvitations.Post("/invitations", r.h.CreateInvitation)
-	canWriteInvitations.Post("/invitations/:id/revoke", r.h.RevokeInvitation)
+	enterpriseRead.Post("/invitations", canWriteInvitations, r.h.CreateInvitation)
+	enterpriseRead.Post("/invitations/:id/revoke", canWriteInvitations, r.h.RevokeInvitation)
+	enterpriseRead.Post("/invitations/:id/resend", canWriteInvitations, r.h.ResendInvitation)
 
 	// ── Members ──
 	enterpriseRead.Get("/members", r.h.ListMembers)
-	canWriteUsers.Patch("/members/:id/role", r.h.UpdateMemberRole)
-	canWriteUsers.Delete("/members/:id", r.h.RemoveMember)
+	enterpriseRead.Patch("/members/:id/role", canWriteUsers, r.h.UpdateMemberRole)
+	enterpriseRead.Delete("/members/:id", canWriteUsers, r.h.RemoveMember)
 
 	// ── Ownership ──
-	canTransferOwnership.Post("/ownership/request", r.h.RequestOwnershipTransfer)
-	canTransferOwnership.Post("/ownership/accept", r.h.AcceptOwnershipTransfer)
-	canTransferOwnership.Post("/ownership/cancel", r.h.CancelOwnershipTransfer)
+	enterpriseRead.Post("/ownership/request", canTransferOwnership, r.h.RequestOwnershipTransfer)
+	enterpriseRead.Post("/ownership/accept", canTransferOwnership, r.h.AcceptOwnershipTransfer)
+	enterpriseRead.Post("/ownership/cancel", canTransferOwnership, r.h.CancelOwnershipTransfer)
 
 	// ── Aliases ──
 	enterpriseRead.Get("/aliases", r.h.ListAliases)
-	canWriteAliases.Post("/aliases", r.h.CreateAlias)
-	canWriteAliases.Delete("/aliases/:id", r.h.DeleteAlias)
+	enterpriseRead.Post("/aliases", canWriteAliases, r.h.CreateAlias)
+	enterpriseRead.Delete("/aliases/:id", canWriteAliases, r.h.DeleteAlias)
 
 	// ── Groups ──
 	enterpriseRead.Get("/groups", r.h.ListGroups)
-	canWriteGroups.Post("/groups", r.h.CreateGroup)
-	canWriteGroups.Post("/groups/:id/members", r.h.AddGroupMember)
-	canWriteGroups.Delete("/groups/:id/members/:memberId", r.h.RemoveGroupMember)
-	canWriteGroups.Delete("/groups/:id", r.h.DeleteGroup)
+	enterpriseRead.Post("/groups", canWriteGroups, r.h.CreateGroup)
+	enterpriseRead.Post("/groups/:id/members", canWriteGroups, r.h.AddGroupMember)
+	enterpriseRead.Delete("/groups/:id/members/:memberId", canWriteGroups, r.h.RemoveGroupMember)
+	enterpriseRead.Delete("/groups/:id", canWriteGroups, r.h.DeleteGroup)
 
 	// ── Abuse ──
 	enterpriseRead.Get("/abuse/send-limit", r.h.CheckSendLimit)
 	enterpriseRead.Get("/abuse/signals", r.h.ListAbuseSignals)
-	canWriteUsers.Post("/abuse/signals/:id/acknowledge", r.h.AcknowledgeAbuseSignal)
-	canWriteUsers.Post("/abuse/signals/:id/resolve", r.h.ResolveAbuseSignal)
+	enterpriseRead.Post("/abuse/signals/:id/acknowledge", canWriteUsers, r.h.AcknowledgeAbuseSignal)
+	enterpriseRead.Post("/abuse/signals/:id/resolve", canWriteUsers, r.h.ResolveAbuseSignal)
 
 	// ── Account Status ──
 	enterpriseRead.Get("/status", r.h.SuspensionStatus)
-	canWriteOrgs.Post("/deletion", r.h.RequestDeletion)
-	canWriteOrgs.Post("/deletion/cancel", r.h.CancelDeletion)
+	enterpriseRead.Post("/deletion", canWriteOrgs, r.h.RequestDeletion)
+	enterpriseRead.Post("/deletion/cancel", canWriteOrgs, r.h.CancelDeletion)
 
 	// ── Billing ──
 	enterpriseRead.Get("/billing/subscription", r.h.GetBillingSubscription)
+	enterpriseRead.Get("/billing/state", r.h.GetBillingState)
 	enterpriseRead.Get("/billing/usage", r.h.GetBillingUsage)
 	enterpriseRead.Get("/billing/quota", r.h.CheckBillingQuota)
-	canWriteBilling.Post("/billing/subscription", r.h.CreateBillingSubscription)
+	enterpriseRead.Post("/billing/subscription", canWriteBilling, r.h.CreateBillingSubscription)
 	enterpriseRead.Get("/billing/invoices", r.h.ListCustomerInvoices)
 	enterpriseRead.Get("/billing/invoices/:id", r.h.GetCustomerInvoice)
 
 	// ── API Keys ──
 	enterpriseRead.Get("/api-keys", r.h.ListEnterpriseAPIKeys)
-	canWriteAPIKeys.Post("/api-keys", r.h.CreateEnterpriseAPIKey)
-	canWriteAPIKeys.Post("/api-keys/:id/rotate", r.h.RotateEnterpriseAPIKey)
-	canWriteAPIKeys.Delete("/api-keys/:id", r.h.DeleteEnterpriseAPIKey)
+	enterpriseRead.Post("/api-keys", canWriteAPIKeys, r.h.CreateEnterpriseAPIKey)
+	enterpriseRead.Post("/api-keys/:id/rotate", canWriteAPIKeys, r.h.RotateEnterpriseAPIKey)
+	enterpriseRead.Delete("/api-keys/:id", canWriteAPIKeys, r.h.DeleteEnterpriseAPIKey)
 
 	// ── Audit Logs ──
 	enterpriseRead.Get("/audit/logs", r.h.ListEnterpriseAuditLogs)
 
 	// ── Sessions ──
 	enterpriseRead.Get("/sessions", r.h.ListAccountSessions)
-	canWriteUsers.Post("/sessions/:id/revoke", r.h.RevokeAccountSession)
+	enterpriseRead.Post("/sessions/:id/revoke", canWriteUsers, r.h.RevokeAccountSession)
 
 	// ── Imports ──
 	enterpriseRead.Get("/imports", r.h.ListImports)
 	enterpriseRead.Get("/imports/:id", r.h.GetImport)
 	enterpriseRead.Get("/imports/:id/report", r.h.GetImportReport)
-	canWriteImports.Post("/imports", r.h.CreateImport)
-	canWriteImports.Post("/imports/:id/validate", r.h.ValidateImport)
-	canExecuteImports.Post("/imports/:id/execute", r.h.ExecuteImport)
-	canExecuteImports.Post("/imports/:id/resume", r.h.ResumeImport)
-	canExecuteImports.Post("/imports/:id/cancel", r.h.CancelImport)
-	canExecuteImports.Post("/imports/:id/compensate", r.h.CompensateImport)
+	enterpriseRead.Post("/imports", canWriteImports, r.h.CreateImport)
+	enterpriseRead.Post("/imports/:id/validate", canWriteImports, r.h.ValidateImport)
+	enterpriseRead.Post("/imports/:id/execute", canExecuteImports, r.h.ExecuteImport)
+	enterpriseRead.Post("/imports/:id/resume", canExecuteImports, r.h.ResumeImport)
+	enterpriseRead.Post("/imports/:id/cancel", canExecuteImports, r.h.CancelImport)
+	enterpriseRead.Post("/imports/:id/compensate", canExecuteImports, r.h.CompensateImport)
 
 	// CSRF is enforced on the entire admin group by default (deny-list,
 	// not allow-list) rather than only on routes an author remembered to
@@ -1891,11 +2035,18 @@ func (r *Router) setupRoutes() {
 	// These routes operate on all tenants and require explicit
 	// platform-level authorization — not just tenant membership.
 	protected.Get("/platform/dashboard", platformMW[0], platformMW[1], r.h.PlatformDashboard)
+	protected.Post("/platform/organizations", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermPlatformOrganizationsWrite), r.h.CreatePlatformOrganization)
 	protected.Get("/platform/organizations", platformMW[0], platformMW[1], r.h.ListPlatformOrganizations)
 	protected.Get("/platform/organizations/:id", platformMW[0], platformMW[1], r.h.GetPlatformOrganization)
 	protected.Patch("/platform/organizations/:id", platformMW[0], platformMW[1], r.h.UpdateOrganization)
 	protected.Post("/platform/organizations/:id/active", platformMW[0], platformMW[1], r.h.SetOrganizationActive)
 	protected.Get("/platform/organizations/:id/detail", platformMW[0], platformMW[1], r.h.GetOrganizationDetail)
+	// Phase G: safe organization deletion lifecycle — schedules deletion
+	// (30-day retention, soft state transition) rather than deleting
+	// anything immediately. Gated the same as every other platform/organizations
+	// route (platform admin auth), plus its own dependency/confirmation
+	// checks in the handler/service.
+	protected.Post("/platform/organizations/:id/deletion", platformMW[0], platformMW[1], r.h.PlatformScheduleOrganizationDeletion)
 
 	// ── Disaster Recovery (Milestone 13) — coordinated backup/restore
 	// on top of the existing internal/backup mechanics and restorecoord
@@ -1946,6 +2097,16 @@ func (r *Router) setupRoutes() {
 	protected.Post("/platform/support/grants/:id/activate", platformMW[0], platformMW[1], r.h.ActivateSupportAccessGrant)
 	protected.Post("/platform/support/grants/:id/revoke", platformMW[0], platformMW[1], r.h.RevokeSupportAccessGrant)
 
+	// ── Platform Support Inbox (FINAL-ENTERPRISE-COMPLETION) ───────
+	// Distinct from /platform/support/grants (Support Access). The
+	// ticket inbox is the read-write view of every tenant support
+	// ticket; /grants is the audit-scoped, time-boxed tenant access
+	// mechanism the inbox does NOT depend on.
+	protected.Get("/platform/support/tickets", platformMW[0], platformMW[1], r.h.ListPlatformSupportTickets)
+	protected.Get("/platform/support/tickets/:ref", platformMW[0], platformMW[1], r.h.GetPlatformSupportTicket)
+	protected.Post("/platform/support/tickets/:ref/reply", platformMW[0], platformMW[1], r.h.ReplyOnPlatformSupportTicket)
+	protected.Post("/platform/support/tickets/:ref/status", platformMW[0], platformMW[1], r.h.UpdatePlatformSupportTicketStatus)
+
 	// ── Support-access enforcement (Milestone 16) ─────────────────
 	// These routes demonstrate the support-access middleware enforcing
 	// tenant binding, scope, expiry, and revocation for a support
@@ -1980,6 +2141,39 @@ func (r *Router) setupRoutes() {
 	protected.Post("/platform/domains/:tenant_id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermDomainsWrite), r.h.CreatePlatformDomain)
 	protected.Post("/platform/domains/:tenant_id/:id/status", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermDomainsWrite), r.h.SetPlatformDomainStatus)
 	protected.Post("/platform/domains/:tenant_id/:id/mail-access-mode", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermDomainsWrite), r.h.SetPlatformDomainMailAccessMode)
+	// Read-only public DNS/DKIM snapshot for an existing domain, and
+	// the canonical DKIM generate/rotate transaction exposed to the
+	// Platform Super Admin surface (API-contract closure, concerns 2/3).
+	// Registered as literal sub-paths of :id — Fiber's router always
+	// prefers a literal segment match over a param match at the same
+	// position, so these can never be shadowed by GetPlatformDomain's
+	// bare ":id" route regardless of declaration order, but they are
+	// still declared immediately alongside it for readability.
+	protected.Get("/platform/domains/:tenant_id/:id/dns", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermDomainsRead), r.h.GetPlatformDomainDNS)
+	// Read-only live public-DNS verification against the same
+	// canonical requirements .../dns exposes. External DNS lookups
+	// only — never mutates public DNS, DKIM, or the domain. Gated on
+	// the same PermDomainsRead as the read route above (not
+	// PermDomainsWrite): this route performs no write of any kind.
+	protected.Post("/platform/domains/:tenant_id/:id/dns/verify", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermDomainsRead), r.h.VerifyPlatformDomainDNS)
+	protected.Post("/platform/domains/:tenant_id/:id/dkim/generate", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermDomainsWrite), r.h.GeneratePlatformDomainDKIM)
+	protected.Post("/platform/domains/:tenant_id/:id/dkim/rotate", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermDomainsWrite), r.h.RotatePlatformDomainDKIM)
+	protected.Post("/platform/domains/:tenant_id/:id/dkim/revoke", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermDomainsWrite), r.h.RevokePlatformDomainDKIM)
+	// Platform domain lifecycle (Phase 8 production-acceptance
+	// remediation): canonical, audited deactivation/soft-delete. See
+	// platform_domain_lifecycle.go for the full contract.
+	protected.Post("/platform/domains/:tenant_id/:id/deactivate", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermPlatformDomainsDeactivate), r.h.DeactivatePlatformDomain)
+	// Canonical, audited, PERMANENT deleted_at-tombstone delete —
+	// distinct authority from deactivate above. See
+	// platform_domain_lifecycle.go for the full contract (deactivate-
+	// then-delete gate, structured dependency blockers, active-DKIM
+	// purge with history preserved).
+	protected.Post("/platform/domains/:tenant_id/:id/delete", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermPlatformDomainsDelete), r.h.DeletePlatformDomain)
+
+	// Platform user lifecycle (Phase 8 production-acceptance remediation):
+	// canonical, audited, non-self deactivation of another platform-scoped
+	// user account. See platform_user_lifecycle.go for the full contract.
+	protected.Post("/platform/users/:id/deactivate", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermPlatformUsersWrite), r.h.DeactivatePlatformUser)
 
 	// NOTE: GET /platform/mailboxes/bulk/template MUST be registered
 	// before GET /platform/mailboxes/:tenant_id/:id below. Fiber v3
@@ -1997,6 +2191,18 @@ func (r *Router) setupRoutes() {
 	protected.Post("/platform/mailboxes/:tenant_id/:id/quota", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermMailboxesWrite), r.h.SetPlatformMailboxQuota)
 	protected.Post("/platform/mailboxes/:tenant_id/:id/reset-password", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermMailboxesWrite), r.h.ResetPlatformMailboxPassword)
 	protected.Delete("/platform/mailboxes/:tenant_id/:id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermMailboxesWrite), r.h.DeletePlatformMailbox)
+	// ── Audited, read-only mailbox support view (PermPlatformMailboxSupportView) ──
+	// Platform-only: never inherited by any tenant role. The session
+	// model (supportaccess.MailboxViewSession) binds one operator to
+	// one mailbox in one tenant for a bounded window; the platform
+	// operator's own auth cookie/session is never touched by any of
+	// these routes, and the mailbox password is never read.
+	protected.Post("/platform/mailboxes/:tenant_id/:id/support-view", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermPlatformMailboxSupportView), r.h.StartMailboxSupportView)
+	protected.Get("/platform/mailboxes/:tenant_id/:id/support-view/:session_id/folders", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermPlatformMailboxSupportView), r.h.ListMailboxSupportFolders)
+	protected.Get("/platform/mailboxes/:tenant_id/:id/support-view/:session_id/messages", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermPlatformMailboxSupportView), r.h.ListMailboxSupportMessages)
+	protected.Get("/platform/mailboxes/:tenant_id/:id/support-view/:session_id/messages/:message_id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermPlatformMailboxSupportView), r.h.GetMailboxSupportMessage)
+	protected.Get("/platform/mailboxes/:tenant_id/:id/support-view/:session_id/messages/:message_id/attachments/:attachment_id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermPlatformMailboxSupportView), r.h.GetMailboxSupportAttachment)
+	protected.Post("/platform/mailboxes/:tenant_id/:id/support-view/:session_id/end", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermPlatformMailboxSupportView), r.h.EndMailboxSupportView)
 	protected.Post("/platform/mailboxes/:tenant_id/bulk/status", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermMailboxesWrite), r.h.BulkPlatformMailboxStatus)
 
 	// ── Platform bulk mailbox provisioning (Stage 8) ─────────────
@@ -2020,6 +2226,10 @@ func (r *Router) setupRoutes() {
 	protected.Get("/platform/groups/:tenant_id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermGroupsRead), r.h.ListPlatformGroups)
 	protected.Get("/platform/groups/:tenant_id/:id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermGroupsRead), r.h.GetPlatformGroup)
 	protected.Get("/platform/groups/:tenant_id/:id/members", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermGroupsRead), r.h.ListPlatformGroupMembers)
+	protected.Post("/platform/groups/:tenant_id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermGroupsWrite), r.h.CreatePlatformGroup)
+	protected.Delete("/platform/groups/:tenant_id/:id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermGroupsWrite), r.h.DeletePlatformGroup)
+	protected.Post("/platform/groups/:tenant_id/:id/members", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermGroupsWrite), r.h.AddPlatformGroupMember)
+	protected.Delete("/platform/groups/:tenant_id/:id/members/:member_id", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermGroupsWrite), r.h.RemovePlatformGroupMember)
 
 	// Platform suppression + deliverability (Milestone 9 bounded
 	// context; the production service enforces suppression in the real
@@ -2079,6 +2289,7 @@ func (r *Router) setupRoutes() {
 	protected.Post("/platform/automation/jobs/:id/retry", platformMW[0], platformMW[1], authrbac.Require(authrbac.PermJobsWrite), r.h.RetryPlatformAutomationJob)
 
 	// ── Platform billing balances/adjustments (Milestone 15) ───────
+	protected.Get("/platform/billing/tenants/:tenant_id/overview", platformMW[0], platformMW[1], r.h.GetPlatformBillingOverview)
 	protected.Get("/platform/billing/tenants/:tenant_id/balance", platformMW[0], platformMW[1], r.h.GetPlatformBillingBalance)
 	protected.Post("/platform/billing/tenants/:tenant_id/adjustments", platformMW[0], platformMW[1], r.h.PostPlatformBillingAdjustment)
 	protected.Get("/platform/billing/tenants/:tenant_id/adjustments", platformMW[0], platformMW[1], r.h.GetPlatformBillingAdjustments)

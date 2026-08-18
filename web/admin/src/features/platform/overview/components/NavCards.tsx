@@ -4,7 +4,8 @@ export type PlatformNavTarget =
   | "organizations" | "enterprise" | "mail-operations" | "reliability"
   | "platform-security" | "firewall" | "modules" | "platform-configuration" | "health"
   | "platform-domains" | "platform-mailboxes" | "platform-aliases" | "platform-groups"
-  | "platform-relays" | "platform-suppressions" | "platform-deliverability" | "platform-bulk-mailboxes";
+  | "platform-relays" | "platform-suppressions" | "platform-deliverability" | "platform-bulk-mailboxes"
+  | "platform-audit";
 
 const CARDS: { id: PlatformNavTarget; label: string; description: string; icon: typeof Building }[] = [
   { id: "organizations", label: "Organizations", description: "All tenant organizations on this platform", icon: Building },

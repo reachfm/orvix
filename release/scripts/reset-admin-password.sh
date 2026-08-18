@@ -96,7 +96,7 @@ resolve_admin_email() {
         return
     fi
     [ -f "$ORVIX_DB" ] || fail "no admin email supplied and database $ORVIX_DB does not exist"
-    email="$(sqlite3 "$ORVIX_DB" "SELECT email FROM users WHERE role='admin' AND active=1 ORDER BY id LIMIT 1;" 2>/dev/null || true)"
+    email="$(sqlite3 "$ORVIX_DB" "SELECT email FROM users WHERE role IN ('admin','superadmin','platform_super_admin') AND active=1 ORDER BY id LIMIT 1;" 2>/dev/null || true)"
     [ -n "$email" ] || fail "no admin user row found in $ORVIX_DB and no email supplied"
     printf '%s' "$email"
 }
@@ -289,13 +289,17 @@ if not hash_value.startswith(("$2a$", "$2b$", "$2y$", "$5$", "$6$", "$y$")):
 # constrains the update to admin/superadmin rows for the
 # exact email we validated. Without this constraint a
 # typing mistake could reset a non-admin user'\''s password.
+# NOTE: the canonical platform role family (Phase 1 RBAC repair)
+# names the Platform Super Admin role "platform_super_admin";
+# legacy "admin"/"superadmin" roles are kept for compatibility
+# with databases installed before that change.
 conn = sqlite3.connect(db_path)
 try:
     cur = conn.cursor()
     cur.execute(
         "UPDATE users SET password_hash = ?, "
         "updated_at = strftime('\''%Y-%m-%dT%H:%M:%fZ'\'','\''now'\'') "
-        "WHERE email = ? AND role IN ('\''admin'\'', '\''superadmin'\'')",
+        "WHERE email = ? AND role IN ('\''admin'\'', '\''superadmin'\'', '\''platform_super_admin'\'')",
         (hash_value, email),
     )
     rows = cur.rowcount
@@ -418,7 +422,7 @@ esac
 # Confirm the row exists before we stop the service. A typo
 # here would let us silently update zero rows.
 [ -f "$ORVIX_DB" ] || fail "database not found at $ORVIX_DB"
-EXISTING="$(sqlite3 "$ORVIX_DB" "SELECT COUNT(*) FROM users WHERE email='$ADMIN_EMAIL' AND role IN ('admin','superadmin') AND active=1;" 2>/dev/null || echo 0)"
+EXISTING="$(sqlite3 "$ORVIX_DB" "SELECT COUNT(*) FROM users WHERE email='$ADMIN_EMAIL' AND role IN ('admin','superadmin','platform_super_admin') AND active=1;" 2>/dev/null || echo 0)"
 [ "$EXISTING" = "1" ] || fail "no active admin user with email $ADMIN_EMAIL found in $ORVIX_DB (got $EXISTING rows)"
 
 NEW_PASSWORD="$(prompt_password)"

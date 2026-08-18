@@ -157,9 +157,29 @@ func (s *Service) Validate(ctx context.Context, tenantID, domainID uint, domainN
 		return nil, ErrTooManyRows
 	}
 
+	// Canonical domain operability guard (Phase 8 C2-R1). Read-only —
+	// Validate performs no mutation and takes no lock, matching its
+	// documented contract; the authoritative, lock-guarded re-check
+	// happens again at job creation and at every execution/resume/
+	// retry mutation boundary (mailbox.Service.CreateMailbox). This
+	// check exists so a disabled/suspended/locked/unknown/foreign-
+	// tenant domain produces a stable validation-time error instead of
+	// silently reporting every row "valid" against a domain that can
+	// never actually accept them. Reuses domain.StatusError — the
+	// same mapping mailbox creation and DKIM already use — rather
+	// than a new switch.
 	alloc, err := s.mailboxes.ResolveDomainAllocation(ctx, domainName, tenantID)
+	if err == sql.ErrNoRows {
+		return nil, domain.ErrDomainNotFound
+	}
 	if err != nil {
-		return nil, err
+		// Any other error (infrastructure/repository failure) fails
+		// the whole validation operation closed — never silently
+		// represented as an ordinary invalid row.
+		return nil, kernel.Wrap(kernel.ErrCodeInternal, "resolve domain for validation", err)
+	}
+	if statusErr := domain.StatusError(domain.DomainStatus(alloc.Status)); statusErr != nil {
+		return nil, statusErr
 	}
 
 	var accessMode domain.MailAccessMode = domain.MailAccessInternalExternal
@@ -347,6 +367,16 @@ func (s *Service) CreateJob(ctx context.Context, tenantID, domainID, actorID uin
 			if existing, gerr := s.repo.GetJobByIdempotencyKey(ctx, tenantID, idempotencyKey); gerr == nil && existing != nil {
 				return existing, nil
 			}
+		}
+		// A domain-operability rejection (from the guard inside
+		// Repository.CreateJob's own transaction) is a real, typed
+		// error — surface it as-is, never flattened into a generic
+		// INTERNAL_ERROR the caller can't distinguish from a genuine
+		// repository fault.
+		if errors.Is(err, domain.ErrDomainNotFound) || errors.Is(err, domain.ErrDomainDisabled) ||
+			errors.Is(err, domain.ErrDomainSuspended) || errors.Is(err, domain.ErrDomainLocked) ||
+			errors.Is(err, domain.ErrDomainUnavailable) {
+			return nil, err
 		}
 		return nil, kernel.Wrap(kernel.ErrCodeInternal, "create import job", err)
 	}

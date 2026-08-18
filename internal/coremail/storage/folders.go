@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"fmt"
 	"time"
+
+	"github.com/orvix/orvix/internal/dbdialect"
 )
 
 // Folder represents a mail folder (mailbox) in the IMAP hierarchy.
@@ -40,11 +42,29 @@ var _ FolderRepository = (*FolderSQLRepo)(nil)
 
 // FolderSQLRepo implements FolderRepository using database/sql.
 type FolderSQLRepo struct {
-	db *sql.DB
+	db      *sql.DB
+	dialect *dbdialect.Info
 }
 
+// NewFolderSQLRepo constructs the repository and detects the SQL
+// dialect EAGERLY — never lazily inside a transaction (a probe on a
+// single-connection SQLite pool would deadlock the acceptance tx).
 func NewFolderSQLRepo(db *sql.DB) *FolderSQLRepo {
-	return &FolderSQLRepo{db: db}
+	dialect, err := dbdialect.Detect(db)
+	if err != nil {
+		dialect = dbdialect.FromDriver("sqlite")
+	}
+	return &FolderSQLRepo{db: db, dialect: dialect}
+}
+
+// getDialect returns the dialect detected at construction time.
+func (r *FolderSQLRepo) getDialect() *dbdialect.Info {
+	return r.dialect
+}
+
+// qf rewrites ? placeholders to $N for PostgreSQL (no-op on SQLite).
+func (r *FolderSQLRepo) qf(sql string) string {
+	return r.getDialect().Rewrite(sql)
 }
 
 func (r *FolderSQLRepo) exec(tx interface{}) interface {
@@ -68,13 +88,23 @@ func (r *FolderSQLRepo) Create(ctx context.Context, f *Folder, tx interface{}) e
 		f.FolderType = FolderCustom
 	}
 	e := r.exec(tx)
-	res, err := retrySQL(ctx, func() (sql.Result, error) {
-		return e.ExecContext(ctx, `
+	insert := `
 		INSERT INTO coremail_folders (mailbox_id, parent_id, name, path, folder_type, message_count, unread_count, total_size, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			f.MailboxID, f.ParentID, f.Name, f.Path, string(f.FolderType),
-			f.MessageCount, f.UnreadCount, f.TotalSize, f.CreatedAt, f.UpdatedAt,
-		)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	args := []interface{}{
+		f.MailboxID, f.ParentID, f.Name, f.Path, string(f.FolderType),
+		f.MessageCount, f.UnreadCount, f.TotalSize, f.CreatedAt, f.UpdatedAt,
+	}
+	if r.getDialect().IsPostgres() {
+		var id uint
+		if err := e.QueryRowContext(ctx, r.qf(insert)+" RETURNING id", args...).Scan(&id); err != nil {
+			return fmt.Errorf("create folder: %w", err)
+		}
+		f.ID = id
+		return nil
+	}
+	res, err := retrySQL(ctx, func() (sql.Result, error) {
+		return e.ExecContext(ctx, insert, args...)
 	})
 	if err != nil {
 		return fmt.Errorf("create folder: %w", err)
@@ -90,9 +120,9 @@ func (r *FolderSQLRepo) Create(ctx context.Context, f *Folder, tx interface{}) e
 func (r *FolderSQLRepo) GetByID(ctx context.Context, id uint, tx interface{}) (*Folder, error) {
 	e := r.exec(tx)
 	return retrySQL(ctx, func() (*Folder, error) {
-		row := e.QueryRowContext(ctx, `
+		row := e.QueryRowContext(ctx, r.qf(`
 		SELECT id, mailbox_id, parent_id, name, path, folder_type, message_count, unread_count, total_size, created_at, updated_at
-		FROM coremail_folders WHERE id = ?`, id)
+		FROM coremail_folders WHERE id = ?`), id)
 		return scanFolder(row)
 	})
 }
@@ -100,9 +130,9 @@ func (r *FolderSQLRepo) GetByID(ctx context.Context, id uint, tx interface{}) (*
 func (r *FolderSQLRepo) GetByPath(ctx context.Context, mailboxID uint, path string, tx interface{}) (*Folder, error) {
 	e := r.exec(tx)
 	return retrySQL(ctx, func() (*Folder, error) {
-		row := e.QueryRowContext(ctx, `
+		row := e.QueryRowContext(ctx, r.qf(`
 		SELECT id, mailbox_id, parent_id, name, path, folder_type, message_count, unread_count, total_size, created_at, updated_at
-		FROM coremail_folders WHERE mailbox_id = ? AND path = ?`, mailboxID, path)
+		FROM coremail_folders WHERE mailbox_id = ? AND path = ?`), mailboxID, path)
 		return scanFolder(row)
 	})
 }
@@ -115,9 +145,9 @@ func (r *FolderSQLRepo) ListByMailbox(ctx context.Context, mailboxID uint, tx in
 
 func (r *FolderSQLRepo) listByMailboxOnce(ctx context.Context, mailboxID uint, tx interface{}) ([]Folder, error) {
 	e := r.exec(tx)
-	rows, err := e.QueryContext(ctx, `
+	rows, err := e.QueryContext(ctx, r.qf(`
 		SELECT id, mailbox_id, parent_id, name, path, folder_type, message_count, unread_count, total_size, created_at, updated_at
-		FROM coremail_folders WHERE mailbox_id = ? ORDER BY path`, mailboxID)
+		FROM coremail_folders WHERE mailbox_id = ? ORDER BY path`), mailboxID)
 	if err != nil {
 		return nil, err
 	}
@@ -136,37 +166,37 @@ func (r *FolderSQLRepo) listByMailboxOnce(ctx context.Context, mailboxID uint, t
 func (r *FolderSQLRepo) Update(ctx context.Context, f *Folder, tx interface{}) error {
 	f.UpdatedAt = nowFn()
 	e := r.exec(tx)
-	_, err := e.ExecContext(ctx, `
+	_, err := e.ExecContext(ctx, r.qf(`
 		UPDATE coremail_folders SET name=?, folder_type=?, message_count=?, unread_count=?, total_size=?, updated_at=?
-		WHERE id=?`, f.Name, string(f.FolderType), f.MessageCount, f.UnreadCount, f.TotalSize, f.UpdatedAt, f.ID)
+		WHERE id=?`), f.Name, string(f.FolderType), f.MessageCount, f.UnreadCount, f.TotalSize, f.UpdatedAt, f.ID)
 	return err
 }
 
 func (r *FolderSQLRepo) Delete(ctx context.Context, id uint, tx interface{}) error {
 	e := r.exec(tx)
-	_, err := e.ExecContext(ctx, "DELETE FROM coremail_folders WHERE id=?", id)
+	_, err := e.ExecContext(ctx, r.qf("DELETE FROM coremail_folders WHERE id=?"), id)
 	return err
 }
 
 func (r *FolderSQLRepo) Rename(ctx context.Context, id uint, newName string, tx interface{}) error {
 	now := nowFn()
 	e := r.exec(tx)
-	_, err := e.ExecContext(ctx, "UPDATE coremail_folders SET name=?, path=?, updated_at=? WHERE id=?", newName, newName, now, id)
+	_, err := e.ExecContext(ctx, r.qf("UPDATE coremail_folders SET name=?, path=?, updated_at=? WHERE id=?"), newName, newName, now, id)
 	return err
 }
 
 func (r *FolderSQLRepo) Move(ctx context.Context, id uint, newParentID *uint, tx interface{}) error {
 	now := nowFn()
 	e := r.exec(tx)
-	_, err := e.ExecContext(ctx, "UPDATE coremail_folders SET parent_id=?, updated_at=? WHERE id=?", newParentID, now, id)
+	_, err := e.ExecContext(ctx, r.qf("UPDATE coremail_folders SET parent_id=?, updated_at=? WHERE id=?"), newParentID, now, id)
 	return err
 }
 
 func (r *FolderSQLRepo) UpdateCounts(ctx context.Context, id uint, deltaMsg, deltaUnread int, deltaSize int64, tx interface{}) error {
 	e := r.exec(tx)
-	_, err := e.ExecContext(ctx, `
+	_, err := e.ExecContext(ctx, r.qf(`
 		UPDATE coremail_folders SET message_count = message_count + ?, unread_count = unread_count + ?, total_size = total_size + ?
-		WHERE id = ? AND (message_count + ? >= 0)`,
+		WHERE id = ? AND (message_count + ? >= 0)`),
 		deltaMsg, deltaUnread, deltaSize, id, deltaMsg)
 	return err
 }

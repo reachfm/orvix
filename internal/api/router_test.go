@@ -2123,11 +2123,19 @@ func TestAuditLogsReturnsSafeFields(t *testing.T) {
 	defer router.App().Shutdown()
 	token := loginForTest(t, router, "admin@test.local", "TestPassword123!")
 
-	t.Run("audit logs returns JSON array always", func(t *testing.T) {
+	t.Run("audit logs returns entries envelope", func(t *testing.T) {
 		body := getAdminJSON(t, router, token, "/api/v1/audit/logs")
-		var logs []map[string]any
-		if err := json.Unmarshal(body, &logs); err != nil {
-			t.Fatalf("audit logs must be JSON array: %v: %s", err, body)
+		var out struct {
+			Entries []map[string]any `json:"entries"`
+			Total   int64            `json:"total"`
+			Limit   int              `json:"limit"`
+			Offset  int              `json:"offset"`
+		}
+		if err := json.Unmarshal(body, &out); err != nil {
+			t.Fatalf("audit logs must be the {entries,total,limit,offset} envelope: %v: %s", err, body)
+		}
+		if out.Entries == nil {
+			t.Fatal("entries must never be null")
 		}
 	})
 
@@ -2136,20 +2144,29 @@ func TestAuditLogsReturnsSafeFields(t *testing.T) {
 		if err != nil {
 			t.Fatalf("clear audit: %v", err)
 		}
+		_, err = sqlDB.Exec("DELETE FROM orvix_audit")
+		if err != nil {
+			t.Fatalf("clear extended audit: %v", err)
+		}
 		body := getAdminJSON(t, router, token, "/api/v1/audit/logs")
 		if string(body) == "null" {
-			t.Fatalf("audit logs must return [] not null")
+			t.Fatalf("audit logs must return an envelope, not null")
 		}
-		var logs []map[string]any
-		if err := json.Unmarshal(body, &logs); err != nil {
-			t.Fatalf("audit logs must be JSON array: %v: %s", err, body)
+		var out struct {
+			Entries []map[string]any `json:"entries"`
+		}
+		if err := json.Unmarshal(body, &out); err != nil {
+			t.Fatalf("audit logs must be the entries envelope: %v: %s", err, body)
+		}
+		if out.Entries == nil {
+			t.Fatalf("audit logs entries must be [] not null")
 		}
 	})
 
 	t.Run("audit logs does not expose secrets", func(t *testing.T) {
 		_, err := sqlDB.Exec(
-			`INSERT INTO coremail_audit (actor, role, action, target, result, ip, user_agent, timestamp)
-			 VALUES ('user:1', 'admin', 'domain.create', 'domain:example.com', 'success', '127.0.0.1', 'test-agent', ?)`,
+			`INSERT INTO orvix_audit (actor, actor_id, actor_role, tenant_id, action, target, result, ip, user_agent, timestamp)
+			 VALUES ('user:1', 1, 'platform_super_admin', 0, 'domain.create', 'domain:example.com', 'success', '127.0.0.1', 'test-agent', ?)`,
 			time.Now().UTC().Format("2006-01-02 15:04:05"),
 		)
 		if err != nil {
@@ -2161,24 +2178,20 @@ func TestAuditLogsReturnsSafeFields(t *testing.T) {
 				t.Fatalf("audit logs must not expose %s: %s", forbidden, body)
 			}
 		}
-		var logs []map[string]any
-		if err := json.Unmarshal(body, &logs); err != nil {
-			t.Fatalf("audit logs must be JSON array: %v: %s", err, body)
+		var out struct {
+			Entries []map[string]any `json:"entries"`
 		}
-		if len(logs) == 0 {
+		if err := json.Unmarshal(body, &out); err != nil {
+			t.Fatalf("audit logs must be the entries envelope: %v: %s", err, body)
+		}
+		if len(out.Entries) == 0 {
 			t.Fatalf("expected at least one audit log entry")
 		}
-		entry := logs[0]
-		for _, key := range []string{"id", "action", "actor", "target", "result", "timestamp"} {
+		entry := out.Entries[0]
+		for _, key := range []string{"id", "action", "actor", "actor_id", "actor_role", "tenant_id", "target", "result", "timestamp"} {
 			if _, ok := entry[key]; !ok {
 				t.Fatalf("audit log entry must include %s: %v", key, entry)
 			}
-		}
-		if _, ok := entry["ip"]; ok {
-			t.Fatalf("audit log entry must not expose ip field: %v", entry)
-		}
-		if _, ok := entry["userAgent"]; ok {
-			t.Fatalf("audit log entry must not expose userAgent field: %v", entry)
 		}
 	})
 }

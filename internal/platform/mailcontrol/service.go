@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/mail"
 	"strings"
 	"time"
 
@@ -239,7 +240,7 @@ func (s *Service) mapPlatformDomain(ctx context.Context, d admindomain.AdminDoma
 		ID: d.ID, TenantID: tenantID, Name: d.Name, Status: d.Status, Plan: d.Plan,
 		Description: d.Description, MailboxCount: d.MailboxCount, AliasCount: d.AliasCount,
 		DKIMEnabled: d.DKIMEnabled, DKIMSelector: d.DKIMSelector, DMARCEnabled: d.DMARCEnabled,
-		MailAccessMode: string(mode), CreatedAt: d.CreatedAt, UpdatedAt: d.UpdatedAt,
+		MailAccessMode: string(mode), CreatedAt: d.CreatedAt, UpdatedAt: d.UpdatedAt, Version: d.Version,
 	}
 }
 
@@ -278,7 +279,7 @@ func (s *Service) ListDomains(ctx context.Context, f PlatformDomainFilter) (*Pla
 			ID: d.ID, TenantID: f.TenantID, Name: d.Name, Status: d.Status, Plan: d.Plan,
 			Description: d.Description, MailboxCount: d.MailboxCount, AliasCount: d.AliasCount,
 			DKIMEnabled: d.DKIMEnabled, DKIMSelector: d.DKIMSelector, DMARCEnabled: d.DMARCEnabled,
-			MailAccessMode: string(mode), CreatedAt: d.CreatedAt, UpdatedAt: d.UpdatedAt,
+			MailAccessMode: string(mode), CreatedAt: d.CreatedAt, UpdatedAt: d.UpdatedAt, Version: d.Version,
 		})
 	}
 	return &PlatformDomainList{Domains: out, Total: total, Limit: sanitizeLimit(f.Limit), Offset: f.Offset}, nil
@@ -304,8 +305,119 @@ func (s *Service) GetDomain(ctx context.Context, id, tenantID uint) (*PlatformDo
 		ID: d.ID, TenantID: tenantID, Name: d.Name, Status: d.Status, Plan: d.Plan,
 		Description: d.Description, MailboxCount: d.MailboxCount, AliasCount: int(aliases),
 		DKIMEnabled: d.DKIMEnabled, DKIMSelector: d.DKIMSelector, DMARCEnabled: d.DMARCEnabled,
-		MailAccessMode: string(mode), CreatedAt: d.CreatedAt, UpdatedAt: d.UpdatedAt,
+		MailAccessMode: string(mode), CreatedAt: d.CreatedAt, UpdatedAt: d.UpdatedAt, Version: d.Version,
 	}, nil
+}
+
+// GetDomainDNS reads an existing domain's public DKIM configuration
+// (never generating a new key) through the canonical DKIM read path
+// (admindomain.Service.GetDKIM — the same helper the enterprise admin
+// UI uses). DNS requirement records (MX/SPF/DMARC/autoconfig) are NOT
+// built here: they come from the same dnsops generator
+// CreatePlatformDomain uses, which is a handler-level dependency
+// (config/public-IP inputs) — the handler fills DNSRequirements and
+// DNSNextStep into the returned result after calling this method,
+// exactly mirroring how CreateDomain's handler builds them.
+func (s *Service) GetDomainDNS(ctx context.Context, id, tenantID uint) (*PlatformDomainDNSResult, error) {
+	if err := s.requireTenant(tenantID); err != nil {
+		return nil, err
+	}
+	d, err := s.domains.GetDomain(ctx, id, tenantID)
+	if err != nil {
+		if errors.Is(err, admindomain.ErrDomainNotFound) {
+			return nil, kernel.NotFound("domain")
+		}
+		return nil, kernel.Wrap(kernel.ErrCodeInternal, "get platform domain", err)
+	}
+	if d == nil {
+		return nil, kernel.NotFound("domain")
+	}
+
+	out := &PlatformDomainDNSResult{
+		TenantID: tenantID,
+		DomainID: d.ID,
+		Domain:   d.Name,
+		Version:  d.Version,
+		Status:   d.Status,
+	}
+
+	// GetDKIM ONLY reads the existing config and derives the public
+	// key from the stored private key — it never generates a new key
+	// pair. A nil result (no error) means DKIM is honestly not
+	// configured; the response reflects that rather than a
+	// placeholder value.
+	dkimResult, err := s.domains.GetDKIM(ctx, id, tenantID)
+	if err != nil {
+		return nil, kernel.Wrap(kernel.ErrCodeInternal, "read platform domain dkim", err)
+	}
+	if dkimResult != nil {
+		out.DKIMConfigured = true
+		out.DKIMSelector = dkimResult.Selector
+		out.DKIMDNSRecordName = dkimResult.DNSRecordName
+		out.DKIMPublicDNSTxt = dkimResult.PublicDNSTxt
+	}
+	return out, nil
+}
+
+// GenerateOrRotateDKIM exposes the canonical, version-guarded DKIM
+// generate/rotate transaction (admindomain.Service.PlatformDKIMForTenant)
+// to the Platform Super Admin routes. It never creates a second DKIM
+// subsystem — same repository, same key-generation hook, same
+// operability guard, same audit pattern as every other DKIM entry
+// point in the codebase.
+func (s *Service) GenerateOrRotateDKIM(ctx context.Context, id, tenantID uint, selector, confirmRotation string, expectedVersion int, actorID uint) (*PlatformDKIMResult, error) {
+	if err := s.requireTenant(tenantID); err != nil {
+		return nil, err
+	}
+	result, err := s.domains.PlatformDKIMForTenant(ctx, id, tenantID, selector, confirmRotation, expectedVersion)
+	if err != nil {
+		switch {
+		case errors.Is(err, admindomain.ErrDomainNotFound):
+			return nil, kernel.NotFound("domain")
+		case errors.Is(err, admindomain.ErrDKIMAlreadyConfigured):
+			return nil, kernel.Conflict("dkim already configured for domain; confirm rotation to replace it")
+		case errors.Is(err, admindomain.ErrStaleVersion):
+			return nil, kernel.NewError(kernel.ErrCodeConflict, "domain version is no longer current")
+		case errors.Is(err, admindomain.ErrDomainDisabled), errors.Is(err, admindomain.ErrDomainSuspended),
+			errors.Is(err, admindomain.ErrDomainLocked), errors.Is(err, admindomain.ErrDomainDeleted):
+			return nil, kernel.Conflict("domain is not operable")
+		}
+		return nil, kernel.Wrap(kernel.ErrCodeInternal, "generate or rotate platform domain dkim", err)
+	}
+	action := "platform.domain.dkim.generate"
+	if confirmRotation == "rotate-dkim-key" {
+		action = "platform.domain.dkim.rotate"
+	}
+	s.auditRecord(ctx, actorID, action, fmt.Sprintf("domain:%d", id), tenantID, "success", fmt.Sprintf("selector:%s", selector))
+	return &PlatformDKIMResult{
+		Selector:      result.Selector,
+		PublicDNSTxt:  result.PublicDNSTxt,
+		DNSRecordName: result.DNSRecordName,
+		Version:       result.Version,
+	}, nil
+}
+
+// RevokeDKIM disables a domain's DKIM configuration through the
+// production domain service (same transactional revoke path the
+// tenant console uses: config disabled, domain DKIM state cleared,
+// DKIM history entry + audit recorded). Idempotent in the sense that
+// revoking an already-revoked domain reports success with no new
+// mutation; revoking with NO configured DKIM is a stable conflict.
+func (s *Service) RevokeDKIM(ctx context.Context, id, tenantID uint, actorID uint) error {
+	if err := s.requireTenant(tenantID); err != nil {
+		return err
+	}
+	if err := s.domains.RevokeDKIM(ctx, id, tenantID); err != nil {
+		switch {
+		case errors.Is(err, admindomain.ErrDomainNotFound):
+			return kernel.NotFound("domain")
+		case errors.Is(err, admindomain.ErrDKIMNotConfigured):
+			return kernel.Conflict("dkim is not configured for this domain")
+		}
+		return kernel.Wrap(kernel.ErrCodeInternal, "revoke platform domain dkim", err)
+	}
+	s.auditRecord(ctx, actorID, "platform.domain.dkim.revoke", fmt.Sprintf("domain:%d", id), tenantID, "success", "")
+	return nil
 }
 
 // SetDomainStatus applies an allowed lifecycle transition for an
@@ -404,6 +516,7 @@ func (s *Service) CreateMailbox(ctx context.Context, req PlatformCreateMailboxRe
 			QuotaMB: created.Mailbox.QuotaMB, UsedBytes: created.Mailbox.UsedBytes,
 			MailAccessMode:          created.Mailbox.MailAccessMode,
 			EffectiveMailAccessMode: created.Mailbox.EffectiveMailAccessMode,
+			Version:                 created.Mailbox.Version,
 			CreatedAt:               created.Mailbox.CreatedAt, UpdatedAt: created.Mailbox.UpdatedAt,
 		},
 	}, nil
@@ -523,7 +636,7 @@ func (s *Service) projectMailbox(m adminmailbox.AdminMailbox, tenantID uint) Pla
 	return PlatformMailbox{
 		ID: m.ID, TenantID: tenantID, DomainID: m.DomainID, Email: m.Email, Name: m.Name,
 		Status: string(m.Status), IsAdmin: m.IsAdmin, QuotaMB: m.QuotaMB, UsedBytes: m.UsedBytes,
-		MailAccessMode: configured, EffectiveMailAccessMode: effective,
+		MailAccessMode: configured, EffectiveMailAccessMode: effective, Version: m.Version,
 		CreatedAt: m.CreatedAt, UpdatedAt: m.UpdatedAt,
 	}
 }
@@ -547,6 +660,7 @@ func (s *Service) GetMailbox(ctx context.Context, id, tenantID uint) (*PlatformM
 		Status: string(m.Status), IsAdmin: m.IsAdmin, QuotaMB: m.QuotaMB, UsedBytes: m.UsedBytes,
 		MailAccessMode:          m.MailAccessMode,
 		EffectiveMailAccessMode: m.EffectiveMailAccessMode,
+		Version:                 m.Version,
 		CreatedAt:               m.CreatedAt, UpdatedAt: m.UpdatedAt,
 	}, nil
 }
@@ -750,6 +864,103 @@ func (s *Service) ListGroupMembers(ctx context.Context, id, tenantID uint) ([]st
 		}
 	}
 	return s.repo.ListGroupMembers(ctx, id, tenantID)
+}
+
+// ── Group mutations (platform groups CRUD) ─────────────────────────
+
+// CreateGroup provisions a tenant group in the SAME coremail_groups
+// table the tenant self-service Groups page and the importer use — one
+// storage, no platform shadow copy. Name must be non-empty and bounded;
+// a duplicate (tenant_id, name) is a stable conflict.
+func (s *Service) CreateGroup(ctx context.Context, tenantID uint, name, description string, actorID uint) (*PlatformGroup, error) {
+	if err := s.requireTenant(tenantID); err != nil {
+		return nil, err
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil, kernel.ValidationError(map[string]string{"name": "name is required"})
+	}
+	if len(name) > 64 {
+		return nil, kernel.ValidationError(map[string]string{"name": "name must be 64 characters or fewer"})
+	}
+	if len(description) > 500 {
+		return nil, kernel.ValidationError(map[string]string{"description": "description must be 500 characters or fewer"})
+	}
+	g, err := s.repo.CreateGroup(ctx, tenantID, name, strings.TrimSpace(description))
+	if err != nil {
+		if err == ErrGroupExists {
+			return nil, kernel.Conflict("a group with this name already exists in the tenant")
+		}
+		return nil, kernel.Wrap(kernel.ErrCodeInternal, "create platform group", err)
+	}
+	s.auditRecord(ctx, actorID, "platform.group.create", fmt.Sprintf("group:%d name:%s", g.ID, g.Name), tenantID, "success", "")
+	return g, nil
+}
+
+// DeleteGroup soft-deletes a tenant group (deleted_at tombstone, same
+// semantics as the tenant self-service delete). Requires the typed
+// confirmation DELETE-GROUP-<id> — never a one-click destructive
+// action — and is audited.
+func (s *Service) DeleteGroup(ctx context.Context, id, tenantID uint, confirm string, actorID uint) error {
+	if err := s.requireTenant(tenantID); err != nil {
+		return err
+	}
+	if confirm != ConfirmGroupDelete(id) {
+		return ErrInvalidConfirmation
+	}
+	found, err := s.repo.SoftDeleteGroup(ctx, id, tenantID)
+	if err != nil {
+		return kernel.Wrap(kernel.ErrCodeInternal, "delete platform group", err)
+	}
+	if !found {
+		return kernel.NotFound("group")
+	}
+	s.auditRecord(ctx, actorID, "platform.group.delete", fmt.Sprintf("group:%d", id), tenantID, "success", "")
+	return nil
+}
+
+// AddGroupMember adds a member email to a tenant-owned group. The
+// email is validated; a duplicate (group_id, email) is a stable
+// conflict; membership is scoped to the tenant through the group
+// ownership predicate.
+func (s *Service) AddGroupMember(ctx context.Context, groupID, tenantID uint, email string, actorID uint) error {
+	if err := s.requireTenant(tenantID); err != nil {
+		return err
+	}
+	email = strings.TrimSpace(strings.ToLower(email))
+	if _, err := mail.ParseAddress(email); err != nil || email == "" {
+		return kernel.ValidationError(map[string]string{"email": "a valid email address is required"})
+	}
+	if err := s.repo.AddGroupMember(ctx, groupID, tenantID, email); err != nil {
+		switch err {
+		case ErrGroupNotFound:
+			return kernel.NotFound("group")
+		case ErrGroupMemberExists:
+			return kernel.Conflict("this email is already a member of the group")
+		default:
+			return kernel.Wrap(kernel.ErrCodeInternal, "add group member", err)
+		}
+	}
+	s.auditRecord(ctx, actorID, "platform.group.member_add", fmt.Sprintf("group:%d email:%s", groupID, email), tenantID, "success", "")
+	return nil
+}
+
+// RemoveGroupMember removes one member row from a tenant-owned group.
+// The member row is scoped through the group's tenant ownership, so a
+// cross-tenant member id can never be removed.
+func (s *Service) RemoveGroupMember(ctx context.Context, memberID, groupID, tenantID uint, actorID uint) error {
+	if err := s.requireTenant(tenantID); err != nil {
+		return err
+	}
+	found, err := s.repo.RemoveGroupMember(ctx, memberID, groupID, tenantID)
+	if err != nil {
+		return kernel.Wrap(kernel.ErrCodeInternal, "remove group member", err)
+	}
+	if !found {
+		return kernel.NotFound("group member")
+	}
+	s.auditRecord(ctx, actorID, "platform.group.member_remove", fmt.Sprintf("group:%d member:%d", groupID, memberID), tenantID, "success", "")
+	return nil
 }
 
 // ── Bulk mailbox operations ────────────────────────────────────────

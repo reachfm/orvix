@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"testing"
+	"time"
 
 	"github.com/orvix/orvix/internal/audit"
 	_ "modernc.org/sqlite"
@@ -88,5 +89,98 @@ func TestOrganizationMutationRollsBackWhenAuditWriteFails(t *testing.T) {
 	}
 	if count != 0 {
 		t.Fatal("organization mutation committed without its audit record")
+	}
+}
+
+// TestCreateOrganizationWithOwner_AtomicAndOwnerInvitation proves the
+// PSA organization-creation path: org + owner invitation + audit in
+// ONE transaction (audit failure rolls back BOTH rows), the owner
+// invitation is always tenant_admin/pending with a 7-day expiry and a
+// hashed token, and an ownerless request is rejected before any write.
+func TestCreateOrganizationWithOwner_AtomicAndOwnerInvitation(t *testing.T) {
+	db := newOrganizationTestDB(t)
+	// org_invitations is created by the billing package; mirror the
+	// minimal schema the repo writes.
+	if _, err := db.Exec(`CREATE TABLE org_invitations (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		organization_id INTEGER NOT NULL,
+		inviter_id INTEGER NOT NULL,
+		email TEXT NOT NULL,
+		token_hash TEXT NOT NULL,
+		role TEXT NOT NULL DEFAULT 'user',
+		status TEXT NOT NULL DEFAULT 'pending',
+		expires_at DATETIME,
+		accepted_at DATETIME,
+		revoked_at DATETIME,
+		created_at DATETIME,
+		updated_at DATETIME
+	)`); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	svc := NewService(NewOrganizationRepo(db), nil, nil)
+
+	// Ownerless creation is rejected before any write.
+	if _, _, _, err := svc.CreateOrganizationWithOwner(ctx, CreateOrganizationRequest{Slug: "ownerless", Name: "Ownerless"}, 0, 7, ""); err == nil {
+		t.Fatal("ownerless PSA organization creation must be rejected")
+	}
+	var count int
+	_ = db.QueryRow(`SELECT COUNT(*) FROM tenants WHERE slug='ownerless'`).Scan(&count)
+	if count != 0 {
+		t.Fatal("rejected ownerless creation must not leave a tenant row")
+	}
+
+	// Valid creation: org + pending tenant_admin invitation + token.
+	org, inv, rawToken, err := svc.CreateOrganizationWithOwner(ctx, CreateOrganizationRequest{Slug: "acme-psa", Name: "Acme PSA", Domain: "acme.test"}, 0, 42, "owner@acme.test")
+	if err != nil {
+		t.Fatalf("create with owner: %v", err)
+	}
+	if org.ID == 0 || org.Active {
+		t.Fatalf("org must start pending_activation (active=false) with a designated owner invitation: %+v", org)
+	}
+	if inv == nil || inv.OrganizationID != org.ID || inv.Role != "tenant_admin" || inv.Status != InvitationPending {
+		t.Fatalf("owner invitation must be tenant_admin/pending for the org: %+v", inv)
+	}
+	if inv.Email != "owner@acme.test" {
+		t.Fatalf("invitation must target the owner email: %+v", inv.Email)
+	}
+	if rawToken == "" || len(rawToken) < 32 {
+		t.Fatalf("one-time token must be generated: %q", rawToken)
+	}
+	if inv.ExpiresAt.Before(time.Now().UTC().Add(6 * 24 * time.Hour)) {
+		t.Fatalf("owner invitation must carry ~7-day expiry: %v", inv.ExpiresAt)
+	}
+	// Only the hash is persisted — never the raw token.
+	var storedHash string
+	if err := db.QueryRow(`SELECT token_hash FROM org_invitations WHERE id=?`, inv.ID).Scan(&storedHash); err != nil {
+		t.Fatal(err)
+	}
+	if storedHash == rawToken || len(storedHash) != 64 {
+		t.Fatalf("token must be persisted as a 64-char hash, got %q", storedHash)
+	}
+
+	// Duplicate slug → ErrOrganizationExists, even with a different owner.
+	if _, _, _, err := svc.CreateOrganizationWithOwner(ctx, CreateOrganizationRequest{Slug: "acme-psa"}, 0, 43, "other@acme.test"); err != ErrOrganizationExists {
+		t.Fatalf("duplicate slug must be ErrOrganizationExists, got %v", err)
+	}
+
+	// Invalid owner email → rejected.
+	if _, _, _, err := svc.CreateOrganizationWithOwner(ctx, CreateOrganizationRequest{Slug: "bad-owner"}, 0, 44, "not-an-email"); err == nil {
+		t.Fatal("invalid owner email must be rejected")
+	}
+
+	// Atomicity: audit failure rolls back org AND invitation together.
+	db.SetMaxOpenConns(1)
+	svcAudit := NewService(NewOrganizationRepo(db), audit.NewExtendedStore(db), nil)
+	if _, _, _, err := svcAudit.CreateOrganizationWithOwner(ctx, CreateOrganizationRequest{Slug: "rollback-psa", Name: "Rollback"}, 0, 45, "rb@acme.test"); err == nil {
+		t.Fatal("audit failure must fail the owner creation transaction")
+	}
+	_ = db.QueryRow(`SELECT COUNT(*) FROM tenants WHERE slug='rollback-psa'`).Scan(&count)
+	if count != 0 {
+		t.Fatal("tenant row committed without audit")
+	}
+	_ = db.QueryRow(`SELECT COUNT(*) FROM org_invitations WHERE email='rb@acme.test'`).Scan(&count)
+	if count != 0 {
+		t.Fatal("invitation row committed without audit")
 	}
 }

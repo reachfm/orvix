@@ -549,10 +549,16 @@ func TestResetAdminPasswordScriptNeverInterpolatesEmailIntoSQL(t *testing.T) {
 		}
 	}
 
-	// role-in clause — accept unescaped or bash-escaped form.
+	// role-in clause — accept unescaped or bash-escaped form. The
+	// canonical platform role family names the Platform Super Admin
+	// "platform_super_admin"; legacy "admin"/"superadmin" are kept for
+	// pre-RBAC-repair databases. Any variant must list at least the
+	// legacy pair (never a bare email-only filter).
 	if !strings.Contains(script, `role IN ('admin', 'superadmin')`) &&
-		!strings.Contains(script, "role IN ('\\''admin'\\'', '\\''superadmin'\\'')") {
-		t.Error("reset script python helper must contain a role IN clause restricting UPDATE to admin/superadmin")
+		!strings.Contains(script, `role IN ('admin', 'superadmin', 'platform_super_admin')`) &&
+		!strings.Contains(script, "role IN ('\\''admin'\\'', '\\''superadmin'\\'')") &&
+		!strings.Contains(script, "role IN ('\\''admin'\\'', '\\''superadmin'\\'', '\\''platform_super_admin'\\'')") {
+		t.Error("reset script python helper must contain a role IN clause restricting UPDATE to admin/superadmin/platform_super_admin")
 	}
 }
 
@@ -614,8 +620,10 @@ func TestResetAdminPasswordScriptUpdateRestrictedToAdmin(t *testing.T) {
 		}
 	}
 	if !strings.Contains(script, `role IN ('admin', 'superadmin')`) &&
-		!strings.Contains(script, "role IN ('\\''admin'\\'', '\\''superadmin'\\'')") {
-		t.Error("reset script python helper must contain a role IN clause restricting UPDATE to admin/superadmin")
+		!strings.Contains(script, `role IN ('admin', 'superadmin', 'platform_super_admin')`) &&
+		!strings.Contains(script, "role IN ('\\''admin'\\'', '\\''superadmin'\\'')") &&
+		!strings.Contains(script, "role IN ('\\''admin'\\'', '\\''superadmin'\\'', '\\''platform_super_admin'\\'')") {
+		t.Error("reset script python helper must contain a role IN clause restricting UPDATE to admin/superadmin/platform_super_admin")
 	}
 }
 

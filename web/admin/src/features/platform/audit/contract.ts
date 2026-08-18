@@ -23,13 +23,11 @@ export interface AuditEntry {
 export interface ListAuditResponse {
   entries: AuditEntry[];
   total: number;
+  limit: number;
+  offset: number;
 }
 
-export interface AuditExport {
-  id: number;
-  format: "json" | "csv";
-  status: string;
-  filters?: string;
-  created_by: number;
-  created_at: string;
-}
+// GET /audit/logs/export streams a real file (JSON or CSV) built from
+// the SAME canonical store as the list — the response is a Blob, not
+// an audit-record row, so the client downloads it (blob responseType).
+export type AuditExportFormat = "json" | "csv";

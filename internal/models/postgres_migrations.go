@@ -319,6 +319,21 @@ func postgresTables() []string {
 			delivery_error TEXT NOT NULL DEFAULT ''
 		)`,
 
+		// support_ticket_messages — reply thread backing the Platform
+		// Support Inbox. tenant-isolation is enforced in the handler
+		// via the parent ticket's tenant_id; no separate predicate
+		// needed here.
+		`CREATE TABLE IF NOT EXISTS support_ticket_messages (
+			id BIGSERIAL PRIMARY KEY,
+			created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			ticket_id BIGINT NOT NULL,
+			author_user_id BIGINT NOT NULL,
+			author_email TEXT NOT NULL DEFAULT '',
+			author_kind TEXT NOT NULL DEFAULT '',
+			body TEXT NOT NULL DEFAULT ''
+		)`,
+
 		`CREATE TABLE IF NOT EXISTS coremail_audit (
 			id BIGSERIAL PRIMARY KEY,
 			created_at TIMESTAMP NOT NULL DEFAULT NOW(),
@@ -453,6 +468,21 @@ func postgresTables() []string {
 			storage_path TEXT NOT NULL DEFAULT '',
 			cid TEXT NOT NULL DEFAULT '',
 			created_at TIMESTAMP NOT NULL DEFAULT NOW()
+		)`,
+
+		// coremail_delivery_dedup: durable, DB-enforced idempotency
+		// boundary for inbound-to-mailbox delivery (see the SQLite
+		// schema's identical table in internal/coremail/storage/schema.go
+		// for the full rationale). A UNIQUE-constraint violation on
+		// (mailbox_id, dedup_key) means this exact delivery was already
+		// accepted into this mailbox.
+		`CREATE TABLE IF NOT EXISTS coremail_delivery_dedup (
+			id BIGSERIAL PRIMARY KEY,
+			mailbox_id INTEGER NOT NULL,
+			dedup_key TEXT NOT NULL,
+			message_id TEXT NOT NULL,
+			created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			UNIQUE(mailbox_id, dedup_key)
 		)`,
 
 		// --- Queue ---
@@ -613,6 +643,12 @@ func postgresTables() []string {
 			updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
 			deleted_at TIMESTAMP
 		)`,
+		// version/deactivated_at/deactivation_reason: platform domain
+		// deactivation lifecycle. See migrateDomainsLifecycleSchema in
+		// models.go for the full rationale.
+		`ALTER TABLE coremail_domains ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1`,
+		`ALTER TABLE coremail_domains ADD COLUMN IF NOT EXISTS deactivated_at TIMESTAMP`,
+		`ALTER TABLE coremail_domains ADD COLUMN IF NOT EXISTS deactivation_reason TEXT NOT NULL DEFAULT ''`,
 
 		// CoreMail aliases
 		`CREATE TABLE IF NOT EXISTS coremail_aliases (
@@ -1216,6 +1252,18 @@ func postgresColumnAdditions() []string {
 		// validated by internal/auth on every JWT check. The initial
 		// CREATE TABLE was written before this column existed.
 		`ALTER TABLE users ADD COLUMN IF NOT EXISTS token_version INTEGER NOT NULL DEFAULT 0`,
+
+		// FINAL-ENTERPRISE-COMPLETION: support_tickets columns + a new
+		// support_ticket_messages table that backs the Platform Support
+		// Inbox reply thread. The new table is created in the main
+		// CREATE-TABLE block above; here we just add the additive
+		// columns to support_requests.
+		`ALTER TABLE support_requests ADD COLUMN IF NOT EXISTS priority TEXT NOT NULL DEFAULT 'normal'`,
+		`ALTER TABLE support_requests ADD COLUMN IF NOT EXISTS assigned_to_id BIGINT`,
+		`ALTER TABLE support_requests ADD COLUMN IF NOT EXISTS last_reply_at TIMESTAMP`,
+		`ALTER TABLE support_requests ADD COLUMN IF NOT EXISTS last_reply_by TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE support_requests ADD COLUMN IF NOT EXISTS resolved_at TIMESTAMP`,
+		`ALTER TABLE support_requests ADD COLUMN IF NOT EXISTS closed_at TIMESTAMP`,
 	}
 }
 
@@ -1476,6 +1524,8 @@ func postgresIndexes() []string {
 		// Support requests
 		idx("idx_support_requests_tenant", "support_requests", "tenant_id"),
 		idx("idx_support_requests_user", "support_requests", "user_id"),
+		// Support ticket messages (Platform Support Inbox reply thread).
+		idx("idx_support_ticket_messages_ticket_id", "support_ticket_messages", "ticket_id"),
 
 		// User notification preferences
 		idx("idx_user_notif_prefs_user", "user_notification_preferences", "user_id"),

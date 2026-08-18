@@ -69,3 +69,22 @@ export function usagePercent(usedBytes: number | undefined | null, quotaMb: numb
 export function isMailboxStatusWritable(status: string): boolean {
   return MAILBOX_STATUSES.includes(status);
 }
+
+/**
+ * Renders any mail-access mode value, including "inherit" (a real
+ * value the backend can report as configured/effective even though
+ * the platform creation and access-mode routes never let an operator
+ * SET it explicitly).
+ */
+export function mailAccessModeLabel(mode: string): string {
+  switch (mode) {
+    case "internal_only":
+      return "Internal only";
+    case "internal_external":
+      return "Internal and external";
+    case "inherit":
+      return "Inherit (from domain)";
+    default:
+      return mode || "—";
+  }
+}

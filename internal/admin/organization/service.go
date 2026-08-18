@@ -3,6 +3,8 @@ package organization
 import (
 	"context"
 	"fmt"
+	"net/mail"
+	"strings"
 
 	"github.com/orvix/orvix/internal/audit"
 	entrbac "github.com/orvix/orvix/internal/enterprise/rbac"
@@ -84,6 +86,99 @@ func (s *Service) CreateOrganization(ctx context.Context, req CreateOrganization
 	return created, nil
 }
 
+// CreateOrganizationWithOwner provisions an organization AND its initial
+// owner invitation in ONE transaction (the org row, the invitation row and
+// the audit record commit or roll back together). It is the platform
+// super-admin organization-creation path: the PSA never invents an owner
+// user or password — the initial tenant_admin owner is established through
+// the same real invitation/activation model members use.
+//
+// LIFECYCLE: the organization is created in pending_activation state
+// (tenants.active = 0) with a REQUIRED pending tenant_admin owner
+// invitation. It becomes active ONLY when that invitation is redeemed
+// (AcceptInvitation), so an ownerless organization can never appear as a
+// fully operational active customer tenant. The platform console sees
+// active=false + a pending owner invitation until activation. A
+// PSA-created organization without a designated owner is rejected before
+// any row is written.
+//
+// The returned rawToken is the one-time invitation token (shown once at
+// creation); only its SHA-256 hash is persisted.
+func (s *Service) CreateOrganizationWithOwner(ctx context.Context, req CreateOrganizationRequest, platformTenantID, actorID uint, ownerEmail string) (*Organization, *OrganizationInvitation, string, error) {
+	ownerEmail = strings.TrimSpace(strings.ToLower(ownerEmail))
+	if ownerEmail == "" {
+		return nil, nil, "", fmt.Errorf("owner_email is required: a PSA-created organization must have a designated owner")
+	}
+	if _, err := mail.ParseAddress(ownerEmail); err != nil {
+		return nil, nil, "", fmt.Errorf("owner_email is not a valid email address")
+	}
+	exists, err := s.repo.ExistsBySlug(ctx, req.Slug, 0)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	if exists {
+		return nil, nil, "", ErrOrganizationExists
+	}
+	// The tenants table enforces UNIQUE(domain). Distinguish a domain
+	// collision from a slug collision so the client gets a truthful
+	// conflict, not a misleading "slug already exists". The empty
+	// domain (a PSA creation without one) is included: at most one
+	// tenant may carry it, and the second no-domain creation is a
+	// genuine conflict on the same column.
+	if domainExists, dErr := s.repo.ExistsByDomain(ctx, req.Domain, 0); dErr != nil {
+		return nil, nil, "", dErr
+	} else if domainExists {
+		return nil, nil, "", ErrOrganizationDomainExists
+	}
+	if req.Name == "" {
+		req.Name = req.Slug
+	}
+	if req.Plan == "" {
+		req.Plan = "smb"
+	}
+	if req.MaxDomains == 0 {
+		req.MaxDomains = 10
+	}
+	if req.MaxMailboxes == 0 {
+		req.MaxMailboxes = 500
+	}
+	o := &Organization{
+		Name: req.Name, Slug: req.Slug, Domain: req.Domain,
+		Plan: req.Plan, MaxDomains: req.MaxDomains, MaxMailboxes: req.MaxMailboxes, Active: false,
+	}
+	inv, rawToken, err := newInvitationToken(0, ownerEmail, "tenant_admin", 7)
+	if err != nil {
+		return nil, nil, "", fmt.Errorf("generate owner invitation: %w", err)
+	}
+	inv.InviterID = actorID
+
+	var created *Organization
+	entry := &audit.ExtendedEntry{
+		Action: "organization.create", TenantID: platformTenantID, ActorID: actorID, Result: "success",
+		Reason: "platform-initiated organization creation",
+	}
+	if err := s.mutateWithAudit(ctx, entry, func(repo *OrganizationRepo) error {
+		var createErr error
+		created, createErr = repo.Create(ctx, o)
+		if createErr != nil {
+			return createErr
+		}
+		inv.OrganizationID = created.ID
+		inv.InviterID = actorID
+		if err := repo.CreateInvitation(ctx, inv); err != nil {
+			return fmt.Errorf("create owner invitation: %w", err)
+		}
+		entry.Target, entry.TargetID = fmt.Sprintf("tenant:%d", created.ID), created.ID
+		return nil
+	}); err != nil {
+		if kernel.IsUniqueViolation(err) {
+			return nil, nil, "", ErrOrganizationExists
+		}
+		return nil, nil, "", err
+	}
+	return created, inv, rawToken, nil
+}
+
 func (s *Service) UpdateOrganization(ctx context.Context, id uint, req UpdateOrganizationRequest) (*Organization, error) {
 	o, err := s.repo.GetByID(ctx, id)
 	if err != nil {
@@ -122,6 +217,21 @@ func (s *Service) SetOrganizationActive(ctx context.Context, id uint, active boo
 	if err != nil {
 		return err
 	}
+	// No ownerless ACTIVE organization — the same invariant the PSA
+	// creation lifecycle enforces. An organization with zero active
+	// administrators must not be flipped operational by a manual
+	// activation: it has nobody to administer it, and the owner-invitation
+	// acceptance path (AcceptInvitation) is the only sanctioned way to
+	// bring a pending organization online. Disabling is always allowed.
+	if active {
+		admins, aerr := s.repo.CountAdmins(ctx, id)
+		if aerr != nil {
+			return aerr
+		}
+		if admins == 0 {
+			return ErrOrganizationRequiresOwner
+		}
+	}
 	action := "organization.disable"
 	if active {
 		action = "organization.enable"
@@ -141,10 +251,53 @@ func (s *Service) GetOrganizationDetail(ctx context.Context, id uint) (*Organiza
 	detail := &OrganizationDetail{Organization: *o}
 	if o.Active {
 		detail.StatusLabel = "active"
+	} else if pending, perr := s.repo.HasPendingOwnerInvitation(ctx, id); perr == nil && pending {
+		// PSA-created organization awaiting its owner's acceptance: the
+		// org is intentionally NOT operational until the owner invitation
+		// is redeemed. Distinct from "disabled" (a deliberate operator
+		// suspension) so the console can render the true lifecycle state.
+		detail.StatusLabel = "pending_activation"
 	} else {
 		detail.StatusLabel = "disabled"
 	}
+	// Populate the real counters the Platform Organizations drawer renders
+	// (Domains / Mailboxes / Admin users). These were declared on the
+	// detail struct but never computed, so the drawer always showed 0 —
+	// including "Admin users = 0" for every signup-created organization.
+	// Domain/Mailbox counts come from the SAME coremail_* tables the
+	// customer portal's own Domains/Mailboxes pages list, so the drawer
+	// number matches what the customer sees. AdminCount comes from
+	// CountAdmins, whose canonical role set counts true tenant
+	// administrators (tenant_admin plus legacy admin/superadmin
+	// pre-normalization rows) and never webmail RoleUser rows.
+	if domainCount, derr := s.countCoremailDomains(ctx, id); derr == nil {
+		detail.DomainCount = domainCount
+	}
+	if mailboxCount, merr := s.countCoremailMailboxes(ctx, id); merr == nil {
+		detail.MailboxCount = mailboxCount
+	}
+	if adminCount, aerr := s.repo.CountAdmins(ctx, id); aerr == nil {
+		detail.AdminCount = adminCount
+	}
 	return detail, nil
+}
+
+// countCoremailDomains counts non-deleted coremail_domains rows for the
+// tenant — the same table and predicate ListAdminDomains uses.
+func (s *Service) countCoremailDomains(ctx context.Context, tenantID uint) (int, error) {
+	var count int
+	err := s.repo.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM coremail_domains WHERE tenant_id="+s.repo.dialect.Placeholder(1)+" AND deleted_at IS NULL", tenantID).Scan(&count)
+	return count, err
+}
+
+// countCoremailMailboxes counts non-deleted coremail_mailboxes rows for
+// the tenant — the same table and predicate ListAdminMailboxes uses.
+func (s *Service) countCoremailMailboxes(ctx context.Context, tenantID uint) (int, error) {
+	var count int
+	err := s.repo.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM coremail_mailboxes WHERE tenant_id="+s.repo.dialect.Placeholder(1)+" AND deleted_at IS NULL", tenantID).Scan(&count)
+	return count, err
 }
 
 func (s *Service) ListMembers(ctx context.Context, orgID uint) ([]OrganizationMember, error) {
@@ -346,6 +499,7 @@ func (s *Service) mutateWithAudit(ctx context.Context, entry *audit.ExtendedEntr
 }
 
 var (
-	ErrOrganizationNotFound = fmt.Errorf("organization not found")
-	ErrOrganizationExists   = fmt.Errorf("organization already exists")
+	ErrOrganizationNotFound     = fmt.Errorf("organization not found")
+	ErrOrganizationExists       = fmt.Errorf("organization already exists")
+	ErrOrganizationDomainExists = fmt.Errorf("an organization with this domain already exists")
 )

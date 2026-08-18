@@ -122,6 +122,36 @@ const (
 	PermPlatformOrganizationsWrite Permission = "platform.organizations.write"
 	PermPlatformSecurityRead       Permission = "platform.security.read"
 	PermPlatformSessionsRevoke     Permission = "platform.sessions.revoke"
+	// PermPlatformUsersWrite governs lifecycle actions (deactivation)
+	// against platform-scoped user accounts. Distinct from
+	// PermPlatformSessionsRevoke — revoking a session is not the same
+	// authority as disabling the identity itself. Distinct from the
+	// tenant-scoped PermUsersWrite, which never applies to
+	// platform_super_admin rows (tenant_id IS NULL).
+	PermPlatformUsersWrite Permission = "platform.users.write"
+	// PermPlatformDomainsDeactivate governs the domain deactivation/
+	// soft-delete lifecycle action specifically — distinct from the
+	// general PermDomainsWrite (create/update) that platform domain
+	// create/update routes already reuse from the tenant surface,
+	// because deactivation is destructive and warrants its own
+	// authority, same reasoning as PermPlatformUsersWrite above.
+	PermPlatformDomainsDeactivate Permission = "platform.domains.deactivate"
+	// PermPlatformDomainsDelete governs the canonical, audited,
+	// deleted_at-tombstone platform domain delete — permanent removal
+	// from active inventory, distinct from PermPlatformDomainsDeactivate
+	// (reversible-in-principle status change). Deletion warrants its
+	// own authority, same reasoning as PermPlatformDomainsDeactivate.
+	PermPlatformDomainsDelete Permission = "platform.domains.delete"
+	// PermPlatformMailboxSupportView governs the audited, read-only,
+	// time-boxed support session that lets a Platform Super Admin
+	// inspect a customer mailbox's folders/messages/attachments WITHOUT
+	// ever touching the mailbox password, minting a customer JWT, or
+	// creating a normal webmail session — see internal/supportaccess.
+	// Deliberately platform-scoped only: no tenant role — including a
+	// tenant's own admin/operator/support roles — inherits this, because
+	// it is a PLATFORM operator's cross-tenant capability, not a
+	// tenant-internal one.
+	PermPlatformMailboxSupportView Permission = "platform.mailboxes.support_view"
 
 	// Platform mail control (cross-tenant, platform_super_admin only).
 	// These gate the /platform/relays, /platform/suppressions, and
@@ -185,6 +215,10 @@ var AllPermissions = []Permission{
 	PermPlatformOrganizationsWrite,
 	PermPlatformSecurityRead,
 	PermPlatformSessionsRevoke,
+	PermPlatformUsersWrite,
+	PermPlatformDomainsDeactivate,
+	PermPlatformDomainsDelete,
+	PermPlatformMailboxSupportView,
 	PermRelaysRead,
 	PermRelaysWrite,
 	PermRelaysTest,
@@ -242,7 +276,15 @@ var rolePermissions = map[auth.Role]map[Permission]bool{
 		// Cross-tenant security controls (session revocation, security ops).
 		PermPlatformSecurityRead:   true,
 		PermPlatformSessionsRevoke: true,
-		PermJobsRead:               true, PermJobsWrite: true,
+		// Platform user lifecycle (deactivation of another platform
+		// account). Deliberately NOT granted to any tenant role, support
+		// operator, or ordinary platform operator role — see the
+		// PermPlatformUsersWrite doc comment above.
+		PermPlatformUsersWrite:         true,
+		PermPlatformDomainsDeactivate:  true,
+		PermPlatformDomainsDelete:      true,
+		PermPlatformMailboxSupportView: true,
+		PermJobsRead:                   true, PermJobsWrite: true,
 		// Platform imports (the /platform/imports surface is platform-scope).
 		PermImportsRead: true, PermImportsWrite: true, PermImportsExecute: true, PermImportsAdmin: true,
 		// Platform mail control: relay administration, suppression
@@ -354,9 +396,13 @@ var rolePermissions = map[auth.Role]map[Permission]bool{
 		PermAPIKeysRead:       true, PermAPIKeysWrite: true,
 		PermBillingRead: true, PermBillingWrite: true,
 		PermPlatformOrganizationsRead: true, PermPlatformOrganizationsWrite: true,
-		PermPlatformSecurityRead:   true,
-		PermPlatformSessionsRevoke: true,
-		PermJobsRead:               true, PermJobsWrite: true,
+		PermPlatformSecurityRead:       true,
+		PermPlatformSessionsRevoke:     true,
+		PermPlatformUsersWrite:         true,
+		PermPlatformDomainsDeactivate:  true,
+		PermPlatformDomainsDelete:      true,
+		PermPlatformMailboxSupportView: true,
+		PermJobsRead:                   true, PermJobsWrite: true,
 		PermImportsRead: true, PermImportsWrite: true, PermImportsExecute: true, PermImportsAdmin: true,
 		// Platform mail control (legacy super-admin mirrors the PSA).
 		PermRelaysRead: true, PermRelaysWrite: true, PermRelaysTest: true,
@@ -422,29 +468,29 @@ var rolePermissions = map[auth.Role]map[Permission]bool{
 		PermBillingRead:       true,
 		PermJobsRead:          true,
 	},
-	// RoleUser is a tenant owner/member who has full control over their
-	// own tenant resources but NO platform-level privileges (platform
-	// organizations read/write, platform security, platform sessions).
-	auth.RoleUser: {
-		PermDashboardRead: true,
-		PermDomainsRead:   true, PermDomainsWrite: true,
-		PermMailboxesRead: true, PermMailboxesWrite: true,
-		PermOrganizationsRead: true, PermOrganizationsWrite: true,
-		PermUsersRead: true, PermUsersWrite: true,
-		PermAliasesRead: true, PermAliasesWrite: true,
-		PermGroupsRead: true, PermGroupsWrite: true,
-		PermInvitationsRead: true, PermInvitationsWrite: true,
-		PermOwnershipTransfer: true,
-		PermAPIKeysRead:       true, PermAPIKeysWrite: true,
-		PermBillingRead: true, PermBillingWrite: true,
-		PermJobsRead: true, PermJobsWrite: true,
-		PermAuditRead:        true,
-		PermSettingsRead:     true,
-		PermMonitoringRead:   true,
-		PermCredentialsReset: true,
-		PermSessionsRevoke:   true,
-		PermSecurityRead:     true,
-	},
+	// RoleUser is the per-mailbox end-user role (webmail), canonically
+	// documented in internal/auth/auth.go as having NO Organization
+	// administration privileges. This map therefore grants it NO tenant
+	// admin permissions: a plain mailbox RoleUser must NOT gain
+	// organization writes, domain administration, mailbox administration,
+	// member management, billing changes, API key administration, or
+	// ownership transfer through the customer admin console or any
+	// direct API call.
+	//
+	// Historical note: for a time this map granted RoleUser a near-full
+	// tenant-admin permission set as compatibility behavior for
+	// signup-created tenant owners. That was a stale workaround: a
+	// person who creates an Organization through public Start Free
+	// signup is persisted as tenant_admin (see customer_auth.go /
+	// customer_signup_otp.go), so RoleUser no longer needs admin
+	// privileges anywhere. Webmail authentication is unaffected — the
+	// webmail surface (internal/api/handlers/webmail_auth.go) grants
+	// RoleUser rows only mailbox-scoped access and never consults this
+	// map. Signup-created owners whose rows predate the canonical-owner
+	// fix are repaired by the operator via the narrow, audited
+	// `orvix admin repair-signup-owner` CLI path (cmd/orvix), never by
+	// re-granting this map.
+	auth.RoleUser: {},
 	// RoleBilling is a tenant billing-only role. Read access to tenant
 	// resources. Billing write. No domain/mailbox/member mutations.
 	auth.RoleBilling: {

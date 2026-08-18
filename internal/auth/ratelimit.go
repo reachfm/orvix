@@ -18,6 +18,8 @@ type RedisRateLimiter struct {
 	window     time.Duration
 	loginMax   int
 	loginWin   time.Duration
+	csrfMax    int
+	csrfWin    time.Duration
 }
 
 // NewRedisRateLimiter creates a new Redis-backed rate limiter.
@@ -29,6 +31,23 @@ func NewRedisRateLimiter(client *redis.Client, logger *zap.Logger) *RedisRateLim
 		window:     60 * time.Second,
 		loginMax:   5,
 		loginWin:   15 * time.Minute,
+		// GET /api/v1/csrf-token is a safe, unauthenticated bootstrap
+		// endpoint that a normal browser session calls repeatedly —
+		// once per page load/reload, plus once per automatic 403-retry
+		// on a mutation with a rotated token. It previously had no
+		// dedicated budget and instead shared the general "ratelimit:api:"
+		// bucket with every other /api/v1 call from the same client IP,
+		// so a burst of ordinary API traffic (or a single heavy admin
+		// session) could exhaust the budget and lock EVERY user behind
+		// that IP out of ever obtaining a CSRF token again until the
+		// window rolled over — a full login/webmail outage from
+		// legitimate traffic, not abuse. This budget is deliberately
+		// generous (well above any real page-load's bootstrap-call
+		// count) and keyed under its own "ratelimit:csrf:" prefix so it
+		// can never be exhausted by, or exhaust, unrelated API or
+		// credential-attempt traffic.
+		csrfMax: 60,
+		csrfWin: 60 * time.Second,
 	}
 }
 
@@ -58,8 +77,37 @@ func (rl *RedisRateLimiter) Middleware() fiber.Handler {
 		c.Set("X-RateLimit-Limit", fmt.Sprintf("%d", rl.defaultMax))
 		c.Set("X-RateLimit-Remaining", fmt.Sprintf("%d", remaining))
 		if !allowed {
+			c.Set("Retry-After", fmt.Sprintf("%d", int(rl.window.Seconds())))
 			return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{
 				"error": "rate limit exceeded, try again later",
+			})
+		}
+		return c.Next()
+	}
+}
+
+// CSRFBootstrapMiddleware returns a Fiber middleware for GET
+// /api/v1/csrf-token — a dedicated, generous, per-IP budget that is
+// never shared with the general API budget (Middleware, above) or any
+// credential-attempt budget (LoginMiddleware). Mount it ONLY on the
+// csrf-token route, in place of the general API limiter, so heavy but
+// legitimate API/webmail traffic from a client can never exhaust the
+// one endpoint every other request on that page depends on.
+func (rl *RedisRateLimiter) CSRFBootstrapMiddleware() fiber.Handler {
+	return func(c fiber.Ctx) error {
+		key := fmt.Sprintf("ratelimit:csrf:%s", c.IP())
+		allowed, remaining, err := rl.check(c.Context(), key, rl.csrfMax, rl.csrfWin)
+		if err != nil {
+			rl.logger.Error("csrf bootstrap rate limiter error", zap.Error(err))
+			return c.Next()
+		}
+		c.Set("X-RateLimit-Limit", fmt.Sprintf("%d", rl.csrfMax))
+		c.Set("X-RateLimit-Remaining", fmt.Sprintf("%d", remaining))
+		if !allowed {
+			c.Set("Retry-After", fmt.Sprintf("%d", int(rl.csrfWin.Seconds())))
+			rl.logger.Warn("csrf bootstrap rate limit exceeded", zap.String("ip", c.IP()))
+			return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{
+				"error": "too many token requests, try again later",
 			})
 		}
 		return c.Next()

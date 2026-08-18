@@ -11,12 +11,22 @@ var (
 	javascriptURLRE  = regexp.MustCompile(`(?i)\bjavascript\s*:`)
 	remoteImgSrcRE   = regexp.MustCompile(`(?i)<img[^>]+src\s*=\s*['"]https?://[^'"]*['"]`)
 	remoteImgSrcAttr = regexp.MustCompile(`(?i)(src\s*=\s*)['"]https?://[^'"]*['"]`)
+	// Active-content element families with no legitimate place in an
+	// email reading pane: iframe/object/embed can all load and
+	// execute arbitrary remote or plugin content just like a script
+	// tag can. <iframe>/<object> may carry a closing tag with content
+	// in between (or appear self-closing/void in malformed HTML);
+	// <embed> is always a void element.
+	iframeTagRE = regexp.MustCompile(`(?is)<iframe\b[^>]*>.*?</iframe\s*>|<iframe\b[^>]*/?>`)
+	objectTagRE = regexp.MustCompile(`(?is)<object\b[^>]*>.*?</object\s*>|<object\b[^>]*/?>`)
+	embedTagRE  = regexp.MustCompile(`(?i)<embed\b[^>]*/?>`)
 )
 
 // SanitizeHTML strips dangerous content from HTML email bodies.
-// Removes: script tags, event handlers, javascript: URLs.
-// Blocks: remote images by replacing src with data-original-src.
-// Preserves: safe HTML structure (divs, spans, tables, links, basic formatting).
+// Removes: script/iframe/object/embed tags, event handlers,
+// javascript: URLs. Blocks: remote images by replacing src with
+// data-remote-src. Preserves: safe HTML structure (divs, spans,
+// tables, links, basic formatting).
 func SanitizeHTML(html string) string {
 	if html == "" {
 		return ""
@@ -24,6 +34,12 @@ func SanitizeHTML(html string) string {
 
 	// Remove <script> tags and their content.
 	html = scriptTagRE.ReplaceAllString(html, "")
+
+	// Remove <iframe>/<object>/<embed> — same threat class as script:
+	// all three can load and execute active remote/plugin content.
+	html = iframeTagRE.ReplaceAllString(html, "")
+	html = objectTagRE.ReplaceAllString(html, "")
+	html = embedTagRE.ReplaceAllString(html, "")
 
 	// Remove event handler attributes (onclick, onload, onerror, etc.).
 	html = scriptInlineRE.ReplaceAllStringFunc(html, func(match string) string {

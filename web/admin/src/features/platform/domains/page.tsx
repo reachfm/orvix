@@ -1,10 +1,11 @@
-import { useState } from "react";
-import { Loader2, AlertCircle, Search } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { Loader2, AlertCircle, Search, Plus } from "lucide-react";
 import TenantScopeBanner from "../tenant-context/components/TenantScopeBanner";
 import { useTenantScope } from "../tenant-context/queries";
 import { usePlatformDomains } from "./queries";
 import DomainTable from "./components/DomainTable";
 import DomainDetailDrawer from "./components/DomainDetailDrawer";
+import CreateDomainDialog from "./components/CreateDomainDialog";
 import PaginationControls from "../components/PaginationControls";
 import { DOMAIN_STATUSES } from "./contract";
 import { domainStatusLabel } from "./formatters";
@@ -24,8 +25,22 @@ export default function DomainsPage() {
   const [statusFilter, setStatusFilter] = useState("");
   const [page, setPage] = useState(0);
   const [selectedId, setSelectedId] = useState<number | null>(null);
+  const [selectedInitialTab, setSelectedInitialTab] = useState<"overview" | "dns" | "dkim" | "lifecycle">("overview");
+  const [showCreate, setShowCreate] = useState(false);
+  const createTriggerRef = useRef<HTMLButtonElement>(null);
 
   const tenantId = scope?.tenantId ?? null;
+
+  // Switching tenant scope must close an incompatible detail view — a
+  // domain id opened under the previous tenant is never valid for the
+  // new one, and its query cache is already evicted by useSetTenantScope.
+  const prevTenantIdRef = useRef(tenantId);
+  useEffect(() => {
+    if (prevTenantIdRef.current !== tenantId) {
+      setSelectedId(null);
+      prevTenantIdRef.current = tenantId;
+    }
+  }, [tenantId]);
 
   const listQ = usePlatformDomains(tenantId, {
     q: query || undefined,
@@ -39,12 +54,22 @@ export default function DomainsPage() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h2 className="text-xl font-semibold text-[var(--text-primary)]">Platform Domains</h2>
-        <p className="text-sm text-[var(--text-secondary)]">
-          Platform-wide domain inventory per tenant. Tenant ids are explicit filters on the platform routes — no
-          support grant is involved.
-        </p>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h2 className="text-xl font-semibold text-[var(--text-primary)]">Platform Domains</h2>
+          <p className="text-sm text-[var(--text-secondary)]">
+            Platform-wide domain inventory per tenant. Tenant ids are explicit filters on the platform routes — no
+            support grant is involved.
+          </p>
+        </div>
+        <button
+          ref={createTriggerRef}
+          type="button"
+          onClick={() => setShowCreate(true)}
+          className="inline-flex items-center gap-1.5 px-3 py-2 text-sm rounded bg-[var(--accent)] text-white shrink-0"
+        >
+          <Plus size={14} /> Create domain
+        </button>
       </div>
 
       <TenantScopeBanner />
@@ -104,7 +129,7 @@ export default function DomainsPage() {
             <>
               <DomainTable
                 domains={domains}
-                onSelect={(d) => setSelectedId(d.id)}
+                onSelect={(d) => { setSelectedInitialTab("overview"); setSelectedId(d.id); }}
               />
               <PaginationControls page={page} pageSize={PAGE_SIZE} total={total} onChange={setPage} />
             </>
@@ -113,7 +138,27 @@ export default function DomainsPage() {
       )}
 
       {tenantId !== null && selectedId !== null && (
-        <DomainDetailDrawer tenantId={tenantId} id={selectedId} onClose={() => setSelectedId(null)} />
+        <DomainDetailDrawer
+          key={selectedId}
+          tenantId={tenantId}
+          id={selectedId}
+          initialTab={selectedInitialTab}
+          onClose={() => setSelectedId(null)}
+        />
+      )}
+
+      {showCreate && (
+        <CreateDomainDialog
+          initialTenantId={tenantId}
+          onCreated={(domainId) => { setSelectedInitialTab("dns"); setSelectedId(domainId); }}
+          onClose={() => {
+            setShowCreate(false);
+            // The dialog unmounts on close rather than staying mounted with
+            // open=false, so Radix's own close-focus-restoration effect
+            // never gets to run — restore focus to the trigger explicitly.
+            requestAnimationFrame(() => createTriggerRef.current?.focus());
+          }}
+        />
       )}
     </div>
   );

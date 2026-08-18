@@ -544,30 +544,79 @@ func outcomeString(res *DeliveryResult) string {
 	return "bounced"
 }
 
-// signWithDKIM signs the message with DKIM if the sender domain has a configured
-// and enabled DKIM key. Returns the data with DKIM-Signature header prepended,
-// or the original data unchanged if signing is not possible or already present.
-func (w *DeliveryWorker) signWithDKIM(ctx context.Context, data []byte, entry *queue.QueueEntry) []byte {
+// DKIMSignState is the explicit, typed outcome of a signing attempt.
+// signWithDKIM used to collapse every one of these into "return the
+// original data" — indistinguishable from "DKIM intentionally not
+// configured" even when the domain WAS configured and the failure was
+// a database outage, a missing/malformed key, or a signer error. That
+// silent fallback is the root cause this type exists to close: the
+// caller now MUST look at the state and refuse to deliver unsigned
+// when it is anything other than DKIMUnconfigured or DKIMSigned.
+type DKIMSignState int
+
+const (
+	// DKIMUnconfigured means the sender domain genuinely has no DKIM
+	// configuration (or DKIM signing is not wired into this deployment
+	// at all, or the config row exists but Enabled=false, or the
+	// envelope has no sender domain to sign for — e.g. a bounce with a
+	// null reverse-path). Unsigned delivery is the correct, pre-existing
+	// product policy for this state.
+	DKIMUnconfigured DKIMSignState = iota
+	// DKIMAlreadySigned means the message already carries a
+	// DKIM-Signature header (a resend/relay case) — passed through
+	// unchanged, not re-signed.
+	DKIMAlreadySigned
+	// DKIMSigned means signing succeeded; data now has the header.
+	DKIMSigned
+	// DKIMConfigError means the domain's configuration could not be
+	// read (repository/database error) — the domain's configured state
+	// is UNKNOWN, not "unconfigured". Must fail closed.
+	DKIMConfigError
+	// DKIMSignError means the domain IS configured and enabled, but
+	// cryptographic signing itself failed (malformed/missing key,
+	// signer error). Must fail closed.
+	DKIMSignError
+)
+
+// signWithDKIM signs the message with DKIM if the sender domain has a
+// configured and enabled DKIM key. It returns the (possibly signed)
+// data, an explicit DKIMSignState the caller MUST branch on, and an
+// error for the config/sign-error states. Only DKIMUnconfigured,
+// DKIMAlreadySigned, and DKIMSigned are safe to deliver as returned —
+// DKIMConfigError and DKIMSignError mean the domain was configured for
+// DKIM but signing could not be completed, and the caller must defer
+// the delivery attempt rather than send the message unsigned.
+func (w *DeliveryWorker) signWithDKIM(ctx context.Context, data []byte, entry *queue.QueueEntry) ([]byte, DKIMSignState, error) {
 	if w.DKIMSigner == nil || w.DKIMConfigs == nil {
 		w.recordDKIMEvent(ctx, entry, observability.EventDKIMSignSkipped, "signer or repo not configured")
-		return data
+		return data, DKIMUnconfigured, nil
 	}
 
 	senderDomain := extractDomainFromAddress(entry.FromAddress)
 	if senderDomain == "" {
+		// A null/empty envelope-from (bounce/DSN) has no domain to sign
+		// for — this is a legitimate unconfigured-equivalent state, not
+		// an error to fail closed on.
 		w.recordDKIMEvent(ctx, entry, observability.EventDKIMSignSkipped, "no sender domain")
-		return data
+		return data, DKIMUnconfigured, nil
 	}
 
 	if bytes.HasPrefix(data, []byte("DKIM-Signature:")) || bytes.Contains(data, []byte("\nDKIM-Signature:")) {
 		w.recordDKIMEvent(ctx, entry, observability.EventDKIMSignSkipped, "already signed")
-		return data
+		return data, DKIMAlreadySigned, nil
 	}
 
 	cfg, err := w.DKIMConfigs.GetByDomain(ctx, senderDomain, nil)
-	if err != nil || cfg == nil || !cfg.Enabled {
+	if err != nil {
+		w.recordDKIMEvent(ctx, entry, observability.EventDKIMConfigError, "config lookup failed")
+		return data, DKIMConfigError, fmt.Errorf("dkim config lookup for %s: %w", senderDomain, err)
+	}
+	if cfg == nil || !cfg.Enabled {
+		// A genuinely absent row, or a config the operator explicitly
+		// disabled, is the real "unconfigured" state — proceed unsigned
+		// per existing product policy.
 		w.recordDKIMEvent(ctx, entry, observability.EventDKIMSignSkipped, "no enabled config for domain")
-		return data
+		return data, DKIMUnconfigured, nil
 	}
 
 	hs := dkim.HeaderSet{
@@ -581,15 +630,19 @@ func (w *DeliveryWorker) signWithDKIM(ctx context.Context, data []byte, entry *q
 
 	result, err := w.DKIMSigner.Sign(data, hs)
 	if err != nil || result == nil || result.Signature == "" {
+		// err is never logged/wrapped with key material — dkim.Signer.Sign
+		// returns parse/crypto errors describing the failure mode, never
+		// the PEM itself, and this detail string carries only that error
+		// text (validated safe by observability.ValidateEventSafety).
 		w.recordDKIMEvent(ctx, entry, observability.EventDKIMSignFailure,
 			fmt.Sprintf("sign failed: %v", err))
-		return data
+		return data, DKIMSignError, fmt.Errorf("dkim sign for %s: %w", senderDomain, err)
 	}
 
 	w.recordDKIMEvent(ctx, entry, observability.EventDKIMSignSuccess, cfg.Domain)
 
 	sigHeader := []byte("DKIM-Signature: " + result.Signature + "\r\n")
-	return append(sigHeader, data...)
+	return append(sigHeader, data...), DKIMSigned, nil
 }
 
 func (w *DeliveryWorker) recordDeliveryEvent(ctx context.Context, entry *queue.QueueEntry, typ observability.EventType, result *DeliveryResult) {
@@ -818,7 +871,17 @@ func (w *DeliveryWorker) deliverRemote(ctx context.Context, entry *queue.QueueEn
 			if msg == nil {
 				return &DeliveryResult{StatusMsg: "message not found", TempFail: false}
 			}
-			data = w.signWithDKIM(ctx, data, entry)
+			signedData, dkimState, dkimErr := w.signWithDKIM(ctx, data, entry)
+			if dkimState == DKIMConfigError || dkimState == DKIMSignError {
+				// The sender domain IS configured for DKIM but signing
+				// could not be completed — never deliver this message
+				// unsigned. Defer for retry rather than lose it; a
+				// database outage or transient signer failure is
+				// exactly the TempFail case the queue already exists
+				// to handle.
+				return &DeliveryResult{StatusMsg: fmt.Sprintf("dkim signing unavailable for configured domain: %v", dkimErr), TempFail: true}
+			}
+			data = signedData
 			return w.deliverViaRelayChain(ctx, entry, decision, data)
 		}
 	}
@@ -836,7 +899,14 @@ func (w *DeliveryWorker) deliverRemote(ctx context.Context, entry *queue.QueueEn
 	}
 
 	// ── DKIM Signing (if configured) ──────────────────────
-	data = w.signWithDKIM(ctx, data, entry)
+	signedData, dkimState, dkimErr := w.signWithDKIM(ctx, data, entry)
+	if dkimState == DKIMConfigError || dkimState == DKIMSignError {
+		// Same fail-closed rule as the relay-chain path above: a
+		// configured domain must never be delivered unsigned, even
+		// direct-to-MX. Defer for retry.
+		return &DeliveryResult{StatusMsg: fmt.Sprintf("dkim signing unavailable for configured domain: %v", dkimErr), TempFail: true}
+	}
+	data = signedData
 
 	var lastTemp *DeliveryResult
 	for _, mx := range mxRecords {

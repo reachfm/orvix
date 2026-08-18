@@ -42,6 +42,7 @@ func newDomainTestDB(t *testing.T) *sql.DB {
 		dkim_selector TEXT,
 		dmarc_enabled INTEGER DEFAULT 0,
 		mail_access_mode TEXT NOT NULL DEFAULT 'internal_external',
+		version INTEGER NOT NULL DEFAULT 1,
 		created_at DATETIME,
 		updated_at DATETIME,
 		deleted_at DATETIME
@@ -251,6 +252,7 @@ func TestDomainMutationRollsBackWhenAuditWriteFails(t *testing.T) {
 		dkim_selector TEXT,
 		dmarc_enabled INTEGER DEFAULT 0,
 		mail_access_mode TEXT NOT NULL DEFAULT 'internal_external',
+		version INTEGER NOT NULL DEFAULT 1,
 		created_at DATETIME,
 		updated_at DATETIME,
 		deleted_at DATETIME
@@ -318,6 +320,60 @@ func TestGenerateDKIMSuccessAndAtomicState(t *testing.T) {
 	}
 	if len(entries) != 1 {
 		t.Fatalf("domain.dkim.generate audit entries = %d, want 1", len(entries))
+	}
+}
+
+// TestGetDKIMReturnsCanonicalSingleEncodedValue is the regression test
+// for the confirmed double-Base64 bug: GetDKIM used to derive the
+// public key p= value once via a duplicate local helper, then pipe
+// that ALREADY-base64 string back through dkim.GenerateDNSRecord,
+// which base64-encodes its input again. The fix makes GetDKIM call
+// dkim.DerivePublicKeyRecordValue directly (the single canonical PEM
+// -> public-key-TXT derivation used everywhere else in the codebase).
+//
+// This test proves it by comparing GetDKIM's result against an
+// INDEPENDENTLY computed call to DerivePublicKeyRecordValue on the
+// exact same stored private key — not a brittle prefix check.
+func TestGetDKIMReturnsCanonicalSingleEncodedValue(t *testing.T) {
+	db, svc := newDomainWithDKIMTestDB(t)
+	ctx := context.Background()
+	d, err := svc.CreateDomain(ctx, CreateDomainRequest{Name: "canon.example.test"}, 5)
+	if err != nil {
+		t.Fatalf("create domain: %v", err)
+	}
+	if _, err := svc.GenerateDKIM(ctx, d.ID, 5, "mail"); err != nil {
+		t.Fatalf("generate dkim: %v", err)
+	}
+
+	// Read the stored private key directly (independent of the code
+	// path under test) and derive the canonical expected value.
+	cfg, err := dkim.NewSQLRepo(db).GetByDomain(ctx, "canon.example.test", nil)
+	if err != nil {
+		t.Fatalf("read dkim config: %v", err)
+	}
+	if cfg == nil {
+		t.Fatal("dkim config not found after generate")
+	}
+	wantValue, ok := dkim.DerivePublicKeyRecordValue(cfg.PrivateKeyPEM)
+	if !ok {
+		t.Fatal("DerivePublicKeyRecordValue failed on the stored private key")
+	}
+
+	got, err := svc.GetDKIM(ctx, d.ID, 5)
+	if err != nil {
+		t.Fatalf("GetDKIM: %v", err)
+	}
+	if got.PublicDNSTxt != wantValue {
+		t.Fatalf("GetDKIM double-encoding regression: got %q, want canonical %q", got.PublicDNSTxt, wantValue)
+	}
+	if got.DNSRecordName != "mail._domainkey.canon.example.test" {
+		t.Fatalf("dns record name = %q, want mail._domainkey.canon.example.test", got.DNSRecordName)
+	}
+	if got.Selector != "mail" {
+		t.Fatalf("selector = %q, want mail", got.Selector)
+	}
+	if strings.Contains(got.PublicDNSTxt, "BEGIN") {
+		t.Fatal("GetDKIM must never return private key material")
 	}
 }
 

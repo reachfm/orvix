@@ -1,12 +1,23 @@
 import { useQuery } from "@tanstack/react-query";
 import { Globe, Mail, HardDrive, CreditCard, Activity, Inbox, Send, AlertTriangle } from "lucide-react";
 import { api } from "../api";
+import { ErrorOrAccessDenied, isAccessDenied } from "./AccessDenied";
 
 export default function Dashboard() {
   const { data, isLoading, error } = useQuery({ queryKey: ["dashboard"], queryFn: api.getDashboard });
 
   if (isLoading) return <p className="text-[var(--text-secondary)]">Loading...</p>;
-  if (error) return <p className="text-[var(--danger)]">Failed to load dashboard</p>;
+  if (error) {
+    // A genuine authorization denial gets a polished access-denied state;
+    // any other backend error stays visible as a real error (never a fake
+    // empty dashboard).
+    return (
+      <div className="flex flex-col gap-3">
+        <ErrorOrAccessDenied err={error} />
+        {!isAccessDenied(error) && <p className="text-[var(--danger)]">Failed to load dashboard</p>}
+      </div>
+    );
+  }
 
   const dash = data as any;
   const storageUsedGB = dash?.quota_used_bytes ? (dash.quota_used_bytes / (1024 * 1024 * 1024)).toFixed(1) : "0.0";

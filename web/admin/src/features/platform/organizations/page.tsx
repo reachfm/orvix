@@ -1,8 +1,9 @@
 import { useState } from "react";
-import { Loader2, AlertCircle, Search } from "lucide-react";
+import { Loader2, AlertCircle, Search, Plus } from "lucide-react";
 import { useOrganizationsQuery } from "./queries";
 import OrganizationsTable from "./components/OrganizationsTable";
 import OrganizationDetailDrawer from "./components/OrganizationDetailDrawer";
+import CreateOrganizationDialog from "./components/CreateOrganizationDialog";
 
 const PAGE_SIZE = 25;
 
@@ -10,6 +11,7 @@ export default function OrganizationsPage() {
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(0);
   const [selected, setSelected] = useState<number | null>(null);
+  const [creating, setCreating] = useState(false);
 
   const listQ = useOrganizationsQuery(search, PAGE_SIZE, page * PAGE_SIZE);
   const orgs = listQ.data?.organizations ?? [];
@@ -18,7 +20,16 @@ export default function OrganizationsPage() {
 
   return (
     <div>
-      <h2 className="text-xl font-semibold text-[var(--text-primary)] mb-4">Organizations</h2>
+      <div className="flex items-center justify-between mb-4">
+        <h2 className="text-xl font-semibold text-[var(--text-primary)]">Organizations</h2>
+        <button
+          type="button"
+          onClick={() => setCreating(true)}
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm rounded bg-[var(--accent)] text-white hover:bg-[var(--accent-hover)]"
+        >
+          <Plus size={14} /> Create organization
+        </button>
+      </div>
 
       <div className="flex items-center gap-2 mb-4">
         <div className="relative flex-1 max-w-sm">
@@ -69,6 +80,7 @@ export default function OrganizationsPage() {
       )}
 
       {selected !== null && <OrganizationDetailDrawer id={selected} onClose={() => setSelected(null)} />}
+      {creating && <CreateOrganizationDialog onClose={() => setCreating(false)} />}
     </div>
   );
 }

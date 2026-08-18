@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/orvix/orvix/internal/dbdialect"
 )
 
 // Attachment represents a file attached to an email message.
@@ -46,11 +48,29 @@ var _ AttachmentRepository = (*AttachmentSQLRepo)(nil)
 
 // AttachmentSQLRepo implements AttachmentRepository using database/sql.
 type AttachmentSQLRepo struct {
-	db *sql.DB
+	db      *sql.DB
+	dialect *dbdialect.Info
 }
 
+// NewAttachmentSQLRepo constructs the repository and detects the SQL
+// dialect EAGERLY — never lazily inside a transaction (a probe on a
+// single-connection SQLite pool would deadlock the acceptance tx).
 func NewAttachmentSQLRepo(db *sql.DB) *AttachmentSQLRepo {
-	return &AttachmentSQLRepo{db: db}
+	dialect, err := dbdialect.Detect(db)
+	if err != nil {
+		dialect = dbdialect.FromDriver("sqlite")
+	}
+	return &AttachmentSQLRepo{db: db, dialect: dialect}
+}
+
+// getDialect returns the dialect detected at construction time.
+func (r *AttachmentSQLRepo) getDialect() *dbdialect.Info {
+	return r.dialect
+}
+
+// qf rewrites ? placeholders to $N for PostgreSQL (no-op on SQLite).
+func (r *AttachmentSQLRepo) qf(sql string) string {
+	return r.getDialect().Rewrite(sql)
 }
 
 func (r *AttachmentSQLRepo) exec(tx interface{}) interface {
@@ -69,11 +89,21 @@ func (r *AttachmentSQLRepo) exec(tx interface{}) interface {
 func (r *AttachmentSQLRepo) Create(ctx context.Context, a *Attachment, tx interface{}) error {
 	a.CreatedAt = nowFn()
 	e := r.exec(tx)
-	res, err := e.ExecContext(ctx, `
+	insert := `
 		INSERT INTO coremail_attachments (message_id, filename, content_type, size_bytes, sha256, storage_path, cid, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+	args := []interface{}{
 		a.MessageID, a.Filename, a.ContentType, a.SizeBytes, a.SHA256, a.StoragePath, a.CID, a.CreatedAt,
-	)
+	}
+	if r.getDialect().IsPostgres() {
+		var id uint
+		if err := e.QueryRowContext(ctx, r.qf(insert)+" RETURNING id", args...).Scan(&id); err != nil {
+			return fmt.Errorf("create attachment: %w", err)
+		}
+		a.ID = id
+		return nil
+	}
+	res, err := e.ExecContext(ctx, insert, args...)
 	if err != nil {
 		return fmt.Errorf("create attachment: %w", err)
 	}
@@ -87,13 +117,13 @@ func (r *AttachmentSQLRepo) Create(ctx context.Context, a *Attachment, tx interf
 
 func (r *AttachmentSQLRepo) GetByID(ctx context.Context, id uint, tx interface{}) (*Attachment, error) {
 	e := r.exec(tx)
-	row := e.QueryRowContext(ctx, "SELECT id, message_id, filename, content_type, size_bytes, sha256, storage_path, cid, created_at FROM coremail_attachments WHERE id=?", id)
+	row := e.QueryRowContext(ctx, r.qf("SELECT id, message_id, filename, content_type, size_bytes, sha256, storage_path, cid, created_at FROM coremail_attachments WHERE id=?"), id)
 	return scanAttachment(row)
 }
 
 func (r *AttachmentSQLRepo) ListByMessage(ctx context.Context, messageID uint, tx interface{}) ([]Attachment, error) {
 	e := r.exec(tx)
-	rows, err := e.QueryContext(ctx, "SELECT id, message_id, filename, content_type, size_bytes, sha256, storage_path, cid, created_at FROM coremail_attachments WHERE message_id=? ORDER BY id", messageID)
+	rows, err := e.QueryContext(ctx, r.qf("SELECT id, message_id, filename, content_type, size_bytes, sha256, storage_path, cid, created_at FROM coremail_attachments WHERE message_id=? ORDER BY id"), messageID)
 	if err != nil {
 		return nil, err
 	}
@@ -111,20 +141,20 @@ func (r *AttachmentSQLRepo) ListByMessage(ctx context.Context, messageID uint, t
 
 func (r *AttachmentSQLRepo) Delete(ctx context.Context, id uint, tx interface{}) error {
 	e := r.exec(tx)
-	_, err := e.ExecContext(ctx, "DELETE FROM coremail_attachments WHERE id=?", id)
+	_, err := e.ExecContext(ctx, r.qf("DELETE FROM coremail_attachments WHERE id=?"), id)
 	return err
 }
 
 func (r *AttachmentSQLRepo) DeleteByMessage(ctx context.Context, messageID uint, tx interface{}) error {
 	e := r.exec(tx)
-	_, err := e.ExecContext(ctx, "DELETE FROM coremail_attachments WHERE message_id=?", messageID)
+	_, err := e.ExecContext(ctx, r.qf("DELETE FROM coremail_attachments WHERE message_id=?"), messageID)
 	return err
 }
 
 func (r *AttachmentSQLRepo) CountByMessage(ctx context.Context, messageID uint, tx interface{}) (int64, error) {
 	e := r.exec(tx)
 	var count int64
-	err := e.QueryRowContext(ctx, "SELECT COUNT(*) FROM coremail_attachments WHERE message_id=?", messageID).Scan(&count)
+	err := e.QueryRowContext(ctx, r.qf("SELECT COUNT(*) FROM coremail_attachments WHERE message_id=?"), messageID).Scan(&count)
 	return count, err
 }
 
@@ -145,7 +175,7 @@ func (r *AttachmentSQLRepo) CountByMessages(ctx context.Context, messageIDs []ui
 	q := "SELECT message_id, COUNT(*) FROM coremail_attachments WHERE message_id IN (" +
 		strings.Join(placeholders, ",") + ") GROUP BY message_id"
 	e := r.exec(tx)
-	rows, err := e.QueryContext(ctx, q, args...)
+	rows, err := e.QueryContext(ctx, r.qf(q), args...)
 	if err != nil {
 		return nil, fmt.Errorf("count by messages: %w", err)
 	}
@@ -163,8 +193,7 @@ func (r *AttachmentSQLRepo) CountByMessages(ctx context.Context, messageIDs []ui
 
 func (r *AttachmentSQLRepo) GetByMessageAndID(ctx context.Context, messageID, attachmentID uint, tx interface{}) (*Attachment, error) {
 	e := r.exec(tx)
-	row := e.QueryRowContext(ctx,
-		"SELECT id, message_id, filename, content_type, size_bytes, sha256, storage_path, cid, created_at FROM coremail_attachments WHERE id = ? AND message_id = ?",
+	row := e.QueryRowContext(ctx, r.qf("SELECT id, message_id, filename, content_type, size_bytes, sha256, storage_path, cid, created_at FROM coremail_attachments WHERE id = ? AND message_id = ?"),
 		attachmentID, messageID)
 	return scanAttachment(row)
 }

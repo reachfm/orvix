@@ -45,7 +45,7 @@
 set -euo pipefail
 
 REPO_ROOT="${REPO_ROOT:-.}"
-WEBMAIL_DIR="${WEBMAIL_DIR:-$REPO_ROOT/release/webmail}"
+WEBMAIL_DIR="${WEBMAIL_DIR:-$REPO_ROOT/web/webmail-release}"
 
 VERBOSE=0
 [ "${1:-}" = "--verbose" ] || [ "${1:-}" = "-v" ] && VERBOSE=1

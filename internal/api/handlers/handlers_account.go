@@ -171,62 +171,6 @@ func (h *Handler) UpdateAccountProfile(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{"status": "ok"})
 }
 
-func (h *Handler) SubmitSupportRequest(c fiber.Ctx) error {
-	userID, _ := c.Locals("user_id").(uint)
-	email, _ := c.Locals("email").(string)
-	tenantID, _ := c.Locals("tenant_id").(uint)
-	if userID == 0 {
-		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "authentication required"})
-	}
-
-	var req struct {
-		Category string `json:"category"`
-		Subject  string `json:"subject"`
-		Message  string `json:"message"`
-	}
-	if err := c.Bind().JSON(&req); err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request"})
-	}
-	if req.Subject == "" || req.Category == "" || req.Message == "" {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "category, subject, and message are required"})
-	}
-
-	refID := fmt.Sprintf("SR-%d-%d-%d", userID, time.Now().UnixNano()/1000, time.Now().Nanosecond()%1000)
-	sr := models.SupportRequest{
-		ReferenceID: refID,
-		TenantID:    tenantID,
-		UserID:      userID,
-		UserEmail:   email,
-		Category:    req.Category,
-		Subject:     req.Subject,
-		Message:     req.Message,
-		Status:      "received",
-	}
-	if h.mailSender != nil {
-		body := fmt.Sprintf("Support Request #%s\nCategory: %s\nSubject: %s\nUser: %s (ID: %d)\nTenant: %d\n\n%s",
-			refID, req.Category, req.Subject, email, userID, tenantID, req.Message)
-		if err := h.mailSender.Send("noreply@orvix.email", "Orvix Support: "+req.Subject, body); err != nil {
-			sr.DeliveryStatus = "failed"
-			sr.DeliveryError = err.Error()
-		} else {
-			sr.DeliveryStatus = "sent"
-		}
-	} else {
-		sr.DeliveryStatus = "queued"
-	}
-
-	if err := h.db.Create(&sr).Error; err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to save support request"})
-	}
-
-	h.writeAuditLog(c, "support.request.create", fmt.Sprintf("category:%s ref:%s", req.Category, refID))
-	return c.Status(fiber.StatusCreated).JSON(fiber.Map{
-		"reference_id":    refID,
-		"status":          sr.Status,
-		"delivery_status": sr.DeliveryStatus,
-	})
-}
-
 func (h *Handler) GetAccountPreferences(c fiber.Ctx) error {
 	userID, _ := c.Locals("user_id").(uint)
 	if userID == 0 {

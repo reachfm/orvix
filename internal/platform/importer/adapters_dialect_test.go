@@ -55,6 +55,7 @@ func productionAdapterSchema(t *testing.T, db *sql.DB, dialect *dbdialect.Info) 
 			id ` + idType + `,
 			tenant_id INTEGER NOT NULL,
 			name TEXT NOT NULL,
+			status TEXT NOT NULL DEFAULT 'active',
 			deleted_at ` + ts + `)`,
 	} {
 		if _, err := db.Exec(ddl); err != nil {

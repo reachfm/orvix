@@ -783,6 +783,19 @@ func runAdminCommand(args []string, deps adminCLIDeps) int {
 			return 2
 		}
 		return runAdminCreateTenantAdmin(*tenantID, *email, deps)
+	case "provision-transactional-mailbox":
+		return runAdminProvisionTransactionalMailbox(rest, deps)
+	case "repair-signup-owner":
+		fs := flag.NewFlagSet("admin repair-signup-owner", flag.ContinueOnError)
+		fs.SetOutput(deps.stderr)
+		email := fs.String("email", "", "signup-created owner's email (required)")
+		tenantID := fs.Int64("tenant-id", 0, "the tenant the owner row belongs to (required, positive)")
+		dryRun := fs.Bool("dry-run", true, "default: report what would be repaired without mutating")
+		confirm := fs.String("confirm", "", "pass REPAIR-SIGNUP-OWNER to apply (required for a real repair)")
+		if err := fs.Parse(rest); err != nil {
+			return 2
+		}
+		return runRepairSignupOwner(*email, *tenantID, *confirm, *dryRun, deps)
 	case "-h", "--help", "help":
 		fmt.Fprintln(deps.stdout, adminUsage())
 		return 0
@@ -810,14 +823,38 @@ Usage:
       Fails closed if the email already exists — never updates or
       promotes an existing user. Creates no session.
 
-All three commands:
+  orvix admin provision-transactional-mailbox --domain <domain> [--local-part noreply] --confirm PROVISION-MAILBOX
+      Create the platform's own outbound transactional mailbox (OTP,
+      password reset, support mail). Resolves an EXISTING coremail_domains
+      row by name and never creates one or touches DKIM. Idempotent —
+      never resets an existing mailbox's password. Generates a random
+      password, writes it once to a root-only env file, and never prints
+      it.
+
+  orvix admin repair-signup-owner --email <email> --tenant-id <id> [--confirm REPAIR-SIGNUP-OWNER]
+      Narrow, audited repair for legacy signup-created Organization owners
+      that were persisted with role='user' before signup began persisting
+      owners as tenant_admin. Refuses unless the row is PROVEN to be a
+      signup-created owner by audited, non-secret facts: exactly one user
+      matches the email, it belongs to the given tenant, its role is
+      exactly 'user', it is active/not deleted, a coremail_audit
+      'customer.signup' record exists for that exact user, and no
+      coremail_mailboxes row exists for the email (a webmail end-user is
+      never promoted). Dry-run is the default — pass --confirm
+      REPAIR-SIGNUP-OWNER to apply the role='user' → 'tenant_admin'
+      promotion with a token_version bump and one audit row. Never
+      touches passwords.
+
+The password-based commands:
   - must be run as root;
   - prompt for the new password twice on an interactive hidden TTY only
     (never via a flag, environment variable, or config file);
   - write exactly one coremail_audit row on success.
 
 reset-password and recover additionally revoke every existing session
-for the target user.
+for the target user. repair-signup-owner revokes the target user's
+sessions and bumps token_version so already-issued JWTs are rejected
+immediately.
 
 ` + strconv.Itoa(adminPasswordMinBytes) + `-` + strconv.Itoa(adminPasswordMaxBytes) + ` byte password length is enforced.`
 }

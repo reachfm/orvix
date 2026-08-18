@@ -3,8 +3,10 @@ package audit
 import (
 	"context"
 	"database/sql"
+	"encoding/csv"
 	"encoding/json"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
@@ -218,6 +220,26 @@ func (s *ExtendedStore) Search(ctx context.Context, q *ExtendedQuery) ([]Extende
 	return entries, total, rows.Err()
 }
 
+// GetEntry returns a single audit entry by id. It exists so the
+// platform audit detail route can serve the same rich ExtendedEntry
+// contract the list route returns (actor_id/actor_role/tenant_id/ip/
+// user_agent/…), never a second, poorer projection.
+func (s *ExtendedStore) GetEntry(ctx context.Context, id int64) (*ExtendedEntry, error) {
+	var e ExtendedEntry
+	err := s.db.QueryRowContext(ctx, `SELECT id, actor, actor_id, actor_role, tenant_id, action, target, target_id, result, reason, before, after, request_id, ip, user_agent, timestamp
+		FROM orvix_audit WHERE id = `+s.dialect.Placeholder(1), id).
+		Scan(&e.ID, &e.Actor, &e.ActorID, &e.ActorRole, &e.TenantID,
+			&e.Action, &e.Target, &e.TargetID, &e.Result, &e.Reason,
+			&e.Before, &e.After, &e.RequestID, &e.IP, &e.UserAgent, &e.Timestamp)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get extended audit entry: %w", err)
+	}
+	return &e, nil
+}
+
 func sanitizeEntry(e *ExtendedEntry) {
 	e.After = sanitizeJSON(e.After, sensitiveFields)
 	e.Before = sanitizeJSON(e.Before, sensitiveFields)
@@ -296,4 +318,40 @@ func ActorEntry(c fiber.Ctx, action, target, result string, targetID uint) *Exte
 		UserAgent: c.Get("User-Agent"),
 		Timestamp: time.Now().UTC(),
 	}
+}
+
+// ExportTo writes the extended store's search result to w in the given
+// format. This is the canonical audit export: it reads the SAME orvix_audit
+// rows the list and detail routes serve, so an export can never disagree
+// with the platform audit page (the legacy coremail_audit exporter remains
+// only as a fallback for legacy consumers).
+func (s *ExtendedStore) ExportTo(ctx context.Context, q *ExtendedQuery, format ExportFormat, w io.Writer) error {
+	entries, _, err := s.Search(ctx, q)
+	if err != nil {
+		return err
+	}
+	switch format {
+	case ExportCSV:
+		cw := csv.NewWriter(w)
+		defer cw.Flush()
+		if err := cw.Write([]string{"id", "timestamp", "actor", "actor_id", "actor_role", "tenant_id", "action", "target", "target_id", "result", "reason", "request_id", "ip"}); err != nil {
+			return err
+		}
+		for _, e := range entries {
+			if err := cw.Write([]string{
+				fmt.Sprintf("%d", e.ID),
+				e.Timestamp.Format(time.RFC3339),
+				e.Actor, fmt.Sprintf("%d", e.ActorID), e.ActorRole, fmt.Sprintf("%d", e.TenantID),
+				e.Action, e.Target, fmt.Sprintf("%d", e.TargetID), e.Result, e.Reason, e.RequestID, e.IP,
+			}); err != nil {
+				return err
+			}
+		}
+	case ExportJSON:
+		enc := json.NewEncoder(w)
+		return enc.Encode(entries)
+	default:
+		return fmt.Errorf("unsupported export format: %s", format)
+	}
+	return nil
 }
