@@ -162,6 +162,29 @@ export interface Alert {
   resolvedAt?: string | null;
 }
 
+// --- Monitoring health (GET /monitoring/health) ---
+// Field-for-field match of internal/monitoring/types.go's Health +
+// ComponentHealth + DiskUsage. Only safe labels/counts are ever
+// returned (no env values, no tokens, no file contents, no private
+// paths). hostUptime* is populated only when the platform has a safe
+// source for it.
+export interface ComponentHealth {
+  status: string; // "ok" | "warning" | "critical" | "unknown"
+  message: string;
+}
+
+export interface MonitoringHealth {
+  status: string; // "ok" | "degraded" | "down"
+  uptimeSeconds: number;
+  generatedAt: string;
+  disk: DiskUsage[];
+  db: ComponentHealth;
+  queue: ComponentHealth;
+  backup: ComponentHealth;
+  api: ComponentHealth;
+  openAlerts: number;
+}
+
 export interface DiskUsage {
   label: string;
   totalBytes: number;

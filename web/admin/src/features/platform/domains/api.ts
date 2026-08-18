@@ -11,6 +11,7 @@ import type {
   PlatformCreateDomainResult,
   PlatformDKIMMutationRequest,
   PlatformDKIMMutationResult,
+  PlatformDKIMRevokeResponse,
   PlatformDNSVerifyResult,
   PlatformDomain,
   PlatformDomainDNSResult,
@@ -100,6 +101,21 @@ export function rotatePlatformDomainDKIM(
     method: "POST",
     body: JSON.stringify(body),
     headers: { "Idempotency-Key": idempotencyKey },
+  });
+}
+
+/**
+ * Disables the domain's DKIM configuration (POST .../dkim/revoke) —
+ * transactional, audited, never exposes key material, never mutates
+ * public DNS. A repeat revoke is a no-op success. No idempotency key:
+ * the route is not gated through the mutation-idempotency path.
+ */
+export function revokePlatformDomainDKIM(
+  tenantId: number,
+  id: number,
+): Promise<PlatformDKIMRevokeResponse> {
+  return request<PlatformDKIMRevokeResponse>(`/platform/domains/${tenantId}/${id}/dkim/revoke`, {
+    method: "POST",
   });
 }
 

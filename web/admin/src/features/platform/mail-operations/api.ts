@@ -8,6 +8,8 @@ import type {
   QueueActionResponse,
   BulkQueueAction,
   BulkQueueActionResponse,
+  QueueHistoryFilter,
+  QueueHistoryResponse,
 } from "./contract";
 
 export function listQueueMessages(filter: QueueMessageFilter): Promise<ListQueueMessagesResponse> {
@@ -56,4 +58,29 @@ export function bulkQueueAction(ids: number[], action: BulkQueueAction, reason?:
     method: "POST",
     body: JSON.stringify({ ids, action, reason: reason || "" }),
   });
+}
+
+/**
+ * Immutable delivery-attempt history (GET /admin/queue/history),
+ * cursor-paginated: pass after_id = last row's id to page forward.
+ */
+export function getQueueHistory(filter: QueueHistoryFilter): Promise<QueueHistoryResponse> {
+  const params = new URLSearchParams();
+  if (filter.status) params.set("status", filter.status);
+  if (filter.remote_host) params.set("remote_host", filter.remote_host);
+  if (filter.after_id !== undefined && filter.after_id > 0) params.set("after_id", String(filter.after_id));
+  if (filter.limit !== undefined) params.set("limit", String(filter.limit));
+  const qs = params.toString();
+  return request<QueueHistoryResponse>(`/admin/queue/history${qs ? "?" + qs : ""}`);
+}
+
+/**
+ * Redacted CSV export of the current live queue (GET /admin/queue/
+ * export). The endpoint answers text/csv with Content-Disposition —
+ * NOT a JSON envelope — so this client requests a raw Blob through the
+ * shared CSRF/auth-aware transport (documented file-download
+ * exception) and the caller triggers the browser download.
+ */
+export function exportQueueCsv(): Promise<Blob> {
+  return request<Blob>("/admin/queue/export", { responseType: "blob" });
 }

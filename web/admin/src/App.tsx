@@ -16,6 +16,7 @@ import SignupPage from "./components/SignupPage";
 import LoginPage from "./components/LoginPage";
 import ForgotPasswordPage from "./components/ForgotPasswordPage";
 import ResetPasswordPage from "./components/ResetPasswordPage";
+import InvitationAcceptPage from "./components/InvitationAcceptPage";
 import AccountSettingsPage from "./components/AccountSettingsPage";
 import OrganizationOverviewPage from "./components/OrganizationOverviewPage";
 import InvitationsPage from "./components/InvitationsPage";
@@ -64,7 +65,7 @@ type Tab = "dashboard" | "domains" | "users" | "firewall" | "modules" | "audit" 
   | "account-settings" | "org-overview" | "invitations" | "members-roles" | "ownership-transfer"
   | "suspension-deletion" | "customer-mailboxes" | "aliases" | "groups" | "usage-quotas"
   | "invoices" | "security" | "support" | "preferences"
-  | "login" | "signup" | "forgot-password" | "reset-password"
+  | "login" | "signup" | "forgot-password" | "reset-password" | "invitation-accept"
   | "platform-billing" | "platform-imports" | "automation-jobs" | "support-access"
   | "platform-incidents" | "platform-retention" | "platform-audit" | "platform-dr"
   | "platform-config-truth" | "platform-domains" | "platform-mailboxes"
@@ -134,6 +135,7 @@ const ORGANIZATION_TAB_IDS: Tab[] = [
   "dashboard", "domains", "org-overview", "customer-mailboxes", "aliases", "groups", "usage-quotas",
   "invitations", "members-roles", "ownership-transfer", "suspension-deletion", "invoices",
   "billing", "apikeys", "account-settings", "security", "preferences", "support",
+  "audit",
 ];
 
 const tabs: { id: Tab; label: string; icon: typeof LayoutDashboard; section?: string }[] = [
@@ -251,6 +253,7 @@ export default function App() {
     const tabMap: Record<string, Tab> = {
       "/": "dashboard", "/login": "login", "/signup": "signup",
       "/forgot-password": "forgot-password", "/reset-password": "reset-password",
+      "/invitations/accept": "invitation-accept",
     };
     setCurrentTab(tabMap[route] || "dashboard");
   };
@@ -260,6 +263,7 @@ export default function App() {
     if (path === "/admin/signup") return "signup";
     if (path === "/admin/forgot-password") return "forgot-password";
     if (path === "/admin/reset-password") return "reset-password";
+    if (path === "/admin/invitations/accept") return "invitation-accept";
     return "dashboard";
   };
 
@@ -282,6 +286,7 @@ export default function App() {
       case "signup": return <SignupPage />;
       case "forgot-password": return <ForgotPasswordPage />;
       case "reset-password": return <ResetPasswordPage />;
+      case "invitation-accept": return <InvitationAcceptPage />;
       default: return <LoginPage />;
     }
   }

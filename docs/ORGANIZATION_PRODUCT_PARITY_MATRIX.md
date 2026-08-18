@@ -205,3 +205,26 @@ Verified consistent (no drift): billing state remains real-data-only with
 honest provider state; invitation revoke/expiry semantics unchanged;
 `requireTenantActive` continues to gate the console so a
 pending_activation org cannot be used before its owner activates.
+
+## 15. Phase 3 addendum (Frontend Developer) — UI completion
+
+Executed after Phase 2 on the same branch. Starting SHA:
+`88d3be25239c53196ab3b40b717a4b1bb36df39c`.
+
+### 15.1 Organization-surface completions (Phase 3)
+
+| ID | Item | Frontend completion | Tests |
+|---|---|---|---|
+| F-2 | Public invitation accept (B-A2 activation path) | New public `InvitationAcceptPage` (`/admin/invitations/accept`, `?token=` prefill); stable mapping for 404 NOT_FOUND / 409 INVALID_STATE_TRANSITION / 409 CONFLICT; success → redirect to login. This is the ONLY activation path for PSA-created orgs | `InvitationAcceptPage.test.tsx` |
+| F-3 | Invitation resend (R-6) + states | `InvitationsPage`: Resend button on pending rows → `POST /enterprise/invitations/:id/resend`; rotated token revealed once with the rotate warning; distinct pending/accepted/revoked/expired badges; token reveal after create (B-C1 inviter-mediated delivery model) | `InvitationsPage.test.tsx` |
+| F-4 | Tenant audit envelope (B-B2) | `AuditLog.tsx` uses the canonical `{entries,total,limit,offset}` envelope (`api.listAuditLogsEnvelope`) with action/result filters + pagination; the `audit` tab is now reachable in the org portal (was unreachable — DEAD_UI) | existing acceptance suites |
+| F-8 | Billing state honesty (R-7) | `BillingPage` renders `GET /enterprise/billing/state` provider state; "Payment provider not configured" comes from `configured:false`, never a hardcoded line; no cards/MRR fabrication | `BillingPage.test.tsx` |
+
+### 15.2 Organization portal rules honored
+
+- Invitation forms offer only the tenant role family
+  (`tenant_admin`/`tenant_operator`/`tenant_support`/`tenant_readonly`).
+- Dashboard/support/API-key surfaces unchanged: no platform metrics,
+  no ticket-history fabrication, one-time secret reveal at creation only.
+- The audit tab addition renders ONLY tenant-scoped
+  `/enterprise/audit/logs` data (never platform-wide rows).

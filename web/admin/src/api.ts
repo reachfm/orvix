@@ -232,6 +232,19 @@ export const api = {
   getUsage: () => request<any>("/enterprise/billing/usage"),
   checkQuota: (resource: string, used: number) =>
     request<any>(`/enterprise/billing/quota?resource=${resource}&used=${used}`),
+  // GET /enterprise/billing/state — coherent real subscription/plan/
+  // usage/invoice summary with HONEST payment-provider configuration
+  // state (configured:false + "provider not configured" when no
+  // provider is wired; never fabricated cards/MRR/paid invoices).
+  getBillingState: () =>
+    request<{
+      tenant_id: number;
+      subscription: any | null;
+      plan: any | null;
+      usage: any | null;
+      invoices: any[];
+      payment_provider: { provider: string; enabled: boolean; configured: boolean; note: string };
+    }>("/enterprise/billing/state"),
 
   // Customer domains
   listDomains: () => request<any>("/customer/domains"),
@@ -299,8 +312,10 @@ export const api = {
 
   // Invitations
   listInvitations: () => request<any[]>("/enterprise/invitations"),
+  // CreateInvitation returns {"invitation": ..., "token": ...} — the
+  // one-time token is shown exactly once by the caller (InvitationsPage).
   createInvitation: (data: any) =>
-    request("/enterprise/invitations", { method: "POST", body: JSON.stringify(data) }),
+    request<{ invitation: any; token: string }>("/enterprise/invitations", { method: "POST", body: JSON.stringify(data) }),
   revokeInvitation: (id: number) =>
     request(`/enterprise/invitations/${id}/revoke`, { method: "POST" }),
 
@@ -470,6 +485,21 @@ export const api = {
     if (Array.isArray(data)) return data; // legacy bare-array fallback
     return data?.entries ?? [];
   },
+  // Full paginated envelope for the tenant audit page (filters:
+  // action/actor/result + page/page_size, same contract as the
+  // platform audit page).
+  listAuditLogsEnvelope: (params: { page?: number; page_size?: number; action?: string; actor?: string; result?: string } = {}) => {
+    const p = new URLSearchParams();
+    if (params.page) p.set("page", String(params.page));
+    if (params.page_size) p.set("page_size", String(params.page_size));
+    if (params.action) p.set("action", params.action);
+    if (params.actor) p.set("actor", params.actor);
+    if (params.result) p.set("result", params.result);
+    const qs = p.toString();
+    return request<{ entries: any[]; total: number; limit: number; offset: number }>(
+      `/enterprise/audit/logs${qs ? `?${qs}` : ""}`,
+    );
+  },
 
   // Sessions
   listSessions: () => request<any>("/account/sessions"),
@@ -492,4 +522,27 @@ export const api = {
     request("/auth/forgot-password", { method: "POST", body: JSON.stringify({ email }) }),
   resetPassword: (token: string, password: string) =>
     request("/auth/reset-password", { method: "POST", body: JSON.stringify({ token, password }) }),
+
+  // Public invitation acceptance — the ONLY activation path for a
+  // PSA-created organization owner (POST /auth/invitations/accept).
+  // The email comes from the invitation row server-side, never from
+  // this payload. Stable codes: 404 NOT_FOUND (unknown token),
+  // 409 INVALID_STATE_TRANSITION (revoked/expired/already used),
+  // 409 CONFLICT (an account already exists for the invited email).
+  acceptInvitation: (data: { token: string; password: string; name?: string }) =>
+    request<{
+      status: string;
+      user_id: number;
+      organization_id: number;
+      email: string;
+      role: string;
+      organization_active: boolean;
+    }>("/auth/invitations/accept", { method: "POST", body: JSON.stringify(data) }),
+
+  // Enterprise invitations — resend rotates the one-time token; the new
+  // token is returned exactly once and replaces any prior copy.
+  resendInvitation: (id: number) =>
+    request<{ invitation: any; token: string; warning: string }>(`/enterprise/invitations/${id}/resend`, {
+      method: "POST",
+    }),
 };

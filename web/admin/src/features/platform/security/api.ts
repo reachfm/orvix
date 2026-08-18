@@ -6,7 +6,14 @@ import type {
   UploadCertificateRequest, UploadCertificateResponse,
 } from "./contract";
 
-export const listAuditLogs = () => request<AuditEntry[]>("/audit/logs");
+// GET /audit/logs returns the canonical {entries, total, limit, offset}
+// envelope (same store/contract as the platform audit page). The panel
+// only needs the entries array — unwrap here so AuditPanel renders real
+// rows instead of an empty list.
+export const listAuditLogs = async (): Promise<AuditEntry[]> => {
+  const data = await request<{ entries: AuditEntry[]; total: number; limit: number; offset: number }>("/audit/logs");
+  return data?.entries ?? [];
+};
 
 export const listSslCertificates = () => request<ListCertificatesResponse>("/admin/ssl/certificates");
 export const reloadSslCertificates = () => request<{ status?: string }>("/admin/ssl/certificates/reload", { method: "POST" });

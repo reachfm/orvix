@@ -222,6 +222,19 @@ export interface PlatformDKIMMutationRequest {
  */
 export type PlatformDKIMMutationResult = Required<Pick<PlatformDKIMResult, "selector" | "public_dns_txt" | "dns_record_name" | "version">>;
 
+// ── DKIM revoke (POST .../dkim/revoke) ──────────────────────────────
+// RevokePlatformDomainDKIM (platform_mail_control.go): disables the
+// domain's DKIM configuration through the same transactional revoke
+// path the tenant console uses. The response states the REAL resulting
+// state; a repeat revoke is a true no-op success ({status:"ok",
+// domain_id, revoked:true}) — never a duplicate history/audit record.
+// Never exposes key material; never mutates public DNS.
+export interface PlatformDKIMRevokeResponse {
+  status: string;
+  domain_id: number;
+  revoked: boolean;
+}
+
 // ── Deactivate / soft-delete (POST .../deactivate) ──────────────────
 // Field-for-field match of internal/api/handlers/platform_domain_lifecycle.go's
 // DeactivatePlatformDomain request/response. This is the canonical,

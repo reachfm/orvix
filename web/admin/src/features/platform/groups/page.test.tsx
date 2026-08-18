@@ -67,11 +67,49 @@ describe("features/platform/groups", () => {
     expect(membersCall).toBeDefined();
   });
 
-  it("does not fabricate group mutation controls (no platform routes exist)", async () => {
+  it("offers real group mutation controls wired to the platform routes", async () => {
     renderPage(7);
     await waitFor(() => expect(screen.getByText("engineering@acme.example")).toBeInTheDocument());
-    expect(screen.queryByRole("button", { name: /create group/i })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /add member/i })).not.toBeInTheDocument();
-    expect(screen.getByText(/management mutations are not exposed/i)).toBeInTheDocument();
+    // Phase 1/2 added the platform mutation routes — the page must offer
+    // create/delete/member-management controls backed by them, never a
+    // read-only claim.
+    expect(screen.queryByText(/management mutations are not exposed/i)).not.toBeInTheDocument();
+    const createButton = screen.getByRole("button", { name: /create group/i });
+    expect(createButton).toBeInTheDocument();
+    // Delete control per row.
+    expect(screen.getByRole("button", { name: /Delete group engineering@acme.example/ })).toBeInTheDocument();
+    // Members drawer offers add-member.
+    fireEvent.click(screen.getByRole("button", { name: /View members of engineering@acme.example/ }));
+    await waitFor(() => expect(screen.getByPlaceholderText("member@example.com")).toBeInTheDocument());
+    expect(screen.getByRole("button", { name: /add/i })).toBeInTheDocument();
+  });
+
+  it("sends the typed X-Confirm DELETE-GROUP-<id> header on delete", async () => {
+    renderPage(7);
+    await waitFor(() => expect(screen.getByText("engineering@acme.example")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /Delete group engineering@acme.example/ }));
+    // ConfirmDialog requires the typed phrase before enabling the confirm.
+    const confirmInput = await screen.findByRole("textbox");
+    fireEvent.change(confirmInput, { target: { value: "DELETE-GROUP-21" } });
+    fireEvent.click(screen.getByRole("button", { name: /Delete group/i }));
+    await waitFor(() => {
+      const deleteCall = mockedRequest.mock.calls.find((c) => String(c[0]) === "/platform/groups/7/21" && String(c[1]?.method) === "DELETE");
+      expect(deleteCall).toBeDefined();
+      expect((deleteCall![1] as { headers?: Record<string, string> }).headers?.["X-Confirm"]).toBe("DELETE-GROUP-21");
+    });
+  });
+
+  it("creates a group through POST /platform/groups/:tenant_id", async () => {
+    renderPage(7);
+    await waitFor(() => expect(screen.getByRole("button", { name: /create group/i })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /create group/i }));
+    const nameInput = await screen.findByPlaceholderText("sales-team");
+    fireEvent.change(nameInput, { target: { value: "sales@acme.example" } });
+    fireEvent.click(screen.getByRole("button", { name: /create group/i }));
+    await waitFor(() => {
+      const createCall = mockedRequest.mock.calls.find((c) => String(c[0]) === "/platform/groups/7" && String(c[1]?.method) === "POST");
+      expect(createCall).toBeDefined();
+      expect(JSON.parse(String((createCall![1] as { body?: string }).body ?? "{}"))).toMatchObject({ name: "sales@acme.example" });
+    });
   });
 });

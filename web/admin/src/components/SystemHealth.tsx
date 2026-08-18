@@ -1,34 +1,40 @@
-import { useEffect, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { AlertCircle, AlertTriangle, CheckCircle2, Clock, Database, HardDrive, HeartPulse, Inbox, Loader2, Server, XCircle } from "lucide-react";
-
-interface ComponentHealth { status: string; message: string }
-interface DiskUsage { label: string; totalBytes: number; usedBytes: number; freeBytes: number; usedPct: number }
-interface HealthData {
-  status: string;
-  uptimeSeconds: number;
-  disk: DiskUsage[];
-  db: ComponentHealth;
-  queue: ComponentHealth;
-  backup: ComponentHealth;
-  api: ComponentHealth;
-  openAlerts: number;
-}
+import { getMonitoringHealth } from "../features/platform/reliability/api";
+import type { ComponentHealth, MonitoringHealth } from "../features/platform/reliability/contract";
 
 const formatGB = (bytes: number) => bytes > 0 ? `${(bytes / 1073741824).toFixed(1)} GB` : "Unavailable";
 const formatUptime = (seconds: number) => Number.isFinite(seconds) && seconds >= 0 ? `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m` : "Unavailable";
 
+/**
+ * SystemHealth renders GET /monitoring/health through the canonical
+ * typed client (features/platform/reliability/api.ts getMonitoringHealth)
+ * — previously this page called fetch("/api/v1/monitoring/health")
+ * directly, bypassing the shared CSRF/auth-aware transport
+ * (DIRECT_FETCH_BYPASS). Real runtime state only: a failed fetch is a
+ * visible error state, never a fabricated "healthy".
+ */
 export default function SystemHealth() {
-  const [data, setData] = useState<HealthData | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  useEffect(() => {
-    fetch("/api/v1/monitoring/health").then((res) => {
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      return res.json();
-    }).then(setData).catch((err: Error) => setError(err.message));
-  }, []);
-  if (!data && !error) return <div className="flex h-64 items-center justify-center"><Loader2 size={24} className="animate-spin text-[var(--accent)]" /></div>;
-  if (error) return <div className="flex items-center gap-3 rounded-lg border border-[var(--danger)]/30 bg-[var(--bg-surface)] p-6 text-sm text-[var(--danger)]"><AlertCircle size={20} />Failed to load health data: {error}</div>;
+  const q = useQuery({ queryKey: ["monitoring-health"], queryFn: getMonitoringHealth, retry: 1 });
+  if (q.isLoading) return <div className="flex h-64 items-center justify-center"><Loader2 size={24} className="animate-spin text-[var(--accent)]" /></div>;
+  if (q.error) return (
+    <div className="flex items-start gap-3 rounded-lg border border-[var(--danger)]/30 bg-[var(--bg-surface)] p-6 text-sm" role="alert">
+      <AlertCircle size={20} className="text-[var(--danger)] shrink-0" />
+      <div>
+        <p className="text-[var(--danger)] font-medium">Failed to load health data</p>
+        <p className="text-[var(--text-secondary)] mt-0.5">{q.error instanceof Error ? q.error.message : "The health endpoint is unavailable."}</p>
+        <button
+          type="button"
+          onClick={() => q.refetch()}
+          className="mt-3 px-3 py-1.5 text-xs rounded border border-[var(--border)] text-[var(--text-primary)] hover:bg-[var(--bg-elevated)]"
+        >
+          Retry
+        </button>
+      </div>
+    </div>
+  );
+  const data = q.data as MonitoringHealth;
   if (!data) return null;
 
   const disk = data.disk?.[0];

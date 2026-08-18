@@ -100,6 +100,68 @@ export interface UpdateOrganizationResponse {
   };
 }
 
+// Phase 3 (Frontend): POST /platform/organizations
+// (CreatePlatformOrganization, internal/api/handlers/platform_admin.go,
+// routed at internal/api/router.go). The live response carries the
+// ONE-TIME owner invitation token — shown exactly once with a copy
+// action, never persisted by the UI, never re-fetched. The org starts
+// pending_activation (tenants.active=0) and becomes active ONLY when
+// the owner redeems the token at POST /auth/invitations/accept
+// (InvitationAcceptPage). Idempotency-Key is REQUIRED; a replay
+// returns the stored body WITHOUT the token.
+export interface CreatePlatformOrganizationRequest {
+  name: string;
+  slug?: string;
+  domain?: string;
+  owner_email: string;
+  plan_id?: string;
+  max_domains?: number;
+  max_mailboxes?: number;
+}
+
+export interface PlatformInvitation {
+  id: number;
+  organization_id: number;
+  inviter_id: number;
+  email: string;
+  role: string;
+  status: string;
+  expires_at: string;
+  accepted_at?: string | null;
+  revoked_at?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreatePlatformOrganizationResponse {
+  organization: {
+    id: number;
+    name: string;
+    slug: string;
+    domain: string;
+    plan: string;
+    active: boolean;
+    created_at: string;
+    updated_at: string;
+  };
+  invitation: PlatformInvitation;
+  invite_token: string;
+  warning: string;
+}
+
+// Canonical activation lifecycle states reported by
+// GET /platform/organizations/:id/detail (status_label).
+export const ORG_LIFECYCLE_LABELS: Readonly<Record<string, string>> = {
+  pending_activation: "Pending activation",
+  active: "Active",
+  disabled: "Disabled",
+};
+
+export function orgLifecycleLabel(statusLabel: string | undefined): string {
+  if (!statusLabel) return "";
+  return ORG_LIFECYCLE_LABELS[statusLabel] ?? statusLabel;
+}
+
 // Phase G: POST /platform/organizations/:id/deletion
 // (PlatformScheduleOrganizationDeletion, organization_admin.go). Requires a
 // typed confirmation matching the org's exact domain and a reason; blocked

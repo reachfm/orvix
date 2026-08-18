@@ -416,3 +416,65 @@ credential).
 8. **SystemHealth.tsx**: replace direct `fetch("/api/v1/monitoring/health")` with the shared client (DIRECT_FETCH_BYPASS).
 9. **Organization activation (new, R-1 lifecycle)**: after a PSA creates an org, the owner redeems the one-time token at `POST /auth/invitations/accept` (token + password). Build the accept page (public), then redirect to login. Duplicate acceptance returns 409 `INVALID_STATE_TRANSITION`; unknown tokens 404 `NOT_FOUND`.
 10. Do NOT wire: `POST /firewall/rules` (410 by design), `POST /updates/apply/:module` (stub — use `/update/run`), `/admin/fs/*` (machine-only), `POST /guardian/analyze` (machine-only), signed artifact apply/rollback (operator/machine-only, external coordinator required).
+
+## 12. Phase 3 addendum (Frontend Developer) — UI completion
+
+Executed after Phase 2 on the same branch. Scope: every
+API_READY_FRONTEND_PENDING item wired against the canonical typed
+client, documented FAKE_UI/DEAD_UI/DIRECT_FETCH_BYPASS items
+eliminated, focused tests added, capability matrix + this matrix
+re-dispositioned. Starting SHA: `88d3be25239c53196ab3b40b717a4b1bb36df39c`.
+
+### 12.1 Disposition changes (Phase 3)
+
+| ID | Item (handoff ref) | Frontend completion | Tests |
+|---|---|---|---|
+| F-1 | PSA Org create (1) + pending_activation lifecycle (7) | `CreateOrganizationDialog` (owner_email required, Idempotency-Key, one-time `invite_token` revealed once with copy + warning); detail drawer renders `status_label: pending_activation` distinctly, activation control disabled until the owner redeems the token; table page hosts the dialog | `organizations/create.test.tsx`, `organizations/page.test.tsx` |
+| F-2 | Public invitation accept (2) | New public `InvitationAcceptPage` at `/admin/invitations/accept` (`?token=` prefill), stable 404/409 error mapping per contract, success → redirect to login | `InvitationAcceptPage.test.tsx` |
+| F-3 | Invitations list/create/revoke/resend (3) | `InvitationsPage` renders pending/accepted/revoked/expired states; one-time token reveal on create AND on resend (rotate warning); resend wired to `POST /enterprise/invitations/:id/resend` | `InvitationsPage.test.tsx` |
+| F-4 | Tenant Audit page envelope (4) | `AuditLog.tsx` consumes the `{entries,total,limit,offset}` envelope via `api.listAuditLogsEnvelope` with action/result filters + pagination; the `audit` tab is now reachable in the organization portal (was DEAD_UI — absent from `ORGANIZATION_TAB_IDS`) | covered by `PortalBrowserAcceptance.test.tsx` + existing suites |
+| F-5 | Platform Audit export (5) | `exportAuditLogs` streams a real Blob through the shared client (`responseType:"blob"` — documented file-download exception); Export CSV/JSON buttons trigger the download; failures surface explicitly | `features/platform/audit/export.test.tsx` |
+| F-6 | Security AuditPanel envelope (6) | `features/platform/security/api.ts listAuditLogs` unwraps the `{entries,total,limit,offset}` envelope (was typing a bare array → empty panel) | `security/AuditPanelEnvelope.test.tsx`, `AuditFirewallSelfHeal.test.tsx` |
+| F-7 | Platform Billing overview (8) | Overview cards (subscription/plan/period/usage/invoices) + honest `payment_provider` state ("Payment provider not configured" when `configured:false`); never fabricates cards/MRR/paid invoices | `platform-billing/overview.test.tsx` |
+| F-8 | Tenant Billing state (8) | `BillingPage` renders `GET /enterprise/billing/state` provider state; the previous hardcoded "Billing provider not configured" line is gone | `BillingPage.test.tsx` |
+| F-9 | Platform Groups CRUD (9) | create dialog, delete with typed `X-Confirm: DELETE-GROUP-<id>`, member add/remove in the members drawer — all against the R-2 routes | `groups/page.test.tsx` |
+| F-10 | DKIM revoke (10) | "Revoke DKIM" beside generate/rotate in `DomainDetailDrawer` (confirm dialog; repeat revoke is a no-op success server-side) | `domains/components/DkimRevoke.test.tsx` |
+| F-11 | Queue History/Export (11a) | `QueueHistoryPanel` tab (delivery-attempt history, cursor pagination, status/remote-host filters) + redacted queue CSV export (blob download); bulk action was already wired (`BulkQueueActionPanel`) | `mail-operations/history.test.tsx`, `page.test.tsx` |
+| F-12 | Backup schedule editing (11b) | `BackupsPanel` schedule editor (enabled/frequency/retentionCount) via `POST /admin/backups/schedule` | `reliability/components/BackupsPanelSchedule.test.tsx` |
+| F-13 | SystemHealth DIRECT_FETCH_BYPASS (11c) | `SystemHealth.tsx` now reads `/monitoring/health` through `reliability/api.ts getMonitoringHealth` (shared CSRF/auth client); explicit error + retry states | `SystemHealth.test.tsx` |
+| F-14 | Tenant audit tab reachability | `audit` added to `ORGANIZATION_TAB_IDS` (the canonical `/enterprise/audit/logs` page was unreachable) | — |
+
+### 12.2 Eliminated defects (Phase 3)
+
+- FAKE_UI removed: none newly created; the pre-existing hardcoded
+  "Billing provider not configured" line in `BillingPage.tsx` (a
+  client-side claim, not backend state) was replaced with the real
+  `GET /enterprise/billing/state` read.
+- DEAD_UI surfaced: the tenant `audit` tab (canonical tenant-scoped
+  audit page) was absent from the organization portal allow-list;
+  added, with envelope + pagination.
+- DIRECT_FETCH_BYPASS fixed: `SystemHealth.tsx` raw
+  `fetch("/api/v1/monitoring/health")` replaced by the canonical typed
+  client.
+- Stale "read-only" claims removed: `groups/contract.ts` and
+  `groups/page.tsx` documented the platform groups surface as
+  read-only (written before Phase 1/2 added the mutation routes); both
+  now describe and exercise the real CRUD.
+- Stale capability-matrix dispositions corrected (115 rows
+  MISSING_UI → UI_SUPPORTED, 1 row READ_ONLY_STATUS → UI_SUPPORTED;
+  the remaining 12 MISSING_UI rows are intentional — see the matrix).
+
+### 12.3 Intentionally remaining backend-only capabilities (Phase 3)
+
+| Capability | Rationale |
+|---|---|
+| `GET /admin/backups/:id` | list view already shows every field; no separate detail fetch needed (INTENTIONAL_READ_ONLY) |
+| `GET /audit/logs/:id` | audit pages render list rows; no detail action consumes it yet |
+| `GET /admin/runtime` | overlaps the Health page's `/monitoring/health` data; not the same payload |
+| Signed update artifacts (6 routes) | operator/machine-only by design: release-engineering actions, not admin forms; apply/rollback need the external coordinator and typed confirm (INTENTIONAL_MACHINE_ONLY) |
+| `GET /platform/capabilities` | no operator-facing consumer |
+| `POST /platform/users/:id/deactivate` | no operator-facing consumer |
+| Support-view attachment download | rendered but not yet exercised by an automated test (MISSING_TEST per parity matrix 4.2.8) |
+| `POST /firewall/rules` | 410 by design (DEPRECATED — reads remain for forensics) |
+| `POST /updates/apply/:module` | no-op stub superseded by `POST /update/run` (DUPLICATE_SUPERSEDED) |
+| `/admin/fs/*`, `POST /guardian/analyze` | machine-only (MACHINE_ONLY) |

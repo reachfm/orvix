@@ -4,6 +4,7 @@ import {
   deactivatePlatformDomain,
   deletePlatformDomain,
   generatePlatformDomainDKIM,
+  revokePlatformDomainDKIM,
   rotatePlatformDomainDKIM,
   setPlatformDomainMailAccessMode,
   setPlatformDomainStatus,
@@ -101,6 +102,25 @@ export function useRotateDKIMMutation(tenantId: number | null) {
   return useMutation({
     mutationFn: ({ id, body, idempotencyKey }: { id: number; body: PlatformDKIMMutationRequest; idempotencyKey: string }) =>
       rotatePlatformDomainDKIM(tenantId as number, id, body, idempotencyKey),
+    onSuccess: (_result, { id }) => {
+      qc.invalidateQueries({ queryKey: domainKeys.detail(tenantId, id) });
+      qc.invalidateQueries({ queryKey: domainKeys.dns(tenantId, id) });
+      for (const key of domainInvalidationKeys()) qc.invalidateQueries({ queryKey: key });
+    },
+  });
+}
+
+/**
+ * Disables the domain's DKIM configuration (POST .../dkim/revoke).
+ * Destructive for signing but never exposes key material and never
+ * mutates public DNS. On success, refetches domain detail and the live
+ * DNS snapshot so the DKIM tab immediately shows the unconfigured
+ * state. A repeat revoke is a no-op success server-side.
+ */
+export function useRevokeDKIMMutation(tenantId: number | null) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id }: { id: number }) => revokePlatformDomainDKIM(tenantId as number, id),
     onSuccess: (_result, { id }) => {
       qc.invalidateQueries({ queryKey: domainKeys.detail(tenantId, id) });
       qc.invalidateQueries({ queryKey: domainKeys.dns(tenantId, id) });

@@ -1,6 +1,21 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { scheduleOrganizationDeletion, setOrganizationActive, updateOrganization } from "./api";
-import type { ScheduleOrganizationDeletionRequest, UpdateOrganizationRequest } from "./contract";
+import { createPlatformOrganization, scheduleOrganizationDeletion, setOrganizationActive, updateOrganization } from "./api";
+import type { CreatePlatformOrganizationRequest, ScheduleOrganizationDeletionRequest, UpdateOrganizationRequest } from "./contract";
+
+export function useCreatePlatformOrganizationMutation() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ body, idempotencyKey }: { body: CreatePlatformOrganizationRequest; idempotencyKey: string }) =>
+      createPlatformOrganization(body, idempotencyKey),
+    onSuccess: () => {
+      // The response carries the one-time invite token (shown once by
+      // the dialog) and the new org starts pending_activation —
+      // reload the authoritative list rather than assuming state.
+      qc.invalidateQueries({ queryKey: ["platform-organizations"] });
+      qc.invalidateQueries({ queryKey: ["overview"] });
+    },
+  });
+}
 
 export function useSetOrganizationActiveMutation(id: number) {
   const qc = useQueryClient();

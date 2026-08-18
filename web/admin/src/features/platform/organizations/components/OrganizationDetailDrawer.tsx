@@ -3,12 +3,27 @@ import ConfirmDialog from "../../../../components/ConfirmDialog";
 import { useOrganizationDetailQuery } from "../queries";
 import { useScheduleOrganizationDeletionMutation, useSetOrganizationActiveMutation } from "../mutations";
 import OrganizationEditForm from "./OrganizationEditForm";
+import { orgLifecycleLabel } from "../contract";
 
 function formatBytes(n: number): string {
   if (n <= 0) return "0 B";
   const units = ["B", "KB", "MB", "GB", "TB"];
   const i = Math.min(units.length - 1, Math.floor(Math.log(n) / Math.log(1024)));
   return `${(n / Math.pow(1024, i)).toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
+}
+
+/** Lifecycle badge tone for the canonical status_label values. */
+function lifecycleTone(statusLabel: string | undefined): string {
+  switch (statusLabel) {
+    case "active":
+      return "bg-[var(--success)]/10 text-[var(--success)]";
+    case "pending_activation":
+      return "bg-[var(--warning)]/15 text-[var(--warning)]";
+    case "disabled":
+      return "bg-[var(--danger)]/10 text-[var(--danger)]";
+    default:
+      return "bg-[var(--bg-subtle)] text-[var(--text-secondary)]";
+  }
 }
 
 export default function OrganizationDetailDrawer({ id, onClose }: { id: number; onClose: () => void }) {
@@ -23,6 +38,10 @@ export default function OrganizationDetailDrawer({ id, onClose }: { id: number; 
   const detailQ = useOrganizationDetailQuery(id);
   const toggleMut = useSetOrganizationActiveMutation(id);
   const deleteMut = useScheduleOrganizationDeletionMutation(id);
+
+  const detail = detailQ.data;
+  const statusLabel = detail?.status_label || (detail?.active ? "active" : "disabled");
+  const pendingActivation = statusLabel === "pending_activation";
 
   return (
     <div className="fixed inset-0 z-40 flex justify-end bg-black/50" onClick={onClose}>
@@ -41,9 +60,16 @@ export default function OrganizationDetailDrawer({ id, onClose }: { id: number; 
             <div className="mb-6">
               <h4 className="text-xl font-semibold text-[var(--text-primary)]">{detailQ.data.name}</h4>
               <p className="text-sm text-[var(--text-secondary)]">{detailQ.data.domain}</p>
-              <span className={`inline-block mt-2 px-2 py-0.5 rounded text-xs ${detailQ.data.active ? "bg-[var(--success)]/10 text-[var(--success)]" : "bg-[var(--danger)]/10 text-[var(--danger)]"}`}>
-                {detailQ.data.status_label || (detailQ.data.active ? "active" : "suspended")}
+              <span className={`inline-block mt-2 px-2 py-0.5 rounded text-xs ${lifecycleTone(statusLabel)}`}>
+                {orgLifecycleLabel(statusLabel)}
               </span>
+              {pendingActivation && (
+                <p className="text-xs text-[var(--text-secondary)] mt-2 border border-[var(--warning)]/30 rounded-lg p-2 bg-[var(--warning)]/5">
+                  This organization was created by a Platform Super Admin and is waiting for its invited owner to
+                  redeem the one-time token (public invitation-accept page). Until then it cannot be activated and
+                  its tenant console is locked.
+                </p>
+              )}
             </div>
 
             <dl className="space-y-2 text-sm mb-4">
@@ -67,10 +93,11 @@ export default function OrganizationDetailDrawer({ id, onClose }: { id: number; 
             <div className="flex flex-wrap gap-2">
               <button
                 onClick={() => setConfirmToggle({ active: !detailQ.data!.active })}
-                disabled={toggleMut.isPending}
+                disabled={toggleMut.isPending || pendingActivation}
+                title={pendingActivation ? "Activation happens when the invited owner redeems the invitation token" : undefined}
                 className={`px-3 py-2 text-sm rounded disabled:opacity-50 ${detailQ.data.active ? "bg-[var(--danger)] text-black" : "bg-[var(--success)] text-black"}`}
               >
-                {toggleMut.isPending ? "Working…" : detailQ.data.active ? "Suspend organization" : "Activate organization"}
+                {toggleMut.isPending ? "Working…" : detailQ.data.active ? "Suspend organization" : pendingActivation ? "Awaiting owner activation" : "Activate organization"}
               </button>
               <button
                 onClick={() => {
@@ -136,8 +163,8 @@ export default function OrganizationDetailDrawer({ id, onClose }: { id: number; 
           open={!!confirmToggle}
           onOpenChange={(o) => !o && setConfirmToggle(null)}
           title={confirmToggle?.active ? "Activate organization" : "Suspend organization"}
-          description={`This will ${confirmToggle?.active ? "restore" : "suspend"} access for tenant "${detailQ.data?.name ?? id}". Suspending blocks all mail delivery and login for this organization's users.`}
-          requireTypedName={detailQ.data?.slug || detailQ.data?.name || ""}
+          description={`This will ${confirmToggle?.active ? "restore" : "suspend"} access for tenant "${detail?.name ?? id}". Suspending blocks all mail delivery and login for this organization's users.`}
+          requireTypedName={detail?.slug || detail?.name || ""}
           danger={!confirmToggle?.active}
           pending={toggleMut.isPending}
           onConfirm={() => {
@@ -150,15 +177,15 @@ export default function OrganizationDetailDrawer({ id, onClose }: { id: number; 
           open={deleteStep === "confirm"}
           onOpenChange={(o) => !o && setDeleteStep("idle")}
           title="Schedule organization deletion"
-          description={`This schedules "${detailQ.data?.name ?? id}" for deletion after a 30-day retention window. The organization must have zero active domains and zero active mailboxes. This does not immediately delete billing or audit history.`}
-          requireTypedName={detailQ.data?.domain || ""}
+          description={`This schedules "${detail?.name ?? id}" for deletion after a 30-day retention window. The organization must have zero active domains and zero active mailboxes. This does not immediately delete billing or audit history.`}
+          requireTypedName={detail?.domain || ""}
           confirmLabel="Schedule Deletion"
           danger
           pending={deleteMut.isPending}
           onConfirm={() => {
-            if (!detailQ.data) return;
+            if (!detail) return;
             deleteMut.mutate(
-              { confirm_domain: detailQ.data.domain, reason: deleteReason.trim() },
+              { confirm_domain: detail.domain, reason: deleteReason.trim() },
               { onSuccess: () => setDeleteStep("idle") },
             );
           }}

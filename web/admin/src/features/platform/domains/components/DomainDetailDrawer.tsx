@@ -9,6 +9,7 @@ import {
   useSetDomainStatusMutation,
   useGenerateDKIMMutation,
   useRotateDKIMMutation,
+  useRevokeDKIMMutation,
   useDeactivateDomainMutation,
   useDeleteDomainMutation,
   useVerifyDomainDNSMutation,
@@ -151,6 +152,7 @@ export default function DomainDetailDrawer({
   const statusMut = useSetDomainStatusMutation(tenantId);
   const generateDKIMMut = useGenerateDKIMMutation(tenantId);
   const rotateDKIMMut = useRotateDKIMMutation(tenantId);
+  const revokeDKIMMut = useRevokeDKIMMutation(tenantId);
   const deactivateMut = useDeactivateDomainMutation(tenantId);
   const deleteMut = useDeleteDomainMutation(tenantId);
   const verifyMut = useVerifyDomainDNSMutation(tenantId);
@@ -160,6 +162,7 @@ export default function DomainDetailDrawer({
   const [mutationError, setMutationError] = useState<unknown>(null);
   const [dkimError, setDkimError] = useState<unknown>(null);
   const [rotateConfirmOpen, setRotateConfirmOpen] = useState(false);
+  const [revokeConfirmOpen, setRevokeConfirmOpen] = useState(false);
   const [deactivateConfirmOpen, setDeactivateConfirmOpen] = useState(false);
   const [deactivateReason, setDeactivateReason] = useState("");
   const [deactivateError, setDeactivateError] = useState<unknown>(null);
@@ -252,6 +255,18 @@ export default function DomainDetailDrawer({
       },
       {
         onSuccess: () => setRotateConfirmOpen(false),
+        onError: (e) => setDkimError(e),
+      },
+    );
+  }
+
+  function submitRevokeDKIM() {
+    if (!domain) return;
+    setDkimError(null);
+    revokeDKIMMut.mutate(
+      { id: domain.id },
+      {
+        onSuccess: () => setRevokeConfirmOpen(false),
         onError: (e) => setDkimError(e),
       },
     );
@@ -620,17 +635,28 @@ export default function DomainDetailDrawer({
                           </dd>
                         </dl>
                       </div>
-                      <button
-                        type="button"
-                        onClick={() => setRotateConfirmOpen(true)}
-                        className="px-3 py-1.5 text-sm rounded border border-[var(--danger)]/40 text-[var(--danger)] hover:bg-[var(--danger)]/10"
-                      >
-                        Rotate DKIM
-                      </button>
+                      <div className="flex flex-wrap gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setRotateConfirmOpen(true)}
+                          className="px-3 py-1.5 text-sm rounded border border-[var(--danger)]/40 text-[var(--danger)] hover:bg-[var(--danger)]/10"
+                        >
+                          Rotate DKIM
+                        </button>
+                        <button
+                          type="button"
+                          disabled={revokeDKIMMut.isPending}
+                          onClick={() => setRevokeConfirmOpen(true)}
+                          className="px-3 py-1.5 text-sm rounded border border-[var(--danger)]/40 text-[var(--danger)] hover:bg-[var(--danger)]/10 disabled:opacity-40"
+                        >
+                          {revokeDKIMMut.isPending && <Loader2 size={14} className="inline animate-spin mr-1.5" />}
+                          Revoke DKIM
+                        </button>
+                      </div>
                       <p className="text-xs text-[var(--text-muted)]">
                         Rotation replaces the current key pair; the previously published TXT record stops matching
                         as soon as it completes. Publish the new value before old mail relying on the prior key
-                        expires from caches.
+                        expires from caches. Revocation disables DKIM entirely (repeat revoke is a no-op success).
                       </p>
                     </>
                   ) : (
@@ -838,6 +864,19 @@ export default function DomainDetailDrawer({
               danger
               pending={rotateDKIMMut.isPending}
               onConfirm={submitRotateDKIM}
+            />
+          )}
+
+          {domain && (
+            <ConfirmDialog
+              open={revokeConfirmOpen}
+              onOpenChange={setRevokeConfirmOpen}
+              title="Revoke DKIM"
+              description={`This disables DKIM signing for ${domain.name}. The published TXT record stops matching and signed mail is no longer produced. No key material is exposed and public DNS is never modified. A repeated revoke is a no-op success.`}
+              confirmLabel="Revoke DKIM"
+              danger
+              pending={revokeDKIMMut.isPending}
+              onConfirm={submitRevokeDKIM}
             />
           )}
 

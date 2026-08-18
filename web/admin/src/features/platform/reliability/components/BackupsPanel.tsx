@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Download, ShieldCheck, RefreshCw, Trash2 } from "lucide-react";
+import { Download, ShieldCheck, RefreshCw, Trash2, Save, Loader2 } from "lucide-react";
 import ConfirmDialog from "../../../../components/ConfirmDialog";
 import { downloadBackupUrl } from "../api";
 import {
@@ -9,12 +9,19 @@ import {
 import {
   useCreateBackupMutation, useRunBackupNowMutation, useValidateBackupMutation,
   useRestoreBackupMutation, useDeleteBackupMutation, useRunBackupRetentionMutation,
+  useSetBackupScheduleMutation,
 } from "../mutations";
 import { Loading, ErrorBox, Empty } from "./StateViews";
+
+const FREQUENCIES: ReadonlyArray<string> = ["hourly", "daily", "weekly"];
 
 export default function BackupsPanel() {
   const [confirm, setConfirm] = useState<{ id: string; kind: "restore" | "delete" | "retention" } | null>(null);
   const [restoreJobId, setRestoreJobId] = useState<string | null>(null);
+  // Schedule edit draft: starts null (no edits pending) and mirrors the
+  // loaded schedule when the operator opens the editor.
+  const [scheduleDraft, setScheduleDraft] = useState<{ enabled: boolean; frequency: string; retentionCount: string } | null>(null);
+  const [scheduleError, setScheduleError] = useState<unknown>(null);
 
   const listQ = useBackupsQuery();
   const scheduleQ = useBackupScheduleQuery(listQ.isSuccess || listQ.isError);
@@ -28,8 +35,36 @@ export default function BackupsPanel() {
   const restoreMut = useRestoreBackupMutation();
   const deleteMut = useDeleteBackupMutation();
   const retentionMut = useRunBackupRetentionMutation();
+  const scheduleMut = useSetBackupScheduleMutation();
 
   const backups = listQ.data ?? [];
+
+  const openScheduleEditor = () => {
+    if (!scheduleQ.data) return;
+    setScheduleError(null);
+    setScheduleDraft({
+      enabled: scheduleQ.data.enabled,
+      frequency: scheduleQ.data.frequency,
+      retentionCount: String(scheduleQ.data.retentionCount),
+    });
+  };
+
+  const saveSchedule = () => {
+    if (!scheduleDraft) return;
+    const retention = Number.parseInt(scheduleDraft.retentionCount, 10);
+    if (!Number.isFinite(retention) || retention < 1) {
+      setScheduleError(new Error("Retention count must be a positive integer."));
+      return;
+    }
+    setScheduleError(null);
+    scheduleMut.mutate(
+      { enabled: scheduleDraft.enabled, frequency: scheduleDraft.frequency, retentionCount: retention },
+      {
+        onSuccess: () => setScheduleDraft(null),
+        onError: (e) => setScheduleError(e),
+      },
+    );
+  };
 
   return (
     <div>
@@ -37,7 +72,6 @@ export default function BackupsPanel() {
         <div className="flex gap-4 text-xs text-[var(--text-secondary)]">
           {healthQ.data && <span>Health: <span className="text-[var(--text-primary)]">{healthQ.data.status}</span></span>}
           {metricsQ.data && <span>Total: <span className="text-[var(--text-primary)]">{metricsQ.data.totalBackups}</span></span>}
-          {scheduleQ.data && <span>Schedule: <span className="text-[var(--text-primary)]">{scheduleQ.data.enabled ? scheduleQ.data.frequency : "disabled"}</span></span>}
         </div>
         <div className="flex gap-2">
           <button disabled={createMut.isPending} onClick={() => createMut.mutate()} className="px-3 py-1.5 text-xs bg-[var(--accent)] text-white rounded disabled:opacity-50">Create backup</button>
@@ -45,6 +79,85 @@ export default function BackupsPanel() {
           <button onClick={() => setConfirm({ id: "retention", kind: "retention" })} className="px-3 py-1.5 text-xs bg-[var(--bg-subtle)] text-[var(--text-primary)] rounded">Run retention</button>
         </div>
       </div>
+
+      {scheduleQ.data && !scheduleDraft && (
+        <div className="flex items-center gap-4 text-xs text-[var(--text-secondary)] bg-[var(--bg-surface)] border border-[var(--border)] rounded-lg p-3 mb-4">
+          <span>
+            Schedule: <span className="text-[var(--text-primary)]">{scheduleQ.data.enabled ? scheduleQ.data.frequency : "disabled"}</span>
+          </span>
+          <span>
+            Retention: <span className="text-[var(--text-primary)]">{scheduleQ.data.retentionCount} backups</span>
+          </span>
+          <button
+            type="button"
+            onClick={openScheduleEditor}
+            className="ml-auto px-2.5 py-1.5 rounded border border-[var(--border)] text-[var(--text-primary)] hover:bg-[var(--bg-elevated)]"
+          >
+            Edit schedule
+          </button>
+        </div>
+      )}
+
+      {scheduleDraft && (
+        <div className="bg-[var(--bg-surface)] border border-[var(--border)] rounded-lg p-4 mb-4 space-y-3" role="group" aria-label="Backup schedule editor">
+          <h3 className="text-sm font-semibold text-[var(--text-primary)]">Edit backup schedule</h3>
+          {scheduleError !== null && (
+            <p className="text-xs text-[var(--danger)]" role="alert">
+              {scheduleError instanceof Error ? scheduleError.message : "Schedule update failed."}
+            </p>
+          )}
+          {scheduleMut.isSuccess && <p className="text-xs text-[var(--success)]" role="status">Schedule saved.</p>}
+          <label className="flex items-center gap-2 text-sm text-[var(--text-primary)]">
+            <input
+              type="checkbox"
+              checked={scheduleDraft.enabled}
+              onChange={(e) => setScheduleDraft({ ...scheduleDraft, enabled: e.target.checked })}
+            />
+            Scheduled backups enabled
+          </label>
+          <label className="block text-sm">
+            <span className="text-[var(--text-secondary)]">Frequency</span>
+            <select
+              value={scheduleDraft.frequency}
+              onChange={(e) => setScheduleDraft({ ...scheduleDraft, frequency: e.target.value })}
+              className="mt-1 px-3 py-1.5 bg-[var(--bg-elevated)] border border-[var(--border)] rounded text-sm text-[var(--text-primary)]"
+            >
+              {FREQUENCIES.map((f) => (
+                <option key={f} value={f}>{f}</option>
+              ))}
+            </select>
+          </label>
+          <label className="block text-sm">
+            <span className="text-[var(--text-secondary)]">Retention count (backups kept)</span>
+            <input
+              type="number"
+              min={1}
+              value={scheduleDraft.retentionCount}
+              onChange={(e) => setScheduleDraft({ ...scheduleDraft, retentionCount: e.target.value })}
+              className="mt-1 px-3 py-1.5 bg-[var(--bg-elevated)] border border-[var(--border)] rounded text-sm text-[var(--text-primary)]"
+            />
+          </label>
+          <div className="flex gap-2">
+            <button
+              type="button"
+              disabled={scheduleMut.isPending}
+              onClick={saveSchedule}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs bg-[var(--accent)] text-white rounded disabled:opacity-50"
+            >
+              {scheduleMut.isPending ? <Loader2 size={12} className="animate-spin" /> : <Save size={12} />}
+              Save schedule
+            </button>
+            <button
+              type="button"
+              disabled={scheduleMut.isPending}
+              onClick={() => setScheduleDraft(null)}
+              className="px-3 py-1.5 text-xs bg-[var(--bg-subtle)] text-[var(--text-primary)] rounded"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
 
       {restoreJobId && restoreJobQ.data && (
         <div className="bg-[var(--bg-surface)] border border-[var(--border)] rounded-xl p-4 mb-4 text-sm">

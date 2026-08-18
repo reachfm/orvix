@@ -1,5 +1,6 @@
 import { useState } from "react";
-import { useBalance, useAdjustments, useReconciliation, useCreateAdjustment } from "./queries";
+import { AlertTriangle, CheckCircle2, XCircle } from "lucide-react";
+import { useBalance, useAdjustments, useReconciliation, useCreateAdjustment, useBillingOverview } from "./queries";
 import { formatMinorUnits, formatSignedMinorUnits } from "./formatters";
 import { ADJUSTMENT_TYPES, type AdjustmentType } from "./contract";
 import { useTenantScope } from "../tenant-context/queries";
@@ -23,6 +24,15 @@ function money(cents: number, currency?: string): string {
   return formatMinorUnits(cents, currency);
 }
 
+function Row({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex justify-between gap-4">
+      <dt className="text-[var(--text-secondary)]">{label}</dt>
+      <dd className="text-[var(--text-primary)] text-right">{value}</dd>
+    </div>
+  );
+}
+
 export default function PlatformBillingPage() {
   const { data: scope } = useTenantScope();
   const tenantId = scope?.tenantId ?? null;
@@ -31,6 +41,7 @@ export default function PlatformBillingPage() {
   const balance = useBalance(tenantId);
   const adjustments = useAdjustments(tenantId);
   const reconciliation = useReconciliation(tenantId);
+  const overview = useBillingOverview(tenantId);
   const createAdj = useCreateAdjustment(tenantId);
 
   const [type, setType] = useState<AdjustmentType>("credit");
@@ -96,6 +107,101 @@ export default function PlatformBillingPage() {
       </div>
 
       <TenantScopeBanner />
+
+      {overview.isLoading ? (
+        <p className="text-sm text-[var(--text-muted)]" role="status">Loading billing overview…</p>
+      ) : overview.error ? (
+        <div className="border border-[var(--danger)]/30 rounded-lg p-4 text-sm flex items-center gap-2" role="alert">
+          <AlertTriangle size={16} className="text-[var(--danger)] shrink-0" />
+          <span className="text-[var(--danger)]">Billing overview unavailable: {(overview.error as Error).message}</span>
+        </div>
+      ) : overview.data ? (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          <div className="bg-[var(--bg-surface)] border border-[var(--border)] rounded-lg p-4">
+            <h3 className="text-sm font-semibold text-[var(--text-primary)] mb-3">Subscription</h3>
+            {overview.data.subscription && overview.data.plan ? (
+              <dl className="space-y-1.5 text-sm">
+                <Row label="Plan" value={`${overview.data.plan.name} (${overview.data.subscription.plan_id})`} />
+                <Row label="Status" value={overview.data.subscription.status.replace(/_/g, " ")} />
+                <Row label="Interval" value={overview.data.subscription.billing_interval} />
+                <Row label="Period" value={`${new Date(overview.data.subscription.current_period_start).toLocaleDateString()} – ${new Date(overview.data.subscription.current_period_end).toLocaleDateString()}`} />
+                {overview.data.subscription.trial_ends_at && (
+                  <Row label="Trial ends" value={new Date(overview.data.subscription.trial_ends_at).toLocaleDateString()} />
+                )}
+              </dl>
+            ) : (
+              <p className="text-sm text-[var(--text-muted)]">No subscription recorded for this tenant.</p>
+            )}
+          </div>
+
+          <div className="bg-[var(--bg-surface)] border border-[var(--border)] rounded-lg p-4">
+            <h3 className="text-sm font-semibold text-[var(--text-primary)] mb-3">Usage (current period)</h3>
+            {overview.data.usage ? (
+              <dl className="space-y-1.5 text-sm">
+                <Row label="Emails sent" value={String(overview.data.usage.emails_sent)} />
+                <Row label="Emails received" value={String(overview.data.usage.emails_received)} />
+                <Row label="Mailboxes" value={String(overview.data.usage.mailboxes_used)} />
+                <Row label="Domains" value={String(overview.data.usage.domains_used)} />
+              </dl>
+            ) : (
+              <p className="text-sm text-[var(--text-muted)]">No usage recorded for this period.</p>
+            )}
+          </div>
+
+          <div className="bg-[var(--bg-surface)] border border-[var(--border)] rounded-lg p-4">
+            <h3 className="text-sm font-semibold text-[var(--text-primary)] mb-3">Invoices</h3>
+            {overview.data.invoices.length === 0 ? (
+              <p className="text-sm text-[var(--text-muted)]">No invoices recorded. Rows appear only from real provider events.</p>
+            ) : (
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-[var(--border)] text-left text-[var(--text-secondary)]">
+                    <th className="py-1.5 pr-2">Number</th>
+                    <th className="py-1.5 pr-2">Status</th>
+                    <th className="py-1.5 pr-2">Total</th>
+                    <th className="py-1.5">Issued</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {overview.data.invoices.map((inv) => (
+                    <tr key={inv.id} className="border-b border-[var(--bg-subtle)]">
+                      <td className="py-1.5 pr-2 text-[var(--text-primary)]">{inv.invoice_number}</td>
+                      <td className="py-1.5 pr-2 text-[var(--text-secondary)]">{inv.status}</td>
+                      <td className="py-1.5 pr-2 text-[var(--text-primary)]">{formatMinorUnits(inv.total, inv.currency)}</td>
+                      <td className="py-1.5 text-[var(--text-secondary)]">
+                        {inv.issued_at ? new Date(inv.issued_at).toLocaleDateString() : "—"}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+
+          <div className="bg-[var(--bg-surface)] border border-[var(--border)] rounded-lg p-4">
+            <h3 className="text-sm font-semibold text-[var(--text-primary)] mb-3">Payment provider</h3>
+            {overview.data.payment_provider.configured ? (
+              <div className="flex items-center gap-2 text-sm">
+                <CheckCircle2 size={16} className="text-[var(--success)] shrink-0" />
+                <span className="text-[var(--text-primary)]">
+                  {overview.data.payment_provider.provider}
+                  {overview.data.payment_provider.enabled ? "" : " (configured but disabled)"}
+                </span>
+              </div>
+            ) : (
+              <div className="flex items-start gap-2 text-sm">
+                <XCircle size={16} className="text-[var(--warning)] shrink-0 mt-0.5" />
+                <span className="text-[var(--text-secondary)]">
+                  {overview.data.payment_provider.note || "Payment provider not configured"}
+                </span>
+              </div>
+            )}
+            <p className="text-xs text-[var(--text-muted)] mt-2">
+              Only real provider state is shown — no cards, MRR, or payment-success claims are ever fabricated.
+            </p>
+          </div>
+        </div>
+      ) : null}
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         <div className="bg-[var(--bg-surface)] border border-[var(--border)] rounded-lg p-4">
