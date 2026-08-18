@@ -31,6 +31,19 @@ export function useRunBackupRetentionMutation() {
   return useMutation({ mutationFn: api.runBackupRetention, onSuccess: () => invalidateBackups(qc) });
 }
 
+export function useSetBackupScheduleMutation() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (cfg: Partial<import("./contract").BackupSchedule>) => api.setBackupSchedule(cfg),
+    onSuccess: () => {
+      // The response is the persisted schedule — reload the
+      // authoritative schedule/health state rather than assuming it.
+      qc.invalidateQueries({ queryKey: ["backup-schedule"] });
+      qc.invalidateQueries({ queryKey: ["backup-health"] });
+    },
+  });
+}
+
 export function useCheckForUpdateMutation() {
   const qc = useQueryClient();
   return useMutation({ mutationFn: api.postUpdateCheck, onSuccess: () => qc.invalidateQueries({ queryKey: ["update-check"] }) });

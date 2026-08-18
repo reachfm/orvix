@@ -4,6 +4,7 @@ import type {
   Balance,
   CreateAdjustmentRequest,
   ListAdjustmentsResponse,
+  PlatformBillingOverview,
   ReconciliationReport,
 } from "./contract";
 
@@ -26,4 +27,8 @@ export function createAdjustment(tenantId: number, data: CreateAdjustmentRequest
 
 export function getReconciliation(tenantId: number): Promise<ReconciliationReport> {
   return request<ReconciliationReport>(`/platform/billing/tenants/${tenantId}/reconciliation`);
+}
+
+export function getBillingOverview(tenantId: number): Promise<PlatformBillingOverview> {
+  return request<PlatformBillingOverview>(`/platform/billing/tenants/${tenantId}/overview`);
 }

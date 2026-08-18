@@ -96,6 +96,33 @@ func (e *SendEnforcer) AllowSend(ctx context.Context, id SendIdentity, count int
 }
 
 func (e *SendEnforcer) ReserveSend(ctx context.Context, id SendIdentity, eventID string, count int) (*SendReservationResult, error) {
+	tx, err := e.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	result, err := e.ReserveSendTx(ctx, tx, id, eventID, count)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// ReserveSendTx is the transaction-scoped core of ReserveSend (Phase 8
+// C3A #2): it performs the exact same subscription-status check,
+// quota accounting, and reservation-event insert, but against a
+// caller-supplied *sql.Tx instead of opening (and committing) its
+// own. This lets a caller — e.g. webmail send — fold quota
+// reservation into the same authoritative transaction as the domain
+// operability recheck and the durable message write, closing the
+// check-then-act window between "domain confirmed active" and
+// "message durably accepted." The caller owns commit/rollback; this
+// method never commits or rolls back tx itself.
+func (e *SendEnforcer) ReserveSendTx(ctx context.Context, tx *sql.Tx, id SendIdentity, eventID string, count int) (*SendReservationResult, error) {
 	if id.TenantID == 0 {
 		return &SendReservationResult{SendEnforcementResult: SendEnforcementResult{Allowed: false, Reason: "invalid tenant"}}, nil
 	}
@@ -106,22 +133,13 @@ func (e *SendEnforcer) ReserveSend(ctx context.Context, id SendIdentity, eventID
 		return &SendReservationResult{SendEnforcementResult: SendEnforcementResult{Allowed: false, Reason: "invalid recipient count"}}, nil
 	}
 
-	tx, err := e.db.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback()
-
 	var existingType string
 	var existingCount int
-	err = tx.QueryRowContext(ctx,
+	err := tx.QueryRowContext(ctx,
 		"SELECT event_type, recipient_count FROM send_events WHERE tenant_id = "+e.dialect.Placeholder(1)+" AND event_id = "+e.dialect.Placeholder(2),
 		id.TenantID, eventID).Scan(&existingType, &existingCount)
 	if err == nil {
 		if existingType == "send" || existingType == "reservation" {
-			if err := tx.Commit(); err != nil {
-				return nil, err
-			}
 			return &SendReservationResult{
 				SendEnforcementResult: SendEnforcementResult{Allowed: true},
 				EventID:               eventID,
@@ -192,9 +210,6 @@ func (e *SendEnforcer) ReserveSend(ctx context.Context, id SendIdentity, eventID
 			return nil, err
 		}
 		if existingType == "send" || existingType == "reservation" {
-			if err := tx.Commit(); err != nil {
-				return nil, err
-			}
 			return &SendReservationResult{
 				SendEnforcementResult: SendEnforcementResult{Allowed: true},
 				EventID:               eventID,
@@ -202,9 +217,6 @@ func (e *SendEnforcer) ReserveSend(ctx context.Context, id SendIdentity, eventID
 				Existing:              true,
 			}, nil
 		}
-	}
-	if err := tx.Commit(); err != nil {
-		return nil, err
 	}
 	return &SendReservationResult{
 		SendEnforcementResult: SendEnforcementResult{Allowed: true, Limit: limit, Used: used, Remaining: remaining},
@@ -218,51 +230,69 @@ func (e *SendEnforcer) FinalizeSendReservation(ctx context.Context, id SendIdent
 		return nil
 	}
 	return e.withTx(func(tx *sql.Tx) error {
-		var eventType string
-		var currentCount int
-		err := tx.QueryRowContext(ctx,
-			"SELECT event_type, recipient_count FROM send_events WHERE tenant_id = "+e.dialect.Placeholder(1)+" AND event_id = "+e.dialect.Placeholder(2),
-			id.TenantID, eventID).Scan(&eventType, &currentCount)
-		if err != nil {
-			return err
-		}
-		if eventType == "send" {
-			return nil
-		}
-		if eventType != "reservation" {
-			return fmt.Errorf("send event %q is not a reservation", eventID)
-		}
-		if acceptedCount <= 0 {
-			_, err := tx.ExecContext(ctx,
-				"DELETE FROM send_events WHERE tenant_id = "+e.dialect.Placeholder(1)+" AND event_id = "+e.dialect.Placeholder(2)+" AND event_type = 'reservation'",
-				id.TenantID, eventID)
-			return err
-		}
-		now := time.Now().UTC()
-		if _, err := tx.ExecContext(ctx,
-			"UPDATE send_events SET event_type = 'send', recipient_count = "+e.dialect.Placeholder(1)+", created_at = "+e.dialect.Placeholder(2)+" WHERE tenant_id = "+e.dialect.Placeholder(3)+" AND event_id = "+e.dialect.Placeholder(4)+" AND event_type = 'reservation'",
-			acceptedCount, now, id.TenantID, eventID); err != nil {
-			return err
-		}
-		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO abuse_send_counts (day_key, tenant_id, emails_sent, created_at)
+		return e.finalizeSendReservationTx(ctx, tx, id, eventID, acceptedCount)
+	})
+}
+
+// FinalizeSendReservationTx is the transaction-scoped variant of
+// FinalizeSendReservation: same logic, against a caller-supplied
+// *sql.Tx instead of one it opens and commits itself. This lets
+// webmail send fold reservation finalization into the same
+// authoritative transaction as the durable message write and queue
+// enqueue, so quota accounting can never diverge from what was
+// actually accepted.
+func (e *SendEnforcer) FinalizeSendReservationTx(ctx context.Context, tx *sql.Tx, id SendIdentity, eventID string, acceptedCount int) error {
+	if eventID == "" || id.TenantID == 0 {
+		return nil
+	}
+	return e.finalizeSendReservationTx(ctx, tx, id, eventID, acceptedCount)
+}
+
+func (e *SendEnforcer) finalizeSendReservationTx(ctx context.Context, tx *sql.Tx, id SendIdentity, eventID string, acceptedCount int) error {
+	var eventType string
+	var currentCount int
+	err := tx.QueryRowContext(ctx,
+		"SELECT event_type, recipient_count FROM send_events WHERE tenant_id = "+e.dialect.Placeholder(1)+" AND event_id = "+e.dialect.Placeholder(2),
+		id.TenantID, eventID).Scan(&eventType, &currentCount)
+	if err != nil {
+		return err
+	}
+	if eventType == "send" {
+		return nil
+	}
+	if eventType != "reservation" {
+		return fmt.Errorf("send event %q is not a reservation", eventID)
+	}
+	if acceptedCount <= 0 {
+		_, err := tx.ExecContext(ctx,
+			"DELETE FROM send_events WHERE tenant_id = "+e.dialect.Placeholder(1)+" AND event_id = "+e.dialect.Placeholder(2)+" AND event_type = 'reservation'",
+			id.TenantID, eventID)
+		return err
+	}
+	now := time.Now().UTC()
+	if _, err := tx.ExecContext(ctx,
+		"UPDATE send_events SET event_type = 'send', recipient_count = "+e.dialect.Placeholder(1)+", created_at = "+e.dialect.Placeholder(2)+" WHERE tenant_id = "+e.dialect.Placeholder(3)+" AND event_id = "+e.dialect.Placeholder(4)+" AND event_type = 'reservation'",
+		acceptedCount, now, id.TenantID, eventID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO abuse_send_counts (day_key, tenant_id, emails_sent, created_at)
 			VALUES (`+e.dialect.Placeholder(1)+`, `+e.dialect.Placeholder(2)+`, `+e.dialect.Placeholder(3)+`, `+e.dialect.Placeholder(4)+`)
 			ON CONFLICT (day_key) DO UPDATE SET emails_sent = abuse_send_counts.emails_sent + `+e.dialect.Placeholder(5),
-			fmt.Sprintf("send:%d:%s", id.TenantID, now.Format("2006-01-02")), id.TenantID, acceptedCount, now, acceptedCount); err != nil {
-			return err
-		}
-		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO usage_records (tenant_id, period_start, period_end, emails_sent, created_at)
+		fmt.Sprintf("send:%d:%s", id.TenantID, now.Format("2006-01-02")), id.TenantID, acceptedCount, now, acceptedCount); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO usage_records (tenant_id, period_start, period_end, emails_sent, created_at)
 			VALUES (`+e.dialect.Placeholder(1)+`, `+e.dialect.Placeholder(2)+`, `+e.dialect.Placeholder(3)+`, `+e.dialect.Placeholder(4)+`, `+e.dialect.Placeholder(5)+`)
 			ON CONFLICT (tenant_id, period_start) DO UPDATE SET emails_sent = usage_records.emails_sent + `+e.dialect.Placeholder(6),
-			id.TenantID,
-			time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC),
-			time.Date(now.Year(), now.Month()+1, 1, 0, 0, 0, 0, time.UTC),
-			acceptedCount, now, acceptedCount); err != nil {
-			return err
-		}
-		return nil
-	})
+		id.TenantID,
+		time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC),
+		time.Date(now.Year(), now.Month()+1, 1, 0, 0, 0, 0, time.UTC),
+		acceptedCount, now, acceptedCount); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (e *SendEnforcer) CancelSendReservation(ctx context.Context, id SendIdentity, eventID string) error {

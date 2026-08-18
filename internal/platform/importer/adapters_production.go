@@ -42,7 +42,7 @@ func NewProductionAdapters(deps ProductionAdapterDeps) (*Adapters, error) {
 		&prodAdminAdapter{db: deps.DB, dialect: deps.Dialect},
 		&prodDomainAdapter{svc: deps.DomainService},
 		&prodMailboxAdapter{svc: deps.MailboxService},
-		&prodAliasAdapter{db: deps.DB, dialect: deps.Dialect},
+		&prodAliasAdapter{db: deps.DB, dialect: deps.Dialect, domainRepo: domain.NewDomainAdminRepo(deps.DB)},
 		&prodGroupAdapter{db: deps.DB, dialect: deps.Dialect},
 	), nil
 }
@@ -264,23 +264,54 @@ func (a *prodMailboxAdapter) UpdateMailbox(ctx context.Context, id, tenantID uin
 type prodAliasAdapter struct {
 	db      *sql.DB
 	dialect *dbdialect.Info
+	// domainRepo is constructed ONCE at adapter-construction time (see
+	// NewProductionAdaptersFromDB), never inside CreateAlias's
+	// transaction — domain.NewDomainAdminRepo runs its own dialect-
+	// detection query against the raw *sql.DB, which deadlocks if run
+	// while an already-open transaction holds the pool's only
+	// connection. Same bug, same fix as the alias-creation HTTP
+	// handler and bulkprovision.Repository (Phase 8 C2/C2-R1).
+	domainRepo *domain.DomainAdminRepo
 }
 
+// CreateAlias resolves the target domain, checks its operability, and
+// inserts the alias row — all inside ONE transaction (Phase 8 C2-R1).
+// Previously the guard ran as a separate, non-transactional read
+// before an unguarded insert: a domain could be disabled in the
+// window between the check and the insert (TOCTOU). Locking the
+// domain row FOR UPDATE (Postgres) for the duration of the same
+// transaction that performs the insert closes that window exactly the
+// way every other C1/C2 guard integration does.
 func (a *prodAliasAdapter) CreateAlias(ctx context.Context, fromEmail, toEmail string, tenantID, domainID uint) (uint, error) {
 	if err := requireTenant(tenantID); err != nil {
 		return 0, err
 	}
+	tx, err := a.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+
 	if domainID == 0 {
-		var err error
-		domainID, err = resolveDomainID(ctx, a.db, a.dialect, toEmail, tenantID)
+		domainID, err = resolveDomainID(ctx, tx, a.dialect, toEmail, tenantID)
 		if err != nil {
 			return 0, err
 		}
 	}
+	if opOut := a.domainRepo.WithTx(tx).CheckOperabilityByIDTx(ctx, domainID, tenantID, true); !opOut.Operational() {
+		return 0, opOut.Err
+	}
 	now := timeNow()
-	return insertReturningID(ctx, a.db, a.dialect,
+	id, err := insertReturningID(ctx, tx, a.dialect,
 		`INSERT INTO coremail_aliases (domain_id, tenant_id, from_addr, to_addr, active, created_at, updated_at) VALUES (?,?,?,?,1,?,?)`,
 		domainID, tenantID, fromEmail, toEmail, now, now)
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return id, nil
 }
 
 func (a *prodAliasAdapter) SoftDeleteAlias(ctx context.Context, id, tenantID uint) error {
@@ -382,7 +413,7 @@ func slugify(name string) string {
 	return out
 }
 
-func resolveDomainID(ctx context.Context, db *sql.DB, dialect *dbdialect.Info, email string, tenantID uint) (uint, error) {
+func resolveDomainID(ctx context.Context, db sqlExecutor, dialect *dbdialect.Info, email string, tenantID uint) (uint, error) {
 	parts := strings.SplitN(email, "@", 2)
 	if len(parts) != 2 {
 		return 0, fmt.Errorf("invalid email address: %s", email)

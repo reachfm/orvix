@@ -599,6 +599,20 @@ func MigrateAllRaw(db *gorm.DB) error {
 			delivery_status TEXT NOT NULL DEFAULT 'pending',
 			delivery_error TEXT NOT NULL DEFAULT ''
 		)`,
+		// support_ticket_messages — reply thread backing the Platform
+		// Support Inbox. The parent ticket row in support_requests
+		// carries tenant_id; tenant isolation is enforced in the handler
+		// via the parent ticket's tenant_id predicate.
+		`CREATE TABLE IF NOT EXISTS support_ticket_messages (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL,
+			ticket_id INTEGER NOT NULL,
+			author_user_id INTEGER NOT NULL,
+			author_email TEXT NOT NULL DEFAULT '',
+			author_kind TEXT NOT NULL DEFAULT '',
+			body TEXT NOT NULL DEFAULT ''
+		)`,
 		`CREATE TABLE IF NOT EXISTS invoices (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			created_at DATETIME NOT NULL,
@@ -729,6 +743,8 @@ func MigrateAllRaw(db *gorm.DB) error {
 			recv_limit_per_hour INTEGER NOT NULL DEFAULT 0,
 			last_login DATETIME,
 			last_ip TEXT NOT NULL DEFAULT '',
+			mail_access_mode TEXT NOT NULL DEFAULT 'inherit',
+			version INTEGER NOT NULL DEFAULT 1,
 			created_at DATETIME NOT NULL,
 			updated_at DATETIME NOT NULL,
 			deleted_at DATETIME
@@ -1204,6 +1220,12 @@ func MigrateAllRaw(db *gorm.DB) error {
 	if err := migrateInvoicesSchema(ctx, sqlDB); err != nil {
 		return err
 	}
+	if err := migrateDomainsLifecycleSchema(ctx, sqlDB); err != nil {
+		return err
+	}
+	if err := migrateSupportTicketsSchema(ctx, sqlDB); err != nil {
+		return err
+	}
 
 	// Create indexes
 	indexes := []string{
@@ -1334,6 +1356,16 @@ func migrateCoremailMailboxSchema(ctx context.Context, db *sql.DB) error {
 		{"allow_pop3", "ALTER TABLE coremail_mailboxes ADD COLUMN allow_pop3 INTEGER NOT NULL DEFAULT 1"},
 		{"allow_jmap", "ALTER TABLE coremail_mailboxes ADD COLUMN allow_jmap INTEGER NOT NULL DEFAULT 1"},
 		{"allow_webmail", "ALTER TABLE coremail_mailboxes ADD COLUMN allow_webmail INTEGER NOT NULL DEFAULT 1"},
+		// mail_access_mode: per-mailbox mail-access policy (MAILBOX-ACCESS-
+		// MODE-PHASE1). Canonical persisted values are 'inherit',
+		// 'internal_only', 'internal_external'. 'inherit' is the additive
+		// default so every pre-existing mailbox keeps resolving through the
+		// domain's existing policy exactly as before this column existed.
+		{"mail_access_mode", "ALTER TABLE coremail_mailboxes ADD COLUMN mail_access_mode TEXT NOT NULL DEFAULT 'inherit'"},
+		// version: optimistic-concurrency guard for guarded mailbox
+		// mutations (the platform access-mode route). Existing rows start
+		// at 1, which is the version every first guarded mutation expects.
+		{"version", "ALTER TABLE coremail_mailboxes ADD COLUMN version INTEGER NOT NULL DEFAULT 1"},
 	}
 
 	for _, addition := range additions {
@@ -1483,6 +1515,110 @@ func migrateSessionsJTI(ctx context.Context, db *sql.DB) error {
 	}
 	if _, err := db.ExecContext(ctx, "ALTER TABLE sessions ADD COLUMN jti TEXT NOT NULL DEFAULT ''"); err != nil {
 		return fmt.Errorf("add sessions.jti: %w", err)
+	}
+	return nil
+}
+
+// migrateDomainsLifecycleSchema adds the columns the platform domain
+// deactivation/soft-delete lifecycle needs: version (optimistic
+// concurrency — every guarded update increments it, a stale
+// expected_version is a conflict, mirroring the existing mailbox
+// mail_access_mode convention) and deactivated_at/deactivation_reason
+// (a distinct, non-destructive "administratively deactivated" state
+// separate from deleted_at — deactivation never touches deleted_at,
+// so a deactivated domain's full row, DKIM config, and history remain
+// exactly as queryable as an active one).
+func migrateDomainsLifecycleSchema(ctx context.Context, db *sql.DB) error {
+	columns, err := sqliteColumns(ctx, db, "coremail_domains")
+	if err != nil {
+		return fmt.Errorf("inspect coremail_domains schema: %w", err)
+	}
+
+	additions := []struct {
+		name string
+		sql  string
+	}{
+		{"version", "ALTER TABLE coremail_domains ADD COLUMN version INTEGER NOT NULL DEFAULT 1"},
+		{"deactivated_at", "ALTER TABLE coremail_domains ADD COLUMN deactivated_at DATETIME"},
+		{"deactivation_reason", "ALTER TABLE coremail_domains ADD COLUMN deactivation_reason TEXT NOT NULL DEFAULT ''"},
+	}
+	for _, addition := range additions {
+		if columns[addition.name] {
+			continue
+		}
+		if _, err := db.ExecContext(ctx, addition.sql); err != nil {
+			return fmt.Errorf("add coremail_domains.%s: %w", addition.name, err)
+		}
+		columns[addition.name] = true
+	}
+
+	return nil
+}
+
+// migrateSupportTicketsSchema extends the legacy `support_requests` table
+// with the columns the canonical SupportTicket model + Platform Support
+// Inbox need (priority, assignment, last-reply, resolved/closed
+// timestamps), and creates the new `support_ticket_messages` table for
+// reply threads.
+//
+// Why this lives next to migrateDomainsLifecycleSchema: every additive
+// column is idempotent (CREATE TABLE / ALTER TABLE IF NOT EXISTS) so a
+// restart on an old DB picks up the new shape, and a fresh DB also
+// picks it up — same single migration entrypoint as everything else.
+func migrateSupportTicketsSchema(ctx context.Context, db *sql.DB) error {
+	// 1. New columns on the existing support_requests table. The
+	// legacy table already has `status` (was: 'received'); we keep the
+	// column but re-default its initial state to the canonical 'open'
+	// for newly-created tickets and let any existing rows keep whatever
+	// value they already carry — admins reading an old ticket still see
+	// its real status, not a fabricated new one.
+	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS support_ticket_messages (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		created_at DATETIME NOT NULL,
+		updated_at DATETIME NOT NULL,
+		ticket_id INTEGER NOT NULL,
+		author_user_id INTEGER NOT NULL,
+		author_email TEXT NOT NULL,
+		author_kind TEXT NOT NULL,
+		body TEXT NOT NULL
+	)`); err != nil {
+		return fmt.Errorf("create support_ticket_messages: %w", err)
+	}
+	if _, err := db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_support_ticket_messages_ticket_id ON support_ticket_messages(ticket_id)`); err != nil {
+		return fmt.Errorf("idx support_ticket_messages.ticket_id: %w", err)
+	}
+
+	// 2. Additive columns on support_requests. Mirrors the
+	// migrateDomainsLifecycleSchema pattern: read the existing column
+	// set, ALTER only the missing ones.
+	columns, err := sqliteColumns(ctx, db, "support_requests")
+	if err != nil {
+		// If the table is missing entirely (fresh DB before 001 ran
+		// in this code path), the CREATE TABLE block above already
+		// ran; an "inspect" error here would mean the table truly
+		// does not exist, which the next CREATE will fix. Return
+		// nil so a missing pre-migration table doesn't block startup.
+		return nil
+	}
+	additions := []struct {
+		name string
+		sql  string
+	}{
+		{"priority", "ALTER TABLE support_requests ADD COLUMN priority TEXT NOT NULL DEFAULT 'normal'"},
+		{"assigned_to_id", "ALTER TABLE support_requests ADD COLUMN assigned_to_id INTEGER"},
+		{"last_reply_at", "ALTER TABLE support_requests ADD COLUMN last_reply_at DATETIME"},
+		{"last_reply_by", "ALTER TABLE support_requests ADD COLUMN last_reply_by TEXT NOT NULL DEFAULT ''"},
+		{"resolved_at", "ALTER TABLE support_requests ADD COLUMN resolved_at DATETIME"},
+		{"closed_at", "ALTER TABLE support_requests ADD COLUMN closed_at DATETIME"},
+	}
+	for _, addition := range additions {
+		if columns[addition.name] {
+			continue
+		}
+		if _, err := db.ExecContext(ctx, addition.sql); err != nil {
+			return fmt.Errorf("add support_requests.%s: %w", addition.name, err)
+		}
+		columns[addition.name] = true
 	}
 	return nil
 }

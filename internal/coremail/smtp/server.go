@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -15,6 +16,12 @@ import (
 
 	"github.com/orvix/orvix/internal/observability"
 )
+
+// ErrRecipientDomainInoperable is returned by PreAcceptFn when a
+// recipient's domain became disabled/suspended/locked since RCPT
+// time. It maps to a permanent (5.x) DATA rejection; any other
+// non-nil PreAcceptFn error maps to a transient (4.x) rejection.
+var ErrRecipientDomainInoperable = errors.New("recipient domain no longer operable")
 
 // Server represents an SMTP server instance.
 type Server struct {
@@ -31,6 +38,16 @@ type Server struct {
 	// Params: ctx, tenantID, mailboxID, recipientCount, eventID.
 	// eventID is a content-deterministic hash enabling retry-safe idempotency.
 	PostAcceptFn func(ctx context.Context, tenantID, mailboxID uint, count int, eventID string)
+	// PreAcceptFn (Phase 8 C3A #4) is the pre-commit/pre-enqueue
+	// recheck: called with the full accumulated recipient set
+	// immediately before Receiver.AcceptMessage, i.e. after the
+	// complete DATA body has been read but before anything is
+	// spooled or enqueued. This closes the window between an
+	// early RCPT-time check and a domain being disabled while the
+	// client is still transmitting the message body. A non-nil
+	// error rejects the message (no spool/queue write ever
+	// happens) — AcceptMessage is never called in that case.
+	PreAcceptFn func(ctx context.Context, session *Session) error
 
 	mu       sync.Mutex
 	sessions map[string]*Session
@@ -40,6 +57,9 @@ type Server struct {
 
 	localDomainChecker func(ctx context.Context, domain string) (bool, error)
 	mailAccessMode     func(ctx context.Context, domain string) (string, error)
+	// mailAccessPolicy is the canonical mailbox-level policy decision
+	// hook; when set it replaces the legacy domain checker.
+	mailAccessPolicy func(ctx context.Context, session *Session, rcptAddr string, rcptIsLocal bool) (allow bool, reason string, err error)
 
 	// listenerCb is called after the real listener is created
 	// or on bind failure. Used by the admin runtime telemetry.
@@ -132,11 +152,20 @@ func (s *Server) SetLocalDomainChecker(fn func(ctx context.Context, domain strin
 	s.localDomainChecker = fn
 }
 
-// SetMailAccessModeChecker wires the domain mail-access-mode lookup
-// (internal_only vs internal_external) used to enforce that policy at
-// RCPT TO for every connection this server accepts.
+// SetMailAccessModeChecker wires the legacy domain mail-access-mode
+// lookup (internal_only vs internal_external) used to enforce that
+// policy at RCPT TO for every connection this server accepts.
+//
+// DEPRECATED: production wiring uses SetMailAccessPolicy.
 func (s *Server) SetMailAccessModeChecker(fn func(ctx context.Context, domain string) (string, error)) {
 	s.mailAccessMode = fn
+}
+
+// SetMailAccessPolicy wires the canonical mailbox-level mail-access
+// policy decision hook. When set, every connection this server
+// accepts uses it INSTEAD of the legacy domain checker.
+func (s *Server) SetMailAccessPolicy(fn func(ctx context.Context, session *Session, rcptAddr string, rcptIsLocal bool) (allow bool, reason string, err error)) {
+	s.mailAccessPolicy = fn
 }
 
 // SetListener assigns a pre-bound net.Listener to the server.
@@ -232,6 +261,9 @@ func (s *Server) handleConn(conn net.Conn) {
 	if s.localDomainChecker != nil {
 		handler.SetLocalDomainChecker(s.localDomainChecker)
 	}
+	if s.mailAccessPolicy != nil {
+		handler.SetMailAccessPolicy(s.mailAccessPolicy)
+	}
 	if s.mailAccessMode != nil {
 		handler.SetMailAccessModeChecker(s.mailAccessMode)
 	}
@@ -318,6 +350,20 @@ func (s *Server) handleConn(conn net.Conn) {
 
 			session.DataBuffer = data
 
+			if s.PreAcceptFn != nil {
+				if err := s.PreAcceptFn(context.Background(), session); err != nil {
+					if err == ErrRecipientDomainInoperable {
+						writeResponse(writer, responsef(StatusMailboxNotFound, "5.7.1 one or more recipient domains are no longer accepting mail"))
+					} else {
+						writeResponse(writer, responsef(StatusServiceNotAvailable, "4.7.0 recipient policy temporarily unavailable"))
+					}
+					session.State = StateGreeted
+					session.ResetTransaction()
+					writer.Flush()
+					continue
+				}
+			}
+
 			if s.Receiver != nil {
 				var acceptErr error
 				func() {
@@ -343,7 +389,23 @@ func (s *Server) handleConn(conn net.Conn) {
 			}
 
 			writeResponse(writer, MessageAccepted)
-			writer.Flush()
+			// The message is ALREADY durably committed at this point
+			// (AcceptMessage returned nil above) — a flush failure
+			// here means the client never sees confirmation of a
+			// delivery that already happened, which is exactly the
+			// condition that makes a well-behaved remote MTA retry
+			// the identical message. That retry is expected and must
+			// be handled by inbound delivery idempotency (see
+			// receive.go's dedup claim), not prevented here — by the
+			// time this write is attempted there is no way to "un-ack"
+			// a commit. The error is observed (not swallowed) purely
+			// so this pattern is diagnosable in production.
+			if err := writer.Flush(); err != nil && s.Observability != nil {
+				s.Observability.EventHistory.Record(observability.EventSMTPAckFlushFailed, map[string]string{
+					"remote_ip": session.RemoteAddr,
+					"detail":    "final 250 flush failed after durable acceptance",
+				})
+			}
 			session.State = StateGreeted
 			session.ResetTransaction()
 		}

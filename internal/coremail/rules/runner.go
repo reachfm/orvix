@@ -11,6 +11,8 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/orvix/orvix/internal/coremail/mailpolicy"
+	"github.com/orvix/orvix/internal/coremail/msgid"
 	"github.com/orvix/orvix/internal/coremail/queue"
 	"github.com/orvix/orvix/internal/coremail/storage"
 )
@@ -106,6 +108,19 @@ type Dependencies struct {
 	Vacation    storage.VacationRepository
 	Forwarding  storage.ForwardingRepository
 	Logger      *zap.Logger
+	// MailAccessPolicy is the canonical mailbox-level mail-access
+	// policy (internal/coremail/mailpolicy). When wired, forwarding
+	// and vacation side effects are policy-checked BEFORE enqueue: an
+	// internal-only mailbox can never escape to an external address
+	// through a forwarding rule or an auto-reply. A denial skips the
+	// enqueue and records a safe SkipReason; a policy failure also
+	// skips (fail closed — never deliver on unknown policy state).
+	MailAccessPolicy *mailpolicy.Policy
+	// Hostname is the configured coremail.hostname, used as the
+	// preferred id-right (domain) for Message-ID headers on
+	// system-generated outbound mail (forwarding, vacation
+	// auto-reply). See (*Runner).messageIDHostname.
+	Hostname string
 }
 
 // Runner evaluates the rules engine for one inbound message.
@@ -432,14 +447,29 @@ func (r *Runner) evaluateVacationReply(ctx context.Context, in RunInput, vac *st
 // mailbox; the caller decides whether to delete the copy
 // based on out.ForwardKeepCopy.
 func (r *Runner) enqueueForward(ctx context.Context, in RunInput, out *RunOutput) error {
-	wrapped, err := buildForwardedRfc822(in, out.ForwardedTo)
+	hostname, err := r.messageIDHostname(in.MailboxEmail)
+	if err != nil {
+		return fmt.Errorf("forward: %w", err)
+	}
+	wrapped, err := buildForwardedRfc822(in, out.ForwardedTo, hostname)
 	if err != nil {
 		return fmt.Errorf("build forward: %w", err)
 	}
-	if err := r.enqueueOutbound(ctx, in, wrapped, out.ForwardedTo); err != nil {
+	if err := r.enqueueOutbound(ctx, in, wrapped, out.ForwardedTo, hostname); err != nil {
 		return err
 	}
 	return nil
+}
+
+// messageIDHostname resolves the id-right (domain) to use for
+// system-generated Message-ID headers (forwarding, vacation
+// auto-reply). Preferred source is the configured
+// Dependencies.Hostname; the fallback is the local mailbox's own
+// domain — safe because RunInput always carries an already-resolved
+// local recipient mailbox. See internal/coremail/msgid.
+func (r *Runner) messageIDHostname(mailboxEmail string) (string, error) {
+	fallbackDomain := extractDomain(mailboxEmail)
+	return msgid.ResolveHostname(r.deps.Hostname, fallbackDomain)
 }
 
 // enqueueVacation builds the auto-reply RFC822 and enqueues
@@ -457,11 +487,15 @@ func (r *Runner) enqueueVacation(ctx context.Context, in RunInput, out *RunOutpu
 	if sender == "" {
 		return fmt.Errorf("vacation reply: empty sender")
 	}
-	replyRfc, err := buildVacationRfc822(in, reply.Subject, reply.Body)
+	hostname, err := r.messageIDHostname(in.MailboxEmail)
+	if err != nil {
+		return fmt.Errorf("vacation: %w", err)
+	}
+	replyRfc, err := buildVacationRfc822(in, reply.Subject, reply.Body, hostname)
 	if err != nil {
 		return fmt.Errorf("build vacation: %w", err)
 	}
-	if err := r.enqueueOutbound(ctx, in, replyRfc, sender); err != nil {
+	if err := r.enqueueOutbound(ctx, in, replyRfc, sender, hostname); err != nil {
 		r.deps.Logger.Error("rules: vacation enqueue failed after claim succeeded",
 			zap.Uint64("mailbox_id", uint64(in.MailboxID)),
 			zap.String("sender", sender),
@@ -487,7 +521,36 @@ func (r *Runner) enqueueVacation(ctx context.Context, in RunInput, out *RunOutpu
 // EnsureMailboxSystemFolders provisions it. If the folder
 // is somehow missing we refuse to enqueue rather than
 // write a dangling Message row.
-func (r *Runner) enqueueOutbound(ctx context.Context, in RunInput, rfc822 []byte, recipient string) error {
+//
+// MAILBOX-ACCESS-MODE-PHASE1: before any enqueue, the
+// canonical mail-access policy is consulted for the sender
+// mailbox and the side-effect recipient. A policy denial
+// (internal-only sender, external recipient) skips the
+// enqueue entirely — forwarding and vacation replies can
+// never leak an internal-only mailbox to the outside — and
+// reports a safe SkipReason. A policy-evaluation failure
+// also skips (fail closed: never deliver on unknown policy
+// state).
+func (r *Runner) enqueueOutbound(ctx context.Context, in RunInput, rfc822 []byte, recipient, hostname string) error {
+	if r.deps.MailAccessPolicy != nil {
+		decision := r.deps.MailAccessPolicy.CheckOutbound(ctx, "forwarding", in.MailboxEmail, []string{recipient})
+		switch {
+		case decision.Allowed:
+		case decision.Unavailable:
+			if r.deps.Logger != nil {
+				r.deps.Logger.Warn("rules: outbound skipped (mail access policy unavailable)",
+					zap.String("mailbox", in.MailboxEmail), zap.String("recipient", recipient))
+			}
+			return fmt.Errorf("mail access policy unavailable; outbound skipped")
+		case decision.Denied:
+			if r.deps.Logger != nil {
+				r.deps.Logger.Warn("rules: outbound skipped (mail access policy denied)",
+					zap.String("mailbox", in.MailboxEmail), zap.String("recipient", recipient),
+					zap.String("reason", string(decision.Reason)))
+			}
+			return fmt.Errorf("mail access policy denied: %s", decision.Reason)
+		}
+	}
 	outMsgID := newMessageID()
 	fromHeader := in.MailboxEmail
 	if fromHeader == "" {
@@ -505,7 +568,7 @@ func (r *Runner) enqueueOutbound(ctx context.Context, in RunInput, rfc822 []byte
 	}
 	outMsg := &storage.Message{
 		MessageID:         outMsgID,
-		InternetMessageID: fmt.Sprintf("<%s@orvix.local>", outMsgID),
+		InternetMessageID: fmt.Sprintf("<%s@%s>", outMsgID, hostname),
 		TenantID:          in.TenantID,
 		DomainID:          in.DomainID,
 		MailboxID:         in.MailboxID,
@@ -589,7 +652,7 @@ func extractSubjectFromRfc822(rfc822 []byte) string {
 // Orvix-Forwarded marker so the next hop's runner refuses to
 // re-forward. The body is the original bytes prefixed with a
 // small "Forwarded by Orvix" header block.
-func buildForwardedRfc822(in RunInput, recipient string) ([]byte, error) {
+func buildForwardedRfc822(in RunInput, recipient, hostname string) ([]byte, error) {
 	id := newMessageID()
 	var b strings.Builder
 	b.WriteString("From: ")
@@ -608,7 +671,9 @@ func buildForwardedRfc822(in RunInput, recipient string) ([]byte, error) {
 	b.WriteString("\r\n")
 	b.WriteString("Message-ID: <")
 	b.WriteString(id)
-	b.WriteString("@orvix.local>\r\n")
+	b.WriteString("@")
+	b.WriteString(hostname)
+	b.WriteString(">\r\n")
 	b.WriteString("MIME-Version: 1.0\r\n")
 	b.WriteString(HeaderForwarded)
 	b.WriteString(": yes\r\n")
@@ -629,7 +694,7 @@ func buildForwardedRfc822(in RunInput, recipient string) ([]byte, error) {
 // write path; this is defence in depth so a future caller
 // that bypasses the storage layer still cannot inject
 // extra headers into outbound auto-replies.
-func buildVacationRfc822(in RunInput, subject, body string) ([]byte, error) {
+func buildVacationRfc822(in RunInput, subject, body, hostname string) ([]byte, error) {
 	id := newMessageID()
 	to := extractBareAddress(in.FromHeader)
 	if to == "" {
@@ -663,7 +728,9 @@ func buildVacationRfc822(in RunInput, subject, body string) ([]byte, error) {
 	b.WriteString("\r\n")
 	b.WriteString("Message-ID: <")
 	b.WriteString(id)
-	b.WriteString("@orvix.local>\r\n")
+	b.WriteString("@")
+	b.WriteString(hostname)
+	b.WriteString(">\r\n")
 	b.WriteString("MIME-Version: 1.0\r\n")
 	b.WriteString(HeaderVacation)
 	b.WriteString(": yes\r\n")

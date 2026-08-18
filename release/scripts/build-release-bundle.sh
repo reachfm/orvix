@@ -124,6 +124,8 @@ warn() { printf '%bWARN:%b %s\n' "$YELLOW" "$NC" "$*" >&2; }
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=release/scripts/lib-admin-build.sh
 . "$SCRIPT_DIR/lib-admin-build.sh"
+# shellcheck source=release/scripts/lib-webmail-stage.sh
+. "$SCRIPT_DIR/lib-webmail-stage.sh"
 
 # ── 1. Pre-flight ─────────────────────────────────────────────────
 command -v git  >/dev/null 2>&1 || fail "git is required"
@@ -148,6 +150,23 @@ GIT_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
 GIT_BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 # Resolve version: --version > release/VERSION > "0.0.0-dev"
+#
+# release/VERSION (or an explicit --version override for a dispatched
+# workflow run) is the ONE canonical version source for what gets
+# embedded in a built artifact — see item 4 of the Phase 8 production-
+# acceptance remediation. This script does not itself enforce that a
+# new build's version is higher than any previously built one: a
+# human can legitimately dispatch a hotfix build for an older branch.
+# The actual monotonicity gate is at DEPLOY time, in
+# release/upgrade.sh's enforce_version_monotonicity — it compares the
+# new binary's version against the currently-installed one on the
+# target host and refuses a regression unless the operator explicitly
+# passes --rollback --rollback-reason. That gate is what would have
+# caught the 1.0.4-rc2 -> 1.0.3-rc4 incident this item was opened for:
+# an unmerged branch (v1.0.4-rc2, commit 65108dc4) was deployed
+# directly to the VPS outside the normal main-derived release flow,
+# so the next real deploy from main's actual lineage appeared to be a
+# downgrade even though its commit was chronologically newer.
 RESOLVED_VERSION="$VERSION_OVERRIDE"
 if [ -z "$RESOLVED_VERSION" ] && [ -f release/VERSION ]; then
     RESOLVED_VERSION="$(awk 'NF && $1 !~ /^#/ {print; exit}' release/VERSION | tr -d '[:space:]')"
@@ -497,7 +516,28 @@ if ADMIN_SOURCE="$(package_admin_spa "$REPO_ROOT" "$BUNDLE_ROOT/release/admin")"
 else
     fail "admin SPA packaging failed (see errors above); refusing to ship a bundle with stale or missing admin assets" 2
 fi
-(cd release/webmail && tar -cf - .) | (cd "$BUNDLE_ROOT/release/webmail" && tar -xf -)
+# Asset trees — webmail SPA.
+# web/webmail-release (hand-authored, committed) is the CANONICAL,
+# ONLY-EDITABLE source. release/webmail (also committed, like
+# release/admin's legacy fallback tree) is ALWAYS a generated staging
+# copy of it, produced by the shared stage_webmail() function so
+# there is exactly one place a human ever edits webmail source and
+# exactly one code path that turns it into what ships and what the
+# server-route tests + WebmailUIDir default read directly off disk —
+# see release/scripts/lib-webmail-stage.sh.
+# web/webmail/src is a SEPARATE, EXPERIMENTAL Vite/React rewrite: it IS
+# built and typechecked in CI (postgres-readiness.yml, "Webmail
+# frontend typecheck and build") but is NOT wired into this release
+# pipeline and is NOT yet functionally complete — its ComposeModal Send
+# control has no onClick handler, so it cannot send mail. It carries no
+# production provenance. Do not switch this packaging step to build
+# from web/webmail/src until that gap is closed and full mutation
+# parity (drafts/flags/move/delete/archive/settings/push/batch) is
+# verified; see internal/api/handlers/webmail_source_provenance_test.go
+# for the guard (including a byte-for-byte drift check) that keeps
+# this decision from drifting silently.
+stage_webmail "$REPO_ROOT/web/webmail-release" "$BUNDLE_ROOT/release/webmail" || \
+    fail "webmail SPA staging failed (see errors above); refusing to ship a bundle with stale or missing webmail assets" 2
 
 # Marketing SPA. With Node/npm available, the source build is mandatory and
 # any install/build/verification failure aborts the release. The committed
@@ -617,6 +657,19 @@ tar -C "$WORK_DIR" -czf "$ARCHIVE" orvix \
 sha256sum "$ARCHIVE" | awk -v a="$ARCHIVE" '{printf "%s  %s\n", $1, a}' > "$ARCHIVE.sha256"
 info "sha256: $(awk '{print $1}' "$ARCHIVE.sha256")  $ARCHIVE"
 
+# A signed *tarball* is the correct unit for distribution, but
+# release/scripts/upgrade.sh (the in-place update path) verifies a
+# separate PER-BINARY signature sidecar next to the raw orvix binary
+# — it has no tarball-extraction step of its own. Without this, an
+# operator holding a fully verified, signed bundle still has no way
+# to satisfy upgrade.sh's own signature gate short of --dev-unsafe.
+# Copy the exact sealed binary out under the archive's naming
+# convention (<archive>.bin / <archive>.bin.sha256) so it can be
+# signed alongside the tarball/manifest/sbom below, using the SAME
+# already-configured signing secret — no new key or mechanism.
+cp "$BIN_OUT" "$ARCHIVE.bin"
+sha256sum "$ARCHIVE.bin" | awk -v a="$ARCHIVE.bin" '{printf "%s  %s\n", $1, a}' > "$ARCHIVE.bin.sha256"
+
 # Also create stable-channel copies so the public installer can
 # resolve the bundle from a predictable GitHub Releases URL:
 #   orvix-enterprise-mail-stable-linux-amd64.tar.gz
@@ -625,6 +678,8 @@ STABLE_ARCHIVE="$OUTPUT_DIR/orvix-enterprise-mail-${RESOLVED_CHANNEL}-${TARGET_O
 cp "$ARCHIVE" "$STABLE_ARCHIVE"
 sha256sum "$STABLE_ARCHIVE" | awk -v a="$STABLE_ARCHIVE" '{printf "%s  %s\n", $1, a}' > "$STABLE_ARCHIVE.sha256"
 info "stable alias: $STABLE_ARCHIVE"
+cp "$BIN_OUT" "$STABLE_ARCHIVE.bin"
+sha256sum "$STABLE_ARCHIVE.bin" | awk -v a="$STABLE_ARCHIVE.bin" '{printf "%s  %s\n", $1, a}' > "$STABLE_ARCHIVE.bin.sha256"
 
 write_release_manifest() {
     local artifact="$1" output="$2"
@@ -657,12 +712,12 @@ write_release_manifest "$STABLE_ARCHIVE" "$STABLE_ARCHIVE.manifest.json"
 # provide a private Ed25519 key outside the repository. The corresponding
 # public key is distributed through the independently managed trust channel.
 if [ -n "${ORVIX_RELEASE_SIGNING_KEY_FILE:-}" ]; then
-    for artifact in "$ARCHIVE" "$ARCHIVE.manifest.json" "$ARCHIVE.sbom.spdx" "$STABLE_ARCHIVE" "$STABLE_ARCHIVE.manifest.json" "$STABLE_ARCHIVE.sbom.spdx"; do
+    for artifact in "$ARCHIVE" "$ARCHIVE.manifest.json" "$ARCHIVE.sbom.spdx" "$ARCHIVE.bin" "$STABLE_ARCHIVE" "$STABLE_ARCHIVE.manifest.json" "$STABLE_ARCHIVE.sbom.spdx" "$STABLE_ARCHIVE.bin"; do
         bash release/scripts/sign-release-artifact.sh "$artifact" "$ORVIX_RELEASE_SIGNING_KEY_FILE" "$artifact.sig" \
             || fail "release signing failed for $(basename "$artifact")" 4
     done
     if [ -n "${ORVIX_RELEASE_VERIFYING_KEY_FILE:-}" ]; then
-        for artifact in "$ARCHIVE" "$ARCHIVE.manifest.json" "$ARCHIVE.sbom.spdx" "$STABLE_ARCHIVE" "$STABLE_ARCHIVE.manifest.json" "$STABLE_ARCHIVE.sbom.spdx"; do
+        for artifact in "$ARCHIVE" "$ARCHIVE.manifest.json" "$ARCHIVE.sbom.spdx" "$ARCHIVE.bin" "$STABLE_ARCHIVE" "$STABLE_ARCHIVE.manifest.json" "$STABLE_ARCHIVE.sbom.spdx" "$STABLE_ARCHIVE.bin"; do
             bash release/scripts/verify-release-signature.sh "$artifact" "$artifact.sig" "$ORVIX_RELEASE_VERIFYING_KEY_FILE" \
                 || fail "release signature self-check failed for $(basename "$artifact")" 4
         done

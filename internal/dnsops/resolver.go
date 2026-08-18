@@ -141,6 +141,13 @@ type FakeEntry struct {
 	// name. It lets tests reproduce resolver failures and timeouts, which
 	// are distinct from a missing record.
 	SRVErr error
+	// Err, when non-nil, is returned verbatim by LookupTXT/LookupMX/
+	// LookupA/LookupAAAA for this name — checked BEFORE the "no
+	// records" fallback, so it lets tests reproduce a genuine resolver
+	// failure/timeout (e.g. &net.DNSError{IsTimeout: true}), which
+	// callers must treat as StatusError, distinct from a missing
+	// record (StatusMissing/StatusNotFound).
+	Err error
 }
 
 // FakeResolver is an in-memory Resolver used by tests. The DNS Ops
@@ -163,6 +170,9 @@ func (f *FakeResolver) Set(name string, e FakeEntry) {
 // LookupTXT implements Resolver.
 func (f *FakeResolver) LookupTXT(_ context.Context, name string) ([]string, error) {
 	e, ok := f.entries[name]
+	if ok && e.Err != nil {
+		return nil, e.Err
+	}
 	if !ok || len(e.TXT) == 0 {
 		return nil, &net.DNSError{Err: "no such host", Name: name, IsNotFound: true}
 	}
@@ -174,6 +184,9 @@ func (f *FakeResolver) LookupTXT(_ context.Context, name string) ([]string, erro
 // LookupMX implements Resolver.
 func (f *FakeResolver) LookupMX(_ context.Context, name string) ([]*net.MX, error) {
 	e, ok := f.entries[name]
+	if ok && e.Err != nil {
+		return nil, e.Err
+	}
 	if !ok || len(e.MX) == 0 {
 		return nil, &net.DNSError{Err: "no such host", Name: name, IsNotFound: true}
 	}
@@ -188,6 +201,9 @@ func (f *FakeResolver) LookupMX(_ context.Context, name string) ([]*net.MX, erro
 // LookupA implements Resolver.
 func (f *FakeResolver) LookupA(_ context.Context, name string) ([]net.IP, error) {
 	e, ok := f.entries[name]
+	if ok && e.Err != nil {
+		return nil, e.Err
+	}
 	if !ok || len(e.A) == 0 {
 		return nil, &net.DNSError{Err: "no such host", Name: name, IsNotFound: true}
 	}
@@ -199,6 +215,9 @@ func (f *FakeResolver) LookupA(_ context.Context, name string) ([]net.IP, error)
 // LookupAAAA implements Resolver.
 func (f *FakeResolver) LookupAAAA(_ context.Context, name string) ([]net.IP, error) {
 	e, ok := f.entries[name]
+	if ok && e.Err != nil {
+		return nil, e.Err
+	}
 	if !ok || len(e.AAAA) == 0 {
 		return nil, &net.DNSError{Err: "no such host", Name: name, IsNotFound: true}
 	}

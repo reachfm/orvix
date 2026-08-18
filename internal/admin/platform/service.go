@@ -4,9 +4,12 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
+	"github.com/orvix/orvix/internal/admin/organization"
 	"github.com/orvix/orvix/internal/audit"
+	"github.com/orvix/orvix/internal/billing"
 	"github.com/orvix/orvix/internal/dbdialect"
 	entrbac "github.com/orvix/orvix/internal/enterprise/rbac"
 )
@@ -16,14 +19,25 @@ type PlatformService struct {
 	auditStore *audit.ExtendedStore
 	rbac       *entrbac.Evaluator
 	dialect    *dbdialect.Info
+	orgSvc     *organization.Service
+	billingSvc *billing.Service
 }
 
-func NewPlatformService(db *sql.DB, auditStore *audit.ExtendedStore, rbac *entrbac.Evaluator) *PlatformService {
+func NewPlatformService(db *sql.DB, auditStore *audit.ExtendedStore, rbac *entrbac.Evaluator, orgSvc *organization.Service) *PlatformService {
 	d, _ := dbdialect.Detect(db)
 	if d == nil {
 		d = dbdialect.FromDriver("sqlite")
 	}
-	return &PlatformService{db: db, auditStore: auditStore, rbac: rbac, dialect: d}
+	return &PlatformService{db: db, auditStore: auditStore, rbac: rbac, dialect: d, orgSvc: orgSvc}
+}
+
+// SetBillingService wires the tenant-facing billing service so
+// platform-created organizations get a consistent subscription. It is
+// optional (billing initializes after the platform service in the
+// router); without it, subscription provisioning is skipped and the
+// caller is responsible for a consistent fallback.
+func (s *PlatformService) SetBillingService(svc *billing.Service) {
+	s.billingSvc = svc
 }
 
 type OrganizationSummary struct {
@@ -137,4 +151,86 @@ func (s *PlatformService) getOrgSummary(ctx context.Context, id uint) (*Organiza
 	srv.Active = active != 0
 	srv.CreatedAt = created.Format(time.RFC3339)
 	return &srv, nil
+}
+
+// CreateOrganizationRequest is the Platform Super Admin organization
+// creation contract (POST /api/v1/platform/organizations). owner_email
+// is REQUIRED: the initial owner is established via a real
+// tenant_admin invitation, never by silently inventing an owner user
+// or password. plan_id defaults to the same free plan public signup
+// provisions when omitted.
+type CreateOrganizationRequest struct {
+	Name         string `json:"name"`
+	Slug         string `json:"slug,omitempty"`
+	Domain       string `json:"domain,omitempty"`
+	OwnerEmail   string `json:"owner_email"`
+	PlanID       string `json:"plan_id,omitempty"`
+	MaxDomains   int    `json:"max_domains,omitempty"`
+	MaxMailboxes int    `json:"max_mailboxes,omitempty"`
+}
+
+// CreateOrganizationResult is the safe post-create contract. The
+// invitation token is a ONE-TIME secret: the handler returns it only
+// in the live response (never in the idempotency replay body) and it
+// is never persisted in plaintext (only its SHA-256 hash is stored).
+type CreateOrganizationResult struct {
+	Organization organization.Organization           `json:"organization"`
+	Invitation   organization.OrganizationInvitation `json:"invitation"`
+	InviteToken  string                              `json:"invite_token"`
+}
+
+// CreateOrganization provisions a PSA-created organization with its
+// designated owner invitation (org + invitation + audit in one
+// transaction via the organization service) and initializes the
+// billing subscription consistently. It never produces an ownerless
+// active organization: owner_email is required and validated before
+// any write. Duplicate slugs map to the same ErrOrganizationExists
+// contract used everywhere else.
+func (s *PlatformService) CreateOrganization(ctx context.Context, req CreateOrganizationRequest, actorID uint) (*CreateOrganizationResult, error) {
+	if s.orgSvc == nil {
+		return nil, fmt.Errorf("organization service not available")
+	}
+	slug := strings.TrimSpace(req.Slug)
+	if slug == "" {
+		slug = slugify(strings.TrimSpace(req.Name))
+	}
+	orgReq := organization.CreateOrganizationRequest{
+		Name:         strings.TrimSpace(req.Name),
+		Slug:         slug,
+		Domain:       strings.TrimSpace(req.Domain),
+		Plan:         "smb",
+		MaxDomains:   req.MaxDomains,
+		MaxMailboxes: req.MaxMailboxes,
+	}
+	org, inv, rawToken, err := s.orgSvc.CreateOrganizationWithOwner(ctx, orgReq, 0, actorID, req.OwnerEmail)
+	if err != nil {
+		return nil, err
+	}
+	// Initialize the subscription consistently with self-signup: the
+	// plan defaults to the free plan when the caller did not name one.
+	// A subscription failure must NOT roll back the organization
+	// (matches the existing tenant-side CreateOrganization handler and
+	// onboarding semantics; billing init backfills missing rows).
+	if s.billingSvc != nil {
+		planID := billing.PlanID(strings.TrimSpace(req.PlanID))
+		if planID == "" {
+			planID = billing.PlanFree
+		}
+		if _, err := s.billingSvc.GetSubscription(org.ID); err != nil {
+			if _, createErr := s.billingSvc.CreateSubscription(org.ID, planID, billing.IntervalMonthly, 0); createErr != nil {
+				return nil, fmt.Errorf("provision subscription for organization %d: %w", org.ID, createErr)
+			}
+		}
+	}
+	return &CreateOrganizationResult{Organization: *org, Invitation: *inv, InviteToken: rawToken}, nil
+}
+
+// slugify derives a tenant slug from a display name the same way the
+// signup path does (lowercase, punctuation → dashes).
+func slugify(name string) string {
+	if name == "" {
+		return ""
+	}
+	repl := strings.NewReplacer(".", "-", "@", "-", " ", "-")
+	return repl.Replace(strings.ToLower(name))
 }

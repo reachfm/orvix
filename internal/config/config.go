@@ -105,6 +105,16 @@ type CoreMailConfig struct {
 	SubmissionEnabled         bool          `mapstructure:"submission_enabled"`
 	SubmissionHost            string        `mapstructure:"submission_host"`
 	SubmissionPort            int           `mapstructure:"submission_port"`
+	// TransactionalSMTPUsername/Password authenticate first-party
+	// transactional mail (signup OTP, password reset, support requests) on
+	// the authenticated submission port. Anonymous SMTP against the MX
+	// port is correctly rejected by the anti-relay policy, so first-party
+	// send requires a real local account here. Left empty by default —
+	// when empty, the transactional sender falls back to the legacy
+	// unauthenticated MX-port path (which the relay policy will reject for
+	// external recipients; see internal/api/mail_sender.go).
+	TransactionalSMTPUsername string        `mapstructure:"transactional_smtp_username"`
+	TransactionalSMTPPassword string        `mapstructure:"transactional_smtp_password"`
 	SMTPsEnabled              bool          `mapstructure:"smtps_enabled"`
 	SMTPsHost                 string        `mapstructure:"smtps_host"`
 	SMTPsPort                 int           `mapstructure:"smtps_port"`
@@ -776,6 +786,15 @@ func applyEnvOverrides(v *viper.Viper, cfg *Config) {
 	// env vars leave the YAML/default values untouched.
 	if v.GetString("COREMAIL_SUBMISSION_ENABLED") != "" {
 		cfg.CoreMail.SubmissionEnabled = v.GetBool("COREMAIL_SUBMISSION_ENABLED")
+	}
+	// Transactional-mail submission credentials are sourced from env only
+	// (never committed to /etc/orvix/orvix.yaml in plaintext) — mirrors the
+	// SUBMISSION-3D pattern above.
+	if s := v.GetString("COREMAIL_TRANSACTIONAL_SMTP_USERNAME"); s != "" {
+		cfg.CoreMail.TransactionalSMTPUsername = s
+	}
+	if s := v.GetString("COREMAIL_TRANSACTIONAL_SMTP_PASSWORD"); s != "" {
+		cfg.CoreMail.TransactionalSMTPPassword = s
 	}
 	if s := v.GetString("COREMAIL_TLS_CERT_FILE"); s != "" {
 		cfg.CoreMail.TLSCertFile = s

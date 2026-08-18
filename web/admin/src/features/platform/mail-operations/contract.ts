@@ -148,3 +148,55 @@ export interface CoreMailDisabledBody {
   error: string;
   code: "COREMAIL_DISABLED";
 }
+
+// ── Queue history (GET /admin/queue/history) ────────────────────────
+// AdminQueueHistory: immutable, cross-entry delivery-attempt history,
+// cursor-paginated via after_id (the last row's ID becomes the next
+// call's after_id). Field names match delivery.DeliveryAttempt
+// (internal/coremail/delivery/history.go).
+export interface QueueHistoryAttempt {
+  id: number;
+  queue_entry_id: number;
+  attempt_number: number;
+  status: string; // success | deferred | bounced | dead_letter
+  remote_host: string;
+  remote_ip: string;
+  status_code: number;
+  status_msg: string;
+  enhanced_code: string;
+  duration_ms: number;
+  tls_used: boolean;
+  worker_id: string;
+  attempted_at: string;
+}
+
+export interface QueueHistoryResponse {
+  attempts: QueueHistoryAttempt[];
+  next_after_id: number;
+  count: number;
+}
+
+export interface QueueHistoryFilter {
+  status?: string;
+  remote_host?: string;
+  after_id?: number;
+  limit?: number;
+}
+
+/** History status options the backend accepts (delivery attempt statuses). */
+export const QUEUE_HISTORY_STATUSES: ReadonlyArray<string> = ["success", "deferred", "bounced", "dead_letter"];
+
+export function queueHistoryStatusLabel(status: string): string {
+  switch (status) {
+    case "success":
+      return "Success";
+    case "deferred":
+      return "Deferred";
+    case "bounced":
+      return "Bounced";
+    case "dead_letter":
+      return "Dead letter";
+    default:
+      return status;
+  }
+}

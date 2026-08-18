@@ -486,3 +486,101 @@ func TestVerifierDKIMMissing(t *testing.T) {
 		}
 	}
 }
+
+// TestVerifierSPFMatchesAmongUnrelatedTXT: the expected SPF record
+// exists alongside an unrelated TXT record at the same host. The
+// unrelated record must not cause a false mismatch, and must not
+// itself satisfy the SPF check.
+func TestVerifierSPFMatchesAmongUnrelatedTXT(t *testing.T) {
+	plan := buildVerifiedFixturePlan(t)
+	f := NewFakeResolver()
+	populateResolverForFixture(f, plan)
+	f.Set("example.com", FakeEntry{
+		MX: []net.MX{{Host: "mail.example.com.", Pref: 10}},
+		TXT: []string{
+			"google-site-verification=unrelated-token-abc123",
+			"v=spf1 mx ip4:8.8.8.8 -all",
+		},
+	})
+	v := NewVerifier(f)
+	report, err := v.Verify(context.Background(), plan)
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	for _, r := range report.Plan.Records {
+		if r.Purpose == PurposeSPF {
+			if r.Status != StatusVerified {
+				t.Errorf("SPF among unrelated TXT must still verify; got %s (%s)", r.Status, r.Reason)
+			}
+			if r.Observed == "" {
+				t.Error("Observed must be populated for a verified SPF record")
+			}
+			return
+		}
+	}
+	t.Fatal("no SPF record found in plan")
+}
+
+// TestVerifierDKIMOldKeyAmongOtherTXT: an unrelated TXT record is
+// present at the DKIM selector host alongside a DKIM record carrying
+// a stale/wrong public key. Must be Mismatch, not a false Verified —
+// an "any DKIM-shaped record exists" check would wrongly pass this.
+func TestVerifierDKIMOldKeyAmongOtherTXT(t *testing.T) {
+	plan := buildVerifiedFixturePlan(t)
+	f := NewFakeResolver()
+	populateResolverForFixture(f, plan)
+	f.Set("orvix._domainkey.example.com", FakeEntry{
+		TXT: []string{"v=DKIM1; k=rsa; p=OLDROTATEDOUTKEY456"},
+	})
+	v := NewVerifier(f)
+	report, err := v.Verify(context.Background(), plan)
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	for _, r := range report.Plan.Records {
+		if r.Purpose == PurposeDKIM {
+			if r.Status != StatusMismatch {
+				t.Errorf("old DKIM public key must be Mismatch; got %s (%s)", r.Status, r.Reason)
+			}
+			if r.Observed == "" {
+				t.Error("Observed must carry the live (wrong) DKIM record so the operator can see what's actually published")
+			}
+			return
+		}
+	}
+	t.Fatal("no DKIM record found in plan")
+}
+
+// TestVerifierResolverTimeoutIsErrorNotMismatch: a genuine resolver
+// failure (timeout) must map to StatusError, never StatusMismatch or
+// StatusMissing — a transient DNS outage must not be reported as "the
+// record is wrong" or silently swallowed as "the record doesn't
+// exist".
+func TestVerifierResolverTimeoutIsErrorNotMismatch(t *testing.T) {
+	plan := buildVerifiedFixturePlan(t)
+	f := NewFakeResolver()
+	populateResolverForFixture(f, plan)
+	f.Set("example.com", FakeEntry{
+		Err: &net.DNSError{Err: "i/o timeout", Name: "example.com", IsTimeout: true},
+	})
+	v := NewVerifier(f)
+	report, err := v.Verify(context.Background(), plan)
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	checked := 0
+	for _, r := range report.Plan.Records {
+		if r.Purpose == PurposeMX || r.Purpose == PurposeSPF {
+			checked++
+			if r.Status != StatusError {
+				t.Errorf("%s: resolver timeout must be StatusError; got %s (%s)", r.Purpose, r.Status, r.Reason)
+			}
+			if r.Status == StatusMismatch || r.Status == StatusMissing {
+				t.Errorf("%s: resolver timeout must NEVER be reported as mismatch/missing; got %s", r.Purpose, r.Status)
+			}
+		}
+	}
+	if checked != 2 {
+		t.Fatalf("expected to check MX and SPF records, checked %d", checked)
+	}
+}

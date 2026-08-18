@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/orvix/orvix/internal/dbdialect"
 )
 
 // MailboxStatus represents the operational status of a mailbox.
@@ -59,6 +61,17 @@ type Mailbox struct {
 	SendLimitPerHour int `json:"send_limit_per_hour"`
 	RecvLimitPerHour int `json:"recv_limit_per_hour"`
 
+	// MailAccessMode is the per-mailbox mail-access policy
+	// (MAILBOX-ACCESS-MODE-PHASE1). Canonical persisted values:
+	// "inherit" (resolve through the domain), "internal_only",
+	// "internal_external". The empty string is read as "inherit" for
+	// rows created before the column existed.
+	MailAccessMode string `json:"mail_access_mode"`
+
+	// Version is the optimistic-concurrency guard used by guarded
+	// mailbox mutations (the platform access-mode route).
+	Version int `json:"version"`
+
 	// Metadata.
 	LastLogin *time.Time `json:"last_login,omitempty"`
 	LastIP    string     `json:"last_ip,omitempty"`
@@ -101,11 +114,39 @@ var _ MailboxRepository = (*MailboxSQLRepo)(nil)
 
 // MailboxSQLRepo implements MailboxRepository using database/sql.
 type MailboxSQLRepo struct {
-	db *sql.DB
+	db      *sql.DB
+	dialect *dbdialect.Info
 }
 
+// NewMailboxSQLRepo constructs the repository and detects the SQL
+// dialect EAGERLY — never lazily inside a transaction (a probe on a
+// single-connection SQLite pool would deadlock). NewEngine always
+// runs before any transaction.
 func NewMailboxSQLRepo(db *sql.DB) *MailboxSQLRepo {
-	return &MailboxSQLRepo{db: db}
+	dialect, err := dbdialect.Detect(db)
+	if err != nil {
+		dialect = dbdialect.FromDriver("sqlite")
+	}
+	return &MailboxSQLRepo{db: db, dialect: dialect}
+}
+
+// getDialect returns the dialect detected at construction time.
+func (r *MailboxSQLRepo) getDialect() *dbdialect.Info {
+	return r.dialect
+}
+
+// qf rewrites ? placeholders to $N for PostgreSQL (no-op on SQLite).
+func (r *MailboxSQLRepo) qf(sql string) string {
+	return r.getDialect().Rewrite(sql)
+}
+
+// boolValue converts a bool into the dialect's column literal:
+// INTEGER 0/1 on SQLite, native bool on PostgreSQL.
+func (r *MailboxSQLRepo) boolValue(b bool) interface{} {
+	if r.getDialect().IsPostgres() {
+		return b
+	}
+	return boolToInt(b)
 }
 
 func (r *MailboxSQLRepo) execer(tx interface{}) interface {
@@ -133,22 +174,32 @@ func (r *MailboxSQLRepo) Create(ctx context.Context, m *Mailbox, tx interface{})
 	m.UpdatedAt = now
 
 	e := r.execer(tx)
-	res, err := e.ExecContext(ctx, `
+	insert := `
 		INSERT INTO coremail_mailboxes
 			(domain_id, tenant_id, local_part, email, name,
 			 password_hash, auth_scheme, mfa_enabled, mfa_secret, app_passwords,
 			 status, quota_mb, used_bytes, msg_count,
 			 is_admin, is_forwarder, forward_to, labels,
 			 send_limit_per_hour, recv_limit_per_hour,
-			 last_login, last_ip, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			 last_login, last_ip, mail_access_mode, version, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`
+	args := []interface{}{
 		m.DomainID, m.TenantID, m.LocalPart, m.Email, m.Name,
-		m.PasswordHash, string(m.AuthScheme), boolToInt(m.MFAEnabled), m.MFASecret, m.AppPasswords,
+		m.PasswordHash, string(m.AuthScheme), r.boolValue(m.MFAEnabled), m.MFASecret, m.AppPasswords,
 		string(m.Status), m.QuotaMB,
-		boolToInt(m.IsAdmin), boolToInt(m.IsForwarder), m.ForwardTo, m.Labels,
+		r.boolValue(m.IsAdmin), r.boolValue(m.IsForwarder), m.ForwardTo, m.Labels,
 		m.SendLimitPerHour, m.RecvLimitPerHour,
-		m.LastLogin, m.LastIP, m.CreatedAt, m.UpdatedAt,
-	)
+		m.LastLogin, m.LastIP, accessModeOrDefault(m.MailAccessMode), m.CreatedAt, m.UpdatedAt,
+	}
+	if r.getDialect().IsPostgres() {
+		var id uint
+		if err := e.QueryRowContext(ctx, r.qf(insert)+" RETURNING id", args...).Scan(&id); err != nil {
+			return fmt.Errorf("create mailbox: %w", err)
+		}
+		m.ID = id
+		return nil
+	}
+	res, err := e.ExecContext(ctx, insert, args...)
 	if err != nil {
 		return fmt.Errorf("create mailbox: %w", err)
 	}
@@ -162,27 +213,27 @@ func (r *MailboxSQLRepo) Create(ctx context.Context, m *Mailbox, tx interface{})
 
 func (r *MailboxSQLRepo) GetByID(ctx context.Context, id uint, tx interface{}) (*Mailbox, error) {
 	e := r.execer(tx)
-	row := e.QueryRowContext(ctx, `
+	row := e.QueryRowContext(ctx, r.qf(`
 		SELECT id, domain_id, tenant_id, local_part, email, name,
 		       password_hash, auth_scheme, mfa_enabled, COALESCE(mfa_secret,''), COALESCE(app_passwords,''),
 		       status, quota_mb, used_bytes, msg_count,
 		       is_admin, is_forwarder, COALESCE(forward_to,''), COALESCE(labels,''),
 		       send_limit_per_hour, recv_limit_per_hour,
-		       last_login, COALESCE(last_ip,''), created_at, updated_at, deleted_at
-		FROM coremail_mailboxes WHERE id = ? AND deleted_at IS NULL`, id)
+		       last_login, COALESCE(last_ip,''), COALESCE(mail_access_mode,'inherit'), version, created_at, updated_at, deleted_at
+		FROM coremail_mailboxes WHERE id = ? AND deleted_at IS NULL`), id)
 	return scanMailbox(row)
 }
 
 func (r *MailboxSQLRepo) GetByEmail(ctx context.Context, email string, tx interface{}) (*Mailbox, error) {
 	e := r.execer(tx)
-	row := e.QueryRowContext(ctx, `
+	row := e.QueryRowContext(ctx, r.qf(`
 		SELECT id, domain_id, tenant_id, local_part, email, name,
 		       password_hash, auth_scheme, mfa_enabled, COALESCE(mfa_secret,''), COALESCE(app_passwords,''),
 		       status, quota_mb, used_bytes, msg_count,
 		       is_admin, is_forwarder, COALESCE(forward_to,''), COALESCE(labels,''),
 		       send_limit_per_hour, recv_limit_per_hour,
-		       last_login, COALESCE(last_ip,''), created_at, updated_at, deleted_at
-		FROM coremail_mailboxes WHERE email = ? AND deleted_at IS NULL`, email)
+		       last_login, COALESCE(last_ip,''), COALESCE(mail_access_mode,'inherit'), version, created_at, updated_at, deleted_at
+		FROM coremail_mailboxes WHERE email = ? AND deleted_at IS NULL`), email)
 	return scanMailbox(row)
 }
 
@@ -208,7 +259,7 @@ func (r *MailboxSQLRepo) List(ctx context.Context, filter MailboxFilter, tx inte
 	}
 	if filter.IsAdmin != nil {
 		where = append(where, "is_admin = ?")
-		args = append(args, boolToInt(*filter.IsAdmin))
+		args = append(args, r.boolValue(*filter.IsAdmin))
 	}
 	if filter.Search != "" {
 		where = append(where, "(email LIKE ? OR name LIKE ?)")
@@ -219,20 +270,20 @@ func (r *MailboxSQLRepo) List(ctx context.Context, filter MailboxFilter, tx inte
 	clause := strings.Join(where, " AND ")
 
 	var total int64
-	countRow := e.QueryRowContext(ctx, "SELECT COUNT(*) FROM coremail_mailboxes WHERE "+clause, args...)
+	countRow := e.QueryRowContext(ctx, r.qf("SELECT COUNT(*) FROM coremail_mailboxes WHERE "+clause), args...)
 	if err := countRow.Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("list mailboxes count: %w", err)
 	}
 
-	rows, err := e.QueryContext(ctx, `
+	rows, err := e.QueryContext(ctx, r.qf(`
 		SELECT id, domain_id, tenant_id, local_part, email, name,
 		       password_hash, auth_scheme, mfa_enabled, COALESCE(mfa_secret,''), COALESCE(app_passwords,''),
 		       status, quota_mb, used_bytes, msg_count,
 		       is_admin, is_forwarder, COALESCE(forward_to,''), COALESCE(labels,''),
 		       send_limit_per_hour, recv_limit_per_hour,
-		       last_login, COALESCE(last_ip,''), created_at, updated_at, deleted_at
+		       last_login, COALESCE(last_ip,''), COALESCE(mail_access_mode,'inherit'), version, created_at, updated_at, deleted_at
 		FROM coremail_mailboxes WHERE `+clause+`
-		ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+		ORDER BY created_at DESC LIMIT ? OFFSET ?`),
 		append(args, filter.Pagination.Limit, filter.Pagination.Offset)...,
 	)
 	if err != nil {
@@ -254,15 +305,15 @@ func (r *MailboxSQLRepo) List(ctx context.Context, filter MailboxFilter, tx inte
 func (r *MailboxSQLRepo) Update(ctx context.Context, m *Mailbox, tx interface{}) error {
 	m.UpdatedAt = time.Now().UTC()
 	e := r.execer(tx)
-	_, err := e.ExecContext(ctx, `
+	_, err := e.ExecContext(ctx, r.qf(`
 		UPDATE coremail_mailboxes SET
 			name=?, password_hash=?, auth_scheme=?, mfa_enabled=?, mfa_secret=?, app_passwords=?,
 			status=?, quota_mb=?, is_admin=?, is_forwarder=?, forward_to=?, labels=?,
-			send_limit_per_hour=?, recv_limit_per_hour=?, updated_at=?
-		WHERE id = ? AND deleted_at IS NULL`,
-		m.Name, m.PasswordHash, string(m.AuthScheme), boolToInt(m.MFAEnabled), m.MFASecret, m.AppPasswords,
-		string(m.Status), m.QuotaMB, boolToInt(m.IsAdmin), boolToInt(m.IsForwarder), m.ForwardTo, m.Labels,
-		m.SendLimitPerHour, m.RecvLimitPerHour, m.UpdatedAt, m.ID,
+			send_limit_per_hour=?, recv_limit_per_hour=?, mail_access_mode=?, updated_at=?
+		WHERE id = ? AND deleted_at IS NULL`),
+		m.Name, m.PasswordHash, string(m.AuthScheme), r.boolValue(m.MFAEnabled), m.MFASecret, m.AppPasswords,
+		string(m.Status), m.QuotaMB, r.boolValue(m.IsAdmin), r.boolValue(m.IsForwarder), m.ForwardTo, m.Labels,
+		m.SendLimitPerHour, m.RecvLimitPerHour, accessModeOrDefault(m.MailAccessMode), m.UpdatedAt, m.ID,
 	)
 	return err
 }
@@ -270,14 +321,14 @@ func (r *MailboxSQLRepo) Update(ctx context.Context, m *Mailbox, tx interface{})
 func (r *MailboxSQLRepo) Delete(ctx context.Context, id uint, tx interface{}) error {
 	e := r.execer(tx)
 	now := time.Now().UTC()
-	_, err := e.ExecContext(ctx, "UPDATE coremail_mailboxes SET status=?, deleted_at=? WHERE id=?", string(MailboxDeleted), now, id)
+	_, err := e.ExecContext(ctx, r.qf("UPDATE coremail_mailboxes SET status=?, deleted_at=? WHERE id=?"), string(MailboxDeleted), now, id)
 	return err
 }
 
 func (r *MailboxSQLRepo) UpdateQuota(ctx context.Context, id uint, deltaBytes int64, deltaMsgs int, tx interface{}) error {
 	e := r.execer(tx)
-	_, err := e.ExecContext(ctx,
-		"UPDATE coremail_mailboxes SET used_bytes = used_bytes + ?, msg_count = msg_count + ? WHERE id = ? AND deleted_at IS NULL",
+	_, err := e.ExecContext(ctx, r.qf(
+		"UPDATE coremail_mailboxes SET used_bytes = used_bytes + ?, msg_count = msg_count + ? WHERE id = ? AND deleted_at IS NULL"),
 		deltaBytes, deltaMsgs, id)
 	return err
 }
@@ -285,28 +336,28 @@ func (r *MailboxSQLRepo) UpdateQuota(ctx context.Context, id uint, deltaBytes in
 func (r *MailboxSQLRepo) UpdateLastLogin(ctx context.Context, id uint, ip string, tx interface{}) error {
 	now := time.Now().UTC()
 	e := r.execer(tx)
-	_, err := e.ExecContext(ctx, "UPDATE coremail_mailboxes SET last_login=?, last_ip=? WHERE id=?", now, ip, id)
+	_, err := e.ExecContext(ctx, r.qf("UPDATE coremail_mailboxes SET last_login=?, last_ip=? WHERE id=?"), now, ip, id)
 	return err
 }
 
 func (r *MailboxSQLRepo) CountByDomain(ctx context.Context, domainID uint, tx interface{}) (int64, error) {
 	e := r.execer(tx)
 	var count int64
-	err := e.QueryRowContext(ctx, "SELECT COUNT(*) FROM coremail_mailboxes WHERE domain_id=? AND deleted_at IS NULL", domainID).Scan(&count)
+	err := e.QueryRowContext(ctx, r.qf("SELECT COUNT(*) FROM coremail_mailboxes WHERE domain_id=? AND deleted_at IS NULL"), domainID).Scan(&count)
 	return count, err
 }
 
 func (r *MailboxSQLRepo) CountByTenant(ctx context.Context, tenantID uint, tx interface{}) (int64, error) {
 	e := r.execer(tx)
 	var count int64
-	err := e.QueryRowContext(ctx, "SELECT COUNT(*) FROM coremail_mailboxes WHERE tenant_id=? AND deleted_at IS NULL", tenantID).Scan(&count)
+	err := e.QueryRowContext(ctx, r.qf("SELECT COUNT(*) FROM coremail_mailboxes WHERE tenant_id=? AND deleted_at IS NULL"), tenantID).Scan(&count)
 	return count, err
 }
 
 func (r *MailboxSQLRepo) SumUsedBytesByDomain(ctx context.Context, domainID uint, tx interface{}) (int64, error) {
 	e := r.execer(tx)
 	var total sql.NullInt64
-	err := e.QueryRowContext(ctx, "SELECT SUM(used_bytes) FROM coremail_mailboxes WHERE domain_id=? AND deleted_at IS NULL", domainID).Scan(&total)
+	err := e.QueryRowContext(ctx, r.qf("SELECT SUM(used_bytes) FROM coremail_mailboxes WHERE domain_id=? AND deleted_at IS NULL"), domainID).Scan(&total)
 	if err != nil {
 		return 0, err
 	}
@@ -316,23 +367,25 @@ func (r *MailboxSQLRepo) SumUsedBytesByDomain(ctx context.Context, domainID uint
 func (r *MailboxSQLRepo) Exists(ctx context.Context, email string, tx interface{}) (bool, error) {
 	e := r.execer(tx)
 	var count int64
-	err := e.QueryRowContext(ctx, "SELECT COUNT(*) FROM coremail_mailboxes WHERE email=? AND deleted_at IS NULL", email).Scan(&count)
+	err := e.QueryRowContext(ctx, r.qf("SELECT COUNT(*) FROM coremail_mailboxes WHERE email=? AND deleted_at IS NULL"), email).Scan(&count)
 	return count > 0, err
 }
 
+// scanMailbox handles both dialects: SQLite stores flag columns as
+// INTEGER 0/1, PostgreSQL as BOOLEAN — databaseBoolValue covers both.
 func scanMailbox(row interface {
 	Scan(dest ...interface{}) error
 }) (*Mailbox, error) {
 	var m Mailbox
 	var status, authScheme string
-	var mfaEnabled, isAdmin, isForwarder int
+	var mfaEnabled, isAdmin, isForwarder interface{}
 	err := row.Scan(
 		&m.ID, &m.DomainID, &m.TenantID, &m.LocalPart, &m.Email, &m.Name,
 		&m.PasswordHash, &authScheme, &mfaEnabled, &m.MFASecret, &m.AppPasswords,
 		&status, &m.QuotaMB, &m.UsedBytes, &m.MsgCount,
 		&isAdmin, &isForwarder, &m.ForwardTo, &m.Labels,
 		&m.SendLimitPerHour, &m.RecvLimitPerHour,
-		&m.LastLogin, &m.LastIP, &m.CreatedAt, &m.UpdatedAt, &m.DeletedAt,
+		&m.LastLogin, &m.LastIP, &m.MailAccessMode, &m.Version, &m.CreatedAt, &m.UpdatedAt, &m.DeletedAt,
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -342,9 +395,9 @@ func scanMailbox(row interface {
 	}
 	m.Status = MailboxStatus(status)
 	m.AuthScheme = AuthScheme(authScheme)
-	m.MFAEnabled = intToBool(mfaEnabled)
-	m.IsAdmin = intToBool(isAdmin)
-	m.IsForwarder = intToBool(isForwarder)
+	m.MFAEnabled = databaseBoolValue(mfaEnabled)
+	m.IsAdmin = databaseBoolValue(isAdmin)
+	m.IsForwarder = databaseBoolValue(isForwarder)
 	// Default all protocols to allowed. The runtime can override
 	// via admin PATCH /mailboxes/:id/protocols when the DB columns
 	// exist. Callers that need protocol flags should use
@@ -366,15 +419,15 @@ func scanMailboxWithProtocols(row interface {
 }) (*Mailbox, error) {
 	var m Mailbox
 	var status, authScheme string
-	var mfaEnabled, isAdmin, isForwarder int
-	var allowSMTP, allowIMAP, allowPOP3, allowJMAP, allowWebmail int
+	var mfaEnabled, isAdmin, isForwarder interface{}
+	var allowSMTP, allowIMAP, allowPOP3, allowJMAP, allowWebmail interface{}
 	err := row.Scan(
 		&m.ID, &m.DomainID, &m.TenantID, &m.LocalPart, &m.Email, &m.Name,
 		&m.PasswordHash, &authScheme, &mfaEnabled, &m.MFASecret, &m.AppPasswords,
 		&status, &m.QuotaMB, &m.UsedBytes, &m.MsgCount,
 		&isAdmin, &isForwarder, &m.ForwardTo, &m.Labels,
 		&m.SendLimitPerHour, &m.RecvLimitPerHour,
-		&m.LastLogin, &m.LastIP, &m.CreatedAt, &m.UpdatedAt, &m.DeletedAt,
+		&m.LastLogin, &m.LastIP, &m.MailAccessMode, &m.Version, &m.CreatedAt, &m.UpdatedAt, &m.DeletedAt,
 		&allowSMTP, &allowIMAP, &allowPOP3, &allowJMAP, &allowWebmail,
 	)
 	if err != nil {
@@ -385,13 +438,45 @@ func scanMailboxWithProtocols(row interface {
 	}
 	m.Status = MailboxStatus(status)
 	m.AuthScheme = AuthScheme(authScheme)
-	m.MFAEnabled = intToBool(mfaEnabled)
-	m.IsAdmin = intToBool(isAdmin)
-	m.IsForwarder = intToBool(isForwarder)
-	m.AllowSMTP = intToBool(allowSMTP)
-	m.AllowIMAP = intToBool(allowIMAP)
-	m.AllowPOP3 = intToBool(allowPOP3)
-	m.AllowJMAP = intToBool(allowJMAP)
-	m.AllowWebmail = intToBool(allowWebmail)
+	m.MFAEnabled = databaseBoolValue(mfaEnabled)
+	m.IsAdmin = databaseBoolValue(isAdmin)
+	m.IsForwarder = databaseBoolValue(isForwarder)
+	m.AllowSMTP = databaseBoolValue(allowSMTP)
+	m.AllowIMAP = databaseBoolValue(allowIMAP)
+	m.AllowPOP3 = databaseBoolValue(allowPOP3)
+	m.AllowJMAP = databaseBoolValue(allowJMAP)
+	m.AllowWebmail = databaseBoolValue(allowWebmail)
 	return &m, nil
+}
+
+// accessModeOrDefault normalizes a mailbox access-mode value for
+// persistence: the empty string (rows written before the column
+// existed) is stored as the canonical "inherit" value so every write
+// boundary persists one of the three canonical values.
+func accessModeOrDefault(mode string) string {
+	if mode == "" {
+		return "inherit"
+	}
+	return mode
+}
+
+// databaseBoolValue converts a scanned flag column to bool. SQLite
+// returns INTEGER 0/1; PostgreSQL returns native bool.
+func databaseBoolValue(v interface{}) bool {
+	switch x := v.(type) {
+	case bool:
+		return x
+	case int64:
+		return x != 0
+	case int:
+		return x != 0
+	case []byte:
+		s := strings.ToLower(string(x))
+		return s == "1" || s == "true" || s == "t"
+	case string:
+		s := strings.ToLower(x)
+		return s == "1" || s == "true" || s == "t"
+	default:
+		return false
+	}
 }

@@ -23,6 +23,21 @@
   --warning: #B45309;
   --danger: #DC2626;
   --info: #2563EB;
+  /* Dashboard accents — soft tinted icon/card backgrounds for the
+     Platform Super Admin overview. Distinct from --accent (the
+     interactive/brand color) so KPI cards can carry semantic color
+     (uptime=emerald, storage=blue/violet, network=amber) without
+     competing with links/buttons. */
+  --accent-violet: #635BFF;
+  --accent-violet-soft: #F1F0FF;
+  --accent-blue: #3B82F6;
+  --accent-blue-soft: #EAF2FE;
+  --accent-emerald: #10B981;
+  --accent-emerald-soft: #E9FBF3;
+  --accent-amber: #F59E0B;
+  --accent-amber-soft: #FEF6E7;
+  --accent-orange: #F97316;
+  --accent-orange-soft: #FEF0E7;
 }
 
 .dark {
@@ -43,6 +58,16 @@
   --warning: #FBBF24;
   --danger: #F87171;
   --info: #60A5FA;
+  --accent-violet: #8B85FF;
+  --accent-violet-soft: #211F3D;
+  --accent-blue: #60A5FA;
+  --accent-blue-soft: #17253F;
+  --accent-emerald: #34D399;
+  --accent-emerald-soft: #12302A;
+  --accent-amber: #FBBF24;
+  --accent-amber-soft: #332711;
+  --accent-orange: #FB923C;
+  --accent-orange-soft: #34220F;
 }
 
 body {

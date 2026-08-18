@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -194,18 +195,86 @@ func parseScopes(s string) []string {
 	return strings.Split(s, ",")
 }
 
+// ListEnterpriseAuditLogs returns the authenticated tenant's audit
+// entries (GET /enterprise/audit/logs) from the SAME canonical store the
+// Platform Audit page reads (orvix_audit via the extended store), scoped
+// to the caller's tenant. The contract is the canonical audit envelope
+// {entries, total, limit, offset} with the rich extended entry fields —
+// the tenant-facing audit page must never see different actions than the
+// platform page, or a second, incompatible model. Legacy coremail_audit
+// remains only as a fallback when the extended store is unavailable.
 func (h *Handler) ListEnterpriseAuditLogs(c fiber.Ctx) error {
-	if h.auditStore == nil {
-		return c.JSON([]struct{}{})
-	}
 	tenantID, err := auth.RequireTenantID(c)
 	if err != nil {
 		return c.Status(err.(*fiber.Error).Code).JSON(fiber.Map{"error": err.Error()})
 	}
 
+	limit := 100
+	if raw := strings.TrimSpace(c.Query("limit")); raw != "" {
+		if n, aerr := strconv.Atoi(raw); aerr == nil && n > 0 {
+			limit = n
+		}
+	}
+	if limit > 500 {
+		limit = 500
+	}
+	offset := 0
+	if raw := strings.TrimSpace(c.Query("offset")); raw != "" {
+		if n, aerr := strconv.Atoi(raw); aerr == nil && n >= 0 {
+			offset = n
+		}
+	}
+	if raw := strings.TrimSpace(c.Query("page")); raw != "" {
+		if n, aerr := strconv.Atoi(raw); aerr == nil && n > 0 {
+			offset = (n - 1) * limit
+		}
+	}
+
+	if h.auditExtended != nil {
+		eq := &audit.ExtendedQuery{
+			Action: strings.TrimSpace(c.Query("action")),
+			Result: strings.TrimSpace(c.Query("result")),
+			Target: strings.TrimSpace(c.Query("target")),
+			Limit:  limit,
+			Offset: offset,
+		}
+		tid := tenantID
+		eq.TenantID = &tid
+		if actor := strings.TrimSpace(c.Query("actor")); actor != "" {
+			if actorID, aerr := strconv.ParseUint(actor, 10, 64); aerr == nil && actorID > 0 {
+				aid := uint(actorID)
+				eq.ActorID = &aid
+			}
+		}
+		if since := strings.TrimSpace(c.Query("since")); since != "" {
+			if t, terr := time.Parse(time.RFC3339, since); terr == nil {
+				eq.Since = &t
+			}
+		}
+		if until := strings.TrimSpace(c.Query("until")); until != "" {
+			if t, terr := time.Parse(time.RFC3339, until); terr == nil {
+				eq.Until = &t
+			}
+		}
+		entries, total, serr := h.auditExtended.Search(c.Context(), eq)
+		if serr != nil {
+			h.logger.Error("failed to list enterprise audit logs", zap.Error(serr))
+			return c.JSON(fiber.Map{"entries": []audit.ExtendedEntry{}, "total": 0, "limit": limit, "offset": offset})
+		}
+		if entries == nil {
+			entries = []audit.ExtendedEntry{}
+		}
+		return c.JSON(fiber.Map{"entries": entries, "total": total, "limit": limit, "offset": offset})
+	}
+
+	// Legacy fallback: coremail_audit store, same envelope, safe fields.
+	if h.auditStore == nil {
+		return c.JSON(fiber.Map{"entries": []struct{}{}, "total": 0, "limit": limit, "offset": offset})
+	}
 	q := &audit.Query{
 		TenantID: tenantID,
-		Limit:    100,
+		Limit:    limit,
+		Offset:   offset,
 	}
 	if actor := c.Query("actor"); actor != "" {
 		q.Actor = actor
@@ -227,10 +296,10 @@ func (h *Handler) ListEnterpriseAuditLogs(c fiber.Ctx) error {
 		}
 	}
 
-	logs, _, err := h.auditStore.Search(c.Context(), q)
+	logs, total, err := h.auditStore.Search(c.Context(), q)
 	if err != nil {
 		h.logger.Error("failed to list enterprise audit logs", zap.Error(err))
-		return c.JSON([]struct{}{})
+		return c.JSON(fiber.Map{"entries": []struct{}{}, "total": 0, "limit": limit, "offset": offset})
 	}
 	type safeEntry struct {
 		ID        int64  `json:"id"`
@@ -238,6 +307,7 @@ func (h *Handler) ListEnterpriseAuditLogs(c fiber.Ctx) error {
 		Actor     string `json:"actor"`
 		Target    string `json:"target"`
 		Result    string `json:"result"`
+		TenantID  uint   `json:"tenant_id"`
 		Timestamp string `json:"timestamp"`
 	}
 	result := make([]safeEntry, 0, len(logs))
@@ -248,8 +318,9 @@ func (h *Handler) ListEnterpriseAuditLogs(c fiber.Ctx) error {
 			Actor:     e.Actor,
 			Target:    e.Target,
 			Result:    e.Result,
+			TenantID:  e.TenantID,
 			Timestamp: e.Timestamp.Format(time.RFC3339),
 		})
 	}
-	return c.JSON(result)
+	return c.JSON(fiber.Map{"entries": result, "total": total, "limit": limit, "offset": offset})
 }

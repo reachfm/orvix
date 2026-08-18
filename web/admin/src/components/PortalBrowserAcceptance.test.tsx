@@ -120,4 +120,25 @@ describe("Portal browser acceptance", () => {
     render(<Wrapper><PreferencesPage /></Wrapper>);
     await waitFor(() => expect(screen.getByText("Preferences")).toBeInTheDocument());
   });
+
+  it("renders API keys page against the real /enterprise/api-keys contract", async () => {
+    const { default: ApiKeysPage } = await import("./ApiKeysPage");
+    render(<Wrapper><ApiKeysPage /></Wrapper>);
+    await waitFor(() => expect(screen.getByText("API Keys")).toBeInTheDocument());
+    // The page must offer the real create form (name + scopes) and the
+    // honest empty state — never a fabricated "orv_simulated_key_".
+    expect(screen.getByText("Create API Key")).toBeInTheDocument();
+    expect(screen.getByText("Your Keys")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText("No API keys created yet.")).toBeInTheDocument());
+  });
+
+  it("invitations page offers only canonical member roles, never 'user'", async () => {
+    const { default: InvitationsPage } = await import("./InvitationsPage");
+    render(<Wrapper><InvitationsPage /></Wrapper>);
+    await waitFor(() => expect(screen.getByText("Invitations")).toBeInTheDocument());
+    const roleSelect = screen.getByLabelText("Invited member role") as HTMLSelectElement;
+    const options = Array.from(roleSelect.options).map((o) => o.value);
+    expect(options).toEqual(["tenant_admin", "tenant_operator", "tenant_support", "tenant_readonly"]);
+    expect(options).not.toContain("user");
+  });
 });

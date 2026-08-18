@@ -363,6 +363,41 @@ func (e *webmailTestEnv) injectMessage(t *testing.T, subject, body string) uint 
 	return msg.ID
 }
 
+// injectRawMessage stores an arbitrary caller-supplied raw RFC822
+// blob into the test mailbox's INBOX, bypassing buildRFC822 — used
+// by tests that need precise control over MIME structure (multipart
+// boundaries, encodings, headers) rather than the plain single-part
+// message injectMessage builds.
+func (e *webmailTestEnv) injectRawMessage(t *testing.T, subject string, rfc822 []byte) uint {
+	t.Helper()
+	mailboxID := mailboxIDForEmail(t, e.mailbox, e.email)
+	inbox, err := e.mailbox.Folders.GetByPath(t.Context(), mailboxID, "INBOX", nil)
+	if err != nil || inbox == nil {
+		t.Fatalf("injectRawMessage: no INBOX folder: %v", err)
+	}
+	messageID := makeID()
+	now := time.Now().UTC()
+	from := "sender@example.com"
+	to := e.email
+	msg := &storage.Message{
+		MessageID:         messageID,
+		InternetMessageID: "<" + messageID + "@test>",
+		TenantID:          1,
+		DomainID:          1,
+		MailboxID:         mailboxID,
+		FolderID:          inbox.ID,
+		Subject:           subject,
+		FromAddress:       from,
+		ToAddresses:       to,
+		MessageDate:       &now,
+		ReceivedDate:      now,
+	}
+	if err := e.mailbox.StoreMessage(t.Context(), msg, rfc822, nil); err != nil {
+		t.Fatalf("StoreMessage: %v", err)
+	}
+	return msg.ID
+}
+
 // mailboxIDForEmail looks up the mailbox id for the given
 // email by querying coremail_mailboxes directly.
 func mailboxIDForEmail(t *testing.T, ms *storage.MailStore, email string) uint {
@@ -676,6 +711,59 @@ func TestWebmailAPISendCreatesSentMessage(t *testing.T) {
 	rfc822, _ := msgResp["rfc822"].(string)
 	if !strings.Contains(rfc822, bodyMarker) {
 		t.Errorf("POST /send: stored RFC822 missing body marker %q", bodyMarker)
+	}
+}
+
+// TestWebmailAPISendMessageIDUsesRealHostnameNotOrvixLocal pins the
+// ORVIX — SURGICAL INTERNET MESSAGE-ID FIX: a message sent through
+// webmail must never carry the private "orvix.local" pseudo-domain
+// in its Message-ID header. The test harness's config.Defaults()
+// leaves coremail.hostname at "mail.local" (itself an invalid,
+// private pseudo-domain), so this also exercises the documented
+// safe fallback to the authenticated sender's own mailbox domain
+// ("orvix.email" for admin@orvix.email).
+func TestWebmailAPISendMessageIDUsesRealHostnameNotOrvixLocal(t *testing.T) {
+	e := buildWebmailTestEnv(t)
+	if err := e.mailbox.Folders.EnsureSystemFolders(t.Context(), mustMailboxIDForTest(t, e, e.email), nil); err != nil {
+		t.Fatalf("ensure system folders: %v", err)
+	}
+	tok := e.loginAdmin(t)
+
+	req := map[string]string{
+		"to":      "recipient@example.com",
+		"subject": "Message-ID hostname test",
+		"body":    "body",
+	}
+	status, resp := e.webmailRequest(t, "POST", "/api/v1/webmail/send", tok, req)
+	if status != http.StatusCreated {
+		t.Fatalf("POST /send: expected 201, got %d: %v", status, resp)
+	}
+	id, ok := resp["id"].(float64)
+	if !ok || id == 0 {
+		t.Fatalf("POST /send: response id invalid: %v", resp["id"])
+	}
+
+	status, msgResp := e.webmailRequest(t, "GET", fmt.Sprintf("/api/v1/webmail/messages/%d", int(id)), tok, nil)
+	if status != 200 {
+		t.Fatalf("GET /messages/%d: expected 200, got %d", int(id), status)
+	}
+	rfc822, _ := msgResp["rfc822"].(string)
+	if rfc822 == "" {
+		t.Fatalf("GET /messages/%d: rfc822 empty", int(id))
+	}
+	if strings.Contains(rfc822, "@orvix.local") {
+		t.Fatalf("sent RFC822 still contains the private orvix.local pseudo-domain in Message-ID:\n%s", rfc822)
+	}
+	idx := strings.Index(rfc822, "Message-ID: <")
+	if idx < 0 {
+		t.Fatalf("sent RFC822 missing Message-ID header:\n%s", rfc822)
+	}
+	line := rfc822[idx:]
+	if end := strings.IndexAny(line, "\r\n"); end >= 0 {
+		line = line[:end]
+	}
+	if !strings.HasSuffix(line, "@orvix.email>") {
+		t.Fatalf("Message-ID id-right = %q, want the sender-domain fallback \"orvix.email\" (coremail.hostname defaults to the invalid mail.local in tests)", line)
 	}
 }
 
@@ -1270,36 +1358,70 @@ func (r *failAfterNRepo) Enqueue(ctx context.Context, e *queue.QueueEntry, tx in
 	return r.Repository.Enqueue(ctx, e, tx)
 }
 
-// TestWebmailAPISendPartialEnqueueFailure confirms that if
-// any recipient fails to enqueue, the API returns an error
-// and never reports status=queued. This is the WEBMAIL-3
-// all-or-nothing correctness guarantee.
+// TestWebmailAPISendPartialEnqueueFailure pins the atomic
+// all-or-nothing send contract introduced by commit 14b65a0:
+// domain lock/recheck, quota reservation, the durable Sent
+// write, every recipient's queue row, and quota finalization
+// all share ONE SQL transaction, so a single recipient's
+// enqueue failure rolls back the ENTIRE send. Nothing durable
+// may survive: no stored-message ID is returned, no Sent
+// message row exists, no queue rows exist, no send events
+// exist, and no quota usage is committed.
 func TestWebmailAPISendPartialEnqueueFailure(t *testing.T) {
 	e := buildWebmailTestEnv(t)
 	if err := e.mailbox.Folders.EnsureSystemFolders(t.Context(), mustMailboxIDForTest(t, e, e.email), nil); err != nil {
 		t.Fatalf("ensure system folders: %v", err)
 	}
 	tok := e.loginAdmin(t)
+	sqlDB := e.mailbox.DB
 
 	// Replace the queue repo with one that fails on the
 	// second Enqueue call (one succeeds, one fails).
 	e.queue.Repo = &failAfterNRepo{Repository: e.queue.Repo, failAfter: 1}
 
+	beforeQueue, err := queueRowCount(t, sqlDB, 0)
+	if err != nil {
+		t.Fatalf("queue count before: %v", err)
+	}
+	var beforeMessages, beforeEvents int64
+	if err := sqlDB.QueryRow(`SELECT COUNT(*) FROM coremail_messages`).Scan(&beforeMessages); err != nil {
+		t.Fatalf("message count before: %v", err)
+	}
+	if err := sqlDB.QueryRow(`SELECT COUNT(*) FROM send_events`).Scan(&beforeEvents); err != nil {
+		t.Fatalf("send_events count before: %v", err)
+	}
+
 	req := map[string]string{
 		"to":      "alice@example.com, bob@example.com",
 		"subject": "Partial failure test",
-		"body":    "Should not be fully queued.",
+		"body":    "Must not survive as partial state.",
 	}
 	status, resp := e.webmailRequest(t, "POST", "/api/v1/webmail/send", tok, req)
 
-	// Must NOT return 201 — partial enqueue failures are
-	// all-or-nothing from API behavior.
-	if status == http.StatusCreated {
-		t.Fatalf("POST /send: expected non-201 for partial enqueue failure, got 201: %v", resp)
+	// Any recipient enqueue failure rejects the whole send with
+	// a non-success response and a stable error code.
+	if status != http.StatusInternalServerError {
+		t.Fatalf("POST /send: expected 500 for partial enqueue failure, got %d: %v", status, resp)
+	}
+	if code, _ := resp["code"].(string); code != "INTERNAL_ERROR" {
+		t.Errorf("POST /send: code = %v, want INTERNAL_ERROR (resp=%v)", code, resp)
 	}
 
-	// Response must NOT contain queue_ids or enqueue_errors
-	// (those fields were removed in the WEBMAIL-3 fix).
+	// No stored-message ID, message_id, or success status may be
+	// reported: nothing durable survived, so nothing partial may
+	// be advertised to the client.
+	if _, ok := resp["id"]; ok {
+		t.Errorf("POST /send: id must not appear in response after rollback: %v", resp)
+	}
+	if _, ok := resp["message_id"]; ok {
+		t.Errorf("POST /send: message_id must not appear in response after rollback: %v", resp)
+	}
+	if s, _ := resp["status"].(string); s == "queued" {
+		t.Errorf("POST /send: status must not be queued after rollback: %v", resp)
+	}
+	if _, ok := resp["queued_count"]; ok {
+		t.Errorf("POST /send: queued_count must not appear in response after rollback: %v", resp)
+	}
 	if _, ok := resp["queue_ids"]; ok {
 		t.Errorf("POST /send: queue_ids must not appear in response: %v", resp)
 	}
@@ -1307,32 +1429,49 @@ func TestWebmailAPISendPartialEnqueueFailure(t *testing.T) {
 		t.Errorf("POST /send: enqueue_errors must not appear in response: %v", resp)
 	}
 
-	// Sent storage is unchanged — the message body is still
-	// stored even when enqueue fails. Verify the Sent copy
-	// exists.
-	id, ok := resp["id"].(float64)
-	if !ok || id == 0 {
-		t.Fatalf("POST /send: expected response id for stored message, got %v", resp["id"])
+	// No Sent message survives: the StoreMessage write happened
+	// inside the same transaction and was rolled back.
+	var afterMessages int64
+	if err := sqlDB.QueryRow(`SELECT COUNT(*) FROM coremail_messages`).Scan(&afterMessages); err != nil {
+		t.Fatalf("message count after: %v", err)
 	}
-	status, listResp := e.webmailRequest(t, "GET", "/api/v1/webmail/messages?folder=Sent", tok, nil)
-	if status != 200 {
-		t.Fatalf("GET /messages?folder=Sent: expected 200, got %d", status)
+	if afterMessages != beforeMessages {
+		t.Errorf("sent message row survived rollback: before=%d after=%d", beforeMessages, afterMessages)
 	}
-	messages, _ := listResp["messages"].([]interface{})
-	found := false
-	for _, m := range messages {
-		mm, _ := m.(map[string]interface{})
-		if int(mm["id"].(float64)) == int(id) {
-			found = true
-			break
-		}
+
+	// No recipient queue rows survive: the first (successful)
+	// enqueue was rolled back with the failing one.
+	afterQueue, err := queueRowCount(t, sqlDB, 0)
+	if err != nil {
+		t.Fatalf("queue count after: %v", err)
 	}
-	if !found {
-		t.Errorf("POST /send: Sent message id=%v not found in Sent folder after partial enqueue failure", int(id))
+	if afterQueue != beforeQueue {
+		t.Errorf("queue rows survived rollback: before=%d after=%d", beforeQueue, afterQueue)
 	}
+
+	// No send event survives (neither the reservation nor any
+	// finalized 'send' event) — quota accounting is all-or-nothing.
+	var afterEvents int64
+	if err := sqlDB.QueryRow(`SELECT COUNT(*) FROM send_events`).Scan(&afterEvents); err != nil {
+		t.Fatalf("send_events count after: %v", err)
+	}
+	if afterEvents != beforeEvents {
+		t.Errorf("send events survived rollback: before=%d after=%d", beforeEvents, afterEvents)
+	}
+
+	// Quota reservation/finalization leaves no committed usage.
+	assertWebmailScalar(t, sqlDB, "SELECT COALESCE(SUM(emails_sent), 0) FROM usage_records WHERE tenant_id = 1", 0)
+	assertWebmailScalar(t, sqlDB, "SELECT COALESCE(SUM(emails_sent), 0) FROM abuse_send_counts WHERE tenant_id = 1", 0)
 }
 
-func TestWebmailAPISendPartialEnqueueRecordsSuccessfulRecipients(t *testing.T) {
+// TestWebmailAPISendPartialEnqueueLeavesNoRecipientAccounting
+// pins the accounting side of the atomic send contract: when a
+// recipient enqueue fails inside the acceptance transaction,
+// NO successful-recipient accounting may survive. There must be
+// no 'send' send_event, no 'reservation' send_event, no
+// usage_records emails_sent, no abuse_send_counts emails_sent,
+// no recipient queue rows, and no Sent message.
+func TestWebmailAPISendPartialEnqueueLeavesNoRecipientAccounting(t *testing.T) {
 	e := buildWebmailTestEnv(t)
 	if err := e.mailbox.Folders.EnsureSystemFolders(t.Context(), mustMailboxIDForTest(t, e, e.email), nil); err != nil {
 		t.Fatalf("ensure system folders: %v", err)
@@ -1344,14 +1483,27 @@ func TestWebmailAPISendPartialEnqueueRecordsSuccessfulRecipients(t *testing.T) {
 	status, resp := e.webmailRequest(t, "POST", "/api/v1/webmail/send", tok, map[string]string{
 		"to":      "alice@example.com, bob@example.com",
 		"subject": "Partial accounting",
-		"body":    "one row should enqueue",
+		"body":    "no row may survive",
 	})
 	if status != http.StatusInternalServerError {
 		t.Fatalf("partial enqueue: status=%d resp=%v, want 500", status, resp)
 	}
-	assertWebmailScalar(t, sqlDB, "SELECT COALESCE(SUM(recipient_count), 0) FROM send_events WHERE event_type = 'send'", 1)
+	if _, ok := resp["id"]; ok {
+		t.Errorf("POST /send: id must not appear in response after rollback: %v", resp)
+	}
+
+	// No successful-recipient send event survives.
+	assertWebmailScalar(t, sqlDB, "SELECT COALESCE(SUM(recipient_count), 0) FROM send_events WHERE event_type = 'send'", 0)
+	// No reservation event survives either — the whole
+	// reservation/finalization pair rolled back.
 	assertWebmailScalar(t, sqlDB, "SELECT COUNT(*) FROM send_events WHERE event_type = 'reservation'", 0)
-	assertWebmailScalar(t, sqlDB, "SELECT COALESCE(SUM(emails_sent), 0) FROM usage_records WHERE tenant_id = 1", 1)
+	// No committed quota usage survives.
+	assertWebmailScalar(t, sqlDB, "SELECT COALESCE(SUM(emails_sent), 0) FROM usage_records WHERE tenant_id = 1", 0)
+	assertWebmailScalar(t, sqlDB, "SELECT COALESCE(SUM(emails_sent), 0) FROM abuse_send_counts WHERE tenant_id = 1", 0)
+	// No recipient queue rows survive.
+	assertWebmailScalar(t, sqlDB, "SELECT COUNT(*) FROM coremail_queue WHERE deleted_at IS NULL", 0)
+	// No Sent message survives.
+	assertWebmailScalar(t, sqlDB, "SELECT COUNT(*) FROM coremail_messages", 0)
 }
 
 func TestWebmailAPISendConcurrentRequestsCannotExceedQuota(t *testing.T) {

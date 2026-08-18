@@ -162,6 +162,24 @@ func (r *OrganizationRepo) SetActiveIfCurrentlyIs(ctx context.Context, id uint, 
 	return n > 0, nil
 }
 
+// CountActiveDomains counts non-deleted domains for a tenant (Phase G
+// deletion dependency guard).
+func (r *OrganizationRepo) CountActiveDomains(ctx context.Context, tenantID uint) (int, error) {
+	var count int
+	err := r.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM domains WHERE tenant_id="+r.dialect.Placeholder(1)+" AND deleted_at IS NULL", tenantID).Scan(&count)
+	return count, err
+}
+
+// CountActiveMailboxes counts non-deleted, active mailboxes for a tenant
+// (Phase G deletion dependency guard).
+func (r *OrganizationRepo) CountActiveMailboxes(ctx context.Context, tenantID uint) (int, error) {
+	var count int
+	err := r.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM mailboxes WHERE tenant_id="+r.dialect.Placeholder(1)+" AND deleted_at IS NULL AND is_active = "+r.dialect.TrueLiteral(), tenantID).Scan(&count)
+	return count, err
+}
+
 func (r *OrganizationRepo) ExistsBySlug(ctx context.Context, slug string, excludeID uint) (bool, error) {
 	var count int64
 	err := r.db.QueryRowContext(ctx,
@@ -169,11 +187,30 @@ func (r *OrganizationRepo) ExistsBySlug(ctx context.Context, slug string, exclud
 	return count > 0, err
 }
 
-// CountAdmins counts active, non-deleted tenant admin users for a specific
-// tenant. platform_super_admin (tenant_id IS NULL) is never counted.
-// Legacy admin/superadmin roles remain included for pre-normalization
-// upgrade rows; they are replaced by tenant_admin after startup normalizer
-// completes.
+// ExistsByDomain reports whether any non-deleted tenant carries the
+// given domain. The tenants table enforces UNIQUE(domain), so this is
+// the truthful pre-check behind the PSA organization-creation contract
+// (a domain collision is a distinct conflict from a slug collision).
+func (r *OrganizationRepo) ExistsByDomain(ctx context.Context, domain string, excludeID uint) (bool, error) {
+	var count int64
+	err := r.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM tenants WHERE domain="+r.dialect.Placeholder(1)+" AND id!="+r.dialect.Placeholder(2)+" AND deleted_at IS NULL", domain, excludeID).Scan(&count)
+	return count > 0, err
+}
+
+// CountAdmins counts active, non-deleted tenant administrator users for a
+// specific tenant. platform_super_admin (tenant_id IS NULL) is never
+// counted. Legacy admin/superadmin roles remain included for
+// pre-normalization upgrade rows; they are replaced by tenant_admin after
+// startup normalizer completes. 'user' is deliberately NOT counted: a
+// RoleUser row is a per-mailbox webmail end-user with no Organization
+// administration privileges (see internal/auth/auth.go and the RBAC map),
+// and an Organization owner created through public signup is persisted as
+// tenant_admin — so a correct tenant always has a countable tenant_admin
+// owner. A legacy signup-created owner row still carrying role='user' is
+// repaired by the operator via the narrow, audited `orvix admin
+// repair-signup-owner` CLI path, never by counting webmail users as
+// administrators.
 func (r *OrganizationRepo) CountAdmins(ctx context.Context, tenantID uint) (int, error) {
 	var count int
 	err := r.db.QueryRowContext(ctx,

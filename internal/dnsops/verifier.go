@@ -126,6 +126,11 @@ func (v *Verifier) checkMX(ctx context.Context, plan *Plan, r *Record) {
 		return
 	}
 	expectedHost := strings.TrimSuffix(strings.ToLower(plan.MailHost), ".")
+	observedAll := make([]string, 0, len(mxs))
+	for _, m := range mxs {
+		observedAll = append(observedAll, fmt.Sprintf("%d %s", m.Pref, strings.TrimSuffix(m.Host, ".")))
+	}
+	r.Observed = strings.Join(observedAll, ", ")
 	for _, m := range mxs {
 		host := strings.TrimSuffix(strings.ToLower(m.Host), ".")
 		if host == expectedHost && int(m.Pref) == r.Priority {
@@ -157,6 +162,7 @@ func (v *Verifier) checkMailA(ctx context.Context, plan *Plan, r *Record) {
 		return
 	}
 	want := strings.TrimSpace(plan.ServerIPv4)
+	r.Observed = joinIPs(ips)
 	for _, ip := range ips {
 		if ip.String() == want {
 			r.Status = StatusVerified
@@ -178,6 +184,7 @@ func (v *Verifier) checkMailAAAA(ctx context.Context, plan *Plan, r *Record) {
 		return
 	}
 	want := strings.TrimSpace(plan.ServerIPv6)
+	r.Observed = joinIPs(ips)
 	for _, ip := range ips {
 		if ip.String() == want {
 			r.Status = StatusVerified
@@ -219,6 +226,7 @@ func (v *Verifier) checkSPF(ctx context.Context, plan *Plan, r *Record) {
 	}
 	existing := strings.TrimSpace(spfRecords[0])
 	want := strings.TrimSpace(r.Value)
+	r.Observed = existing
 	// Normalise: collapse whitespace, lower-case the version tag,
 	// trim trailing dot on any "mx:<host>" references.
 	if spfEquivalent(existing, want) {
@@ -257,6 +265,7 @@ func (v *Verifier) checkDKIM(ctx context.Context, plan *Plan, r *Record) {
 		if !strings.HasPrefix(t, "v=DKIM1") {
 			continue
 		}
+		r.Observed = t
 		if dkimEquivalent(t, r.Value) {
 			r.Status = StatusVerified
 			r.Verified = true
@@ -285,6 +294,7 @@ func (v *Verifier) checkDMARC(ctx context.Context, plan *Plan, r *Record) {
 		if !strings.HasPrefix(t, "v=DMARC1") {
 			continue
 		}
+		r.Observed = t
 		// The DMARC parser enforces the v=DMARC1 + p= minimum
 		// contract from RFC 7489 §6.3. We accept any policy value
 		// (none / quarantine / reject) because the dashboard
@@ -326,6 +336,7 @@ func (v *Verifier) checkMTASTS(ctx context.Context, plan *Plan, r *Record) {
 		if !strings.HasPrefix(t, "v=STSv1") {
 			continue
 		}
+		r.Observed = t
 		// id must match the policy id the plan emits. v=STSv1 is
 		// case-insensitive; id is opaque and case-sensitive.
 		existingID := extractMTASTSID(t)
@@ -359,6 +370,7 @@ func (v *Verifier) checkMTASTSHost(ctx context.Context, plan *Plan, r *Record) {
 		return
 	}
 	want := strings.TrimSpace(plan.ServerIPv4)
+	r.Observed = joinIPs(ips)
 	for _, ip := range ips {
 		if ip.String() == want {
 			r.Status = StatusVerified
@@ -385,6 +397,7 @@ func (v *Verifier) checkTLSRPT(ctx context.Context, plan *Plan, r *Record) {
 		if !strings.HasPrefix(t, "v=TLSRPTv1") {
 			continue
 		}
+		r.Observed = t
 		r.Status = StatusVerified
 		r.Verified = true
 		r.Reason = "TLS-RPT present"
@@ -467,6 +480,7 @@ func (v *Verifier) checkPTR(ctx context.Context, plan *Plan, r *Record) {
 		return
 	}
 	want := strings.TrimSuffix(strings.ToLower(plan.MailHost), ".")
+	r.Observed = strings.Join(hosts, ", ")
 	for _, h := range hosts {
 		if strings.TrimSuffix(strings.ToLower(h), ".") == want {
 			r.Status = StatusVerified

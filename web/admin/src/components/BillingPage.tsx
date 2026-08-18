@@ -10,11 +10,24 @@ export default function BillingPage() {
   const { data: plans, isLoading: plansLoading } = useQuery({ queryKey: ["plans"], queryFn: api.getPlans });
   const { data: sub, isLoading: subLoading } = useQuery({ queryKey: ["subscription"], queryFn: api.getSubscription });
   const { data: usage } = useQuery({ queryKey: ["usage"], queryFn: api.getUsage });
+  // GET /enterprise/billing/state — the HONEST provider-configuration
+  // read. "Payment provider not configured" is rendered from
+  // payment_provider.configured=false, never from a hardcoded string.
+  const { data: billingState, error: billingStateError } = useQuery({
+    queryKey: ["billing-state"],
+    queryFn: api.getBillingState,
+  });
 
   const createSub = useMutation({
     mutationFn: (planId: string) => api.createSubscription({ plan_id: planId, billing_interval: "monthly" }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["subscription"] }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["subscription"] });
+      queryClient.invalidateQueries({ queryKey: ["billing-state"] });
+    },
   });
+
+  const provider = billingState?.payment_provider;
+  const providerConfigured = provider?.configured === true;
 
   const statusColors: Record<string, string> = {
     active: "text-[var(--success)] bg-[var(--success)]/10", trialing: "text-[var(--info)] bg-[var(--info)]/10",
@@ -47,7 +60,36 @@ export default function BillingPage() {
         <div className="bg-[var(--bg-elevated)] border border-[var(--bg-subtle)] rounded-lg p-6 text-center">
           <AlertTriangle className="w-8 h-8 text-[var(--warning)] mx-auto mb-2" />
           <p className="text-[var(--text-secondary)]">No active subscription</p>
-          <p className="text-sm text-[var(--text-muted)] mt-1">Billing provider not configured</p>
+        </div>
+      )}
+
+      {billingStateError && !providerConfigured && (
+        <div className="bg-[var(--bg-elevated)] border border-[var(--warning)]/30 rounded-lg p-4 text-sm" role="status">
+          <p className="text-[var(--text-primary)] font-medium flex items-center gap-1.5">
+            <AlertTriangle size={14} className="text-[var(--warning)]" /> Payment provider state unavailable
+          </p>
+          <p className="text-[var(--text-secondary)] text-xs mt-1">
+            The backend could not report payment configuration right now: {(billingStateError as Error).message}
+          </p>
+        </div>
+      )}
+
+      {provider && (
+        <div className={`bg-[var(--bg-elevated)] border rounded-lg p-4 text-sm ${providerConfigured ? "border-[var(--success)]/30" : "border-[var(--warning)]/30"}`}>
+          {providerConfigured ? (
+            <p className="text-[var(--text-primary)] flex items-center gap-1.5">
+              <Check size={14} className="text-[var(--success)]" /> Payment provider: {provider.provider}
+              {provider.enabled ? "" : " (configured but disabled)"}
+            </p>
+          ) : (
+            <p className="text-[var(--text-primary)] flex items-center gap-1.5">
+              <AlertTriangle size={14} className="text-[var(--warning)]" /> Payment provider not configured
+            </p>
+          )}
+          <p className="text-[var(--text-muted)] text-xs mt-1">
+            {provider.note}
+            {providerConfigured ? "" : " — cards, MRR, and paid invoices are never fabricated; they appear only from real provider events."}
+          </p>
         </div>
       )}
 

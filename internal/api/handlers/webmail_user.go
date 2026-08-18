@@ -36,9 +36,11 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v3"
+	domainpkg "github.com/orvix/orvix/internal/admin/domain"
 	"github.com/orvix/orvix/internal/billing"
 	"github.com/orvix/orvix/internal/coremail"
 	coremailmime "github.com/orvix/orvix/internal/coremail/mime"
+	"github.com/orvix/orvix/internal/coremail/msgid"
 	"github.com/orvix/orvix/internal/coremail/queue"
 	"github.com/orvix/orvix/internal/coremail/storage"
 	"go.uber.org/zap"
@@ -626,27 +628,47 @@ func (h *Handler) WebmailMessage(c fiber.Ctx) error {
 		}
 	}
 
+	// Server-side MIME parse: the reading pane must render text_body/
+	// html_body, never raw RFC822 as its display body — that was the
+	// "MIME boundaries / encoded HTML / raw markup shown to the user"
+	// live bug. ExtractBodies decodes quoted-printable/base64 and
+	// applies charset transcoding, prefers HTML with a text/plain
+	// fallback, sanitizes the HTML (strips script/iframe/object/embed/
+	// event handlers/javascript: URLs), and reports whether remote
+	// images were blocked so the client can offer an explicit "Load
+	// remote images" action rather than fetching them by default.
+	// The raw "rfc822" field is retained for callers that genuinely
+	// need source access (e.g. a "View source" action, or the
+	// dedicated WebmailMessageSource download endpoint's own tests) —
+	// the fix is that the READING PANE must never treat it as the
+	// display body, not that raw access must be removed entirely.
+	bodies := coremailmime.ExtractBodies(rfc822)
+
 	return c.JSON(fiber.Map{
-		"id":            msg.ID,
-		"message_id":    msg.MessageID,
-		"subject":       msg.Subject,
-		"from":          msg.FromAddress,
-		"to":            msg.ToAddresses,
-		"cc":            msg.CcAddresses,
-		"bcc":           msg.BccAddresses,
-		"reply_to":      msg.ReplyTo,
-		"size_bytes":    msg.SizeBytes,
-		"seen":          msg.Seen,
-		"flagged":       msg.Flagged,
-		"answered":      msg.Answered,
-		"draft":         msg.Draft,
-		"junk":          msg.Junk,
-		"received_date": msg.ReceivedDate,
-		"message_date":  msg.MessageDate,
-		"folder_id":     msg.FolderID,
-		"internet_id":   msg.InternetMessageID,
-		"rfc822":        string(rfc822),
-		"attachments":   attachmentsOut,
+		"id":                msg.ID,
+		"message_id":        msg.MessageID,
+		"subject":           msg.Subject,
+		"from":              msg.FromAddress,
+		"to":                msg.ToAddresses,
+		"cc":                msg.CcAddresses,
+		"bcc":               msg.BccAddresses,
+		"reply_to":          msg.ReplyTo,
+		"size_bytes":        msg.SizeBytes,
+		"seen":              msg.Seen,
+		"flagged":           msg.Flagged,
+		"answered":          msg.Answered,
+		"draft":             msg.Draft,
+		"junk":              msg.Junk,
+		"received_date":     msg.ReceivedDate,
+		"message_date":      msg.MessageDate,
+		"folder_id":         msg.FolderID,
+		"internet_id":       msg.InternetMessageID,
+		"text_body":         bodies.TextBody,
+		"html_body":         bodies.HTMLBody,
+		"has_html":          bodies.HasHTML,
+		"has_remote_images": bodies.HasRemoteImages,
+		"rfc822":            string(rfc822),
+		"attachments":       attachmentsOut,
 	})
 }
 
@@ -692,6 +714,48 @@ func (h *Handler) WebmailSend(c fiber.Ctx) error {
 		})
 	}
 
+	// Resolve the Message-ID hostname BEFORE any durable side effect
+	// (Sent-folder write, quota reservation, queue enqueue). A
+	// misconfigured/invalid coremail.hostname with no valid sender
+	// domain fallback fails the request closed here rather than ever
+	// falling back to the private "orvix.local" pseudo-domain.
+	msgIDHostname, hostErr := h.messageIDHostname(ctx.Mailbox.Email)
+	if hostErr != nil {
+		h.logger.Error("webmail send: no valid hostname for Message-ID generation",
+			zap.String("mailbox", ctx.Mailbox.Email), zap.Error(hostErr))
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+			"error": "mail server is not configured with a valid hostname",
+			"code":  "HOSTNAME_UNAVAILABLE",
+		})
+	}
+
+	// Canonical domain operability guard (Phase 8 C3A), checked FIRST —
+	// before the mail-access policy check, before quota reservation,
+	// before the Sent-folder write, before queue enqueue. The sender's
+	// tenant/domain come from ctx.Mailbox, resolved server-side by
+	// resolveWebmailUserContext's authenticated user_id -> email ->
+	// coremail_mailboxes lookup above; nothing here is browser-
+	// supplied. This send pipeline is a multi-system saga (MailStore
+	// write, billing quota enforcer, queue engine each manage their
+	// own persistence) with no single *sql.Tx spanning all of it, so
+	// this check cannot literally share a transaction with the queue
+	// insert the way a single-table guard integration can — it is
+	// placed as the earliest possible gate instead, before any of the
+	// listed side effects (quota consumption included) has run.
+	if sqlDB, err := h.db.DB(); err == nil {
+		opOut := domainpkg.NewDomainAdminRepo(sqlDB).CheckOperabilityByIDTx(c.Context(), ctx.Mailbox.DomainID, ctx.Mailbox.TenantID, false)
+		if !opOut.Operational() {
+			return domainServiceError(c, opOut.Err)
+		}
+	} else {
+		h.logger.Error("webmail send: database unavailable for domain operability check",
+			zap.String("mailbox", ctx.Mailbox.Email))
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+			"error": "unable to verify domain status",
+			"code":  "INTERNAL_ERROR",
+		})
+	}
+
 	var req struct {
 		To      string
 		Cc      string
@@ -706,7 +770,7 @@ func (h *Handler) WebmailSend(c fiber.Ctx) error {
 	contentType := c.Get("Content-Type")
 	if strings.HasPrefix(contentType, "multipart/form-data") {
 		var err error
-		rfc822, req, err = h.webmailParseMultipartSend(c, ctx, messageID, now)
+		rfc822, req, err = h.webmailParseMultipartSend(c, ctx, messageID, msgIDHostname, now)
 		if err != nil {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 		}
@@ -728,6 +792,7 @@ func (h *Handler) WebmailSend(c fiber.Ctx) error {
 			Subject:   req.Subject,
 			Body:      req.Body,
 			MessageID: messageID,
+			Hostname:  msgIDHostname,
 			Date:      now,
 			FromName:  ctx.Mailbox.Name,
 		}))
@@ -782,12 +847,43 @@ func (h *Handler) WebmailSend(c fiber.Ctx) error {
 	}
 	allRecipients = unique
 
-	// Real quota gate: number of unique, valid recipients.
-	// This reserves quota atomically before storage/queue side
-	// effects, then reconciles the reservation to the actual
-	// successful enqueue count below. The enforcer is a hard
-	// dependency for outbound send: if it is not wired the
-	// request fails closed rather than bypassing quotas.
+	// ── Canonical mail-access policy (MAILBOX-ACCESS-MODE-PHASE1) ──
+	// The authenticated webmail mailbox is the sender identity; the
+	// policy decides BEFORE any quota reservation, storage, or queue
+	// write. An internal-only mailbox sending to an external recipient
+	// is denied with a stable typed error and never consumes delivery
+	// quota as a successful delivery. A policy-evaluation failure
+	// fails closed (503, nothing stored or queued).
+	if h.mailPolicy != nil {
+		recipientAddrs := make([]string, 0, len(allRecipients))
+		for _, a := range allRecipients {
+			recipientAddrs = append(recipientAddrs, strings.ToLower(strings.TrimSpace(a.Address)))
+		}
+		decision := h.mailPolicy.CheckOutbound(c.Context(), "webmail", ctx.Mailbox.Email, recipientAddrs)
+		switch {
+		case decision.Allowed:
+		case decision.Unavailable:
+			h.logger.Warn("webmail send rejected: mail access policy unavailable",
+				zap.String("mailbox", ctx.Mailbox.Email))
+			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+				"error": "mail access policy unavailable",
+				"code":  "MAIL_ACCESS_POLICY_UNAVAILABLE",
+			})
+		case decision.Denied:
+			h.logger.Info("webmail send denied by mail access policy",
+				zap.String("mailbox", ctx.Mailbox.Email),
+				zap.String("reason", string(decision.Reason)))
+			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
+				"error":  "send denied by mail access policy",
+				"code":   "MAIL_ACCESS_DENIED",
+				"reason": string(decision.Reason),
+			})
+		}
+	}
+
+	// Real quota gate: number of unique, valid recipients. The
+	// enforcer is a hard dependency for outbound send: if it is not
+	// wired the request fails closed rather than bypassing quotas.
 	if h.sendEnforcer == nil {
 		h.logger.Error("webmail send rejected: send enforcer unavailable",
 			zap.String("mailbox", ctx.Mailbox.Email),
@@ -798,37 +894,12 @@ func (h *Handler) WebmailSend(c fiber.Ctx) error {
 		})
 	}
 	intendedRecipientCount := len(allRecipients)
-	var reservedSend *billing.SendReservationResult
-	{
-		id := billing.SendIdentity{TenantID: ctx.Mailbox.TenantID, MailboxID: ctx.Mailbox.ID}
-		result, err := h.sendEnforcer.ReserveSend(c.Context(), id, messageID, intendedRecipientCount)
-		if err != nil {
-			h.logger.Error("webmail send quota reservation failed",
-				zap.String("message_id", messageID),
-				zap.Error(err))
-			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "cannot determine quota"})
-		}
-		if !result.Allowed {
-			return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{
-				"error": "send rejected: " + result.Reason, "limit": result.Limit, "remaining": result.Remaining,
-			})
-		}
-		reservedSend = result
-	}
-	cancelReservation := func() {
-		if reservedSend != nil {
-			id := billing.SendIdentity{TenantID: ctx.Mailbox.TenantID, MailboxID: ctx.Mailbox.ID}
-			if err := h.sendEnforcer.CancelSendReservation(c.Context(), id, messageID); err != nil {
-				h.logger.Error("webmail send quota reservation release failed",
-					zap.String("message_id", messageID),
-					zap.Error(err))
-			}
-		}
-	}
 
+	// Sent folder resolution is a read-only lookup with no durable
+	// side effect, so it does not need to run inside the acceptance
+	// transaction below.
 	sentFolder, err := resolveFolderCaseInsensitive(c.Context(), ctx.MailboxStore, ctx.Mailbox.ID, "Sent")
 	if err != nil || sentFolder == nil {
-		cancelReservation()
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": "Sent folder not found for mailbox; ensure system folders are provisioned",
 		})
@@ -836,7 +907,7 @@ func (h *Handler) WebmailSend(c fiber.Ctx) error {
 
 	msg := &storage.Message{
 		MessageID:         messageID,
-		InternetMessageID: fmt.Sprintf("<%s@orvix.local>", messageID),
+		InternetMessageID: fmt.Sprintf("<%s@%s>", messageID, msgIDHostname),
 		TenantID:          ctx.Mailbox.TenantID,
 		DomainID:          ctx.Mailbox.DomainID,
 		MailboxID:         ctx.Mailbox.ID,
@@ -852,48 +923,32 @@ func (h *Handler) WebmailSend(c fiber.Ctx) error {
 		Seen:              true,
 	}
 
-	if err := ctx.MailboxStore.StoreMessage(c.Context(), msg, rfc822, nil); err != nil {
-		cancelReservation()
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": fmt.Sprintf("store message: %v", err),
-		})
-	}
-
-	// From here on the message is durable in the Sent
-	// folder. We must enqueue at least one recipient for
-	// the request to be considered successful — but if
-	// the queue engine is not available we surface the
-	// error to the operator instead of silently dropping
-	// the user's mail.
+	// The queue engine is a hard dependency, checked before the
+	// transaction starts: if it's unavailable we must not accept
+	// quota/Sent-message state with no way to ever enqueue delivery.
 	qe, ok := h.queueEngineForUser()
 	if !ok {
-		cancelReservation()
 		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
-			"error":      "queue engine not available",
-			"message_id": msg.MessageID,
-			"folder":     sentFolder.Path,
-			"status":     "stored",
+			"error": "queue engine not available",
+			"code":  "QUEUE_ENGINE_UNAVAILABLE",
 		})
 	}
 
-	// Collect every recipient across To/Cc/Bcc. Each one
-	// gets its own QueueEntry — same message_id, same
-	// FromAddress (the authenticated mailbox). The
-	// delivery mode is decided per-recipient:
-	//   - Local recipient (configured local domain AND
-	//     active mailbox): DeliveryMode=local, the
-	//     delivery worker copies the message from the
-	//     sender's Sent folder into the recipient's
-	//     INBOX. No MX lookup, no SMTP connection.
-	//   - Remote recipient: DeliveryMode=remote_smtp,
-	//     the delivery worker does MX + SMTP delivery
-	//     with the existing STARTTLS-aware transport.
-	// The classification runs on the same Domain +
-	// Mailbox lookups the SMTP receiver uses for
-	// inbound — there is no parallel "is-local" path.
+	// Classify every recipient across To/Cc/Bcc and build its
+	// QueueEntry BEFORE the transaction — classification is a
+	// read-only lookup (same Domain + Mailbox lookups the SMTP
+	// receiver uses for inbound; there is no parallel "is-local"
+	// path) with no durable side effect, so it doesn't need to run
+	// under the domain lock. Delivery mode:
+	//   - Local recipient (configured local domain AND active
+	//     mailbox): DeliveryMode=local, the delivery worker copies
+	//     the message from the sender's Sent folder into the
+	//     recipient's INBOX. No MX lookup, no SMTP connection.
+	//   - Remote recipient: DeliveryMode=remote_smtp, the delivery
+	//     worker does MX + SMTP delivery with the existing
+	//     STARTTLS-aware transport.
 	mailboxID := ctx.Mailbox.ID
-	enqueueErrors := make([]string, 0, len(allRecipients))
-	queuedCount := 0
+	entries := make([]*queue.QueueEntry, 0, len(allRecipients))
 	deliveredLocal := make([]string, 0, len(allRecipients))
 	for _, addr := range allRecipients {
 		bare := addr.Address
@@ -906,11 +961,26 @@ func (h *Handler) WebmailSend(c fiber.Ctx) error {
 			domain,
 		)
 		if err != nil {
-			h.logger.Warn("webmail send: classify recipient failed, falling back to remote_smtp",
+			// FAIL CLOSED: a recipient-classification lookup failure
+			// (database/repository failure) aborts the whole send.
+			// An unknown recipient is NEVER silently classified as a
+			// remote SMTP recipient on infrastructure failure: that
+			// could misroute a local/tenant-scoped recipient through
+			// MX/SMTP, bypass tenant isolation, or queue a message
+			// that can never be delivered. Classification is a
+			// read-only pre-transaction lookup, so aborting here
+			// leaves zero durable side effects (no queue rows, no
+			// Sent message, no quota usage, no send events, no
+			// attachment metadata). The HTTP response exposes only a
+			// generic error — never the internal lookup detail.
+			h.logger.Error("webmail send: recipient classification failed, aborting send",
 				zap.String("to", bare),
 				zap.String("domain", domain),
 				zap.Error(err))
-			local = false
+			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+				"error": "unable to classify recipient",
+				"code":  "INTERNAL_ERROR",
+			})
 		}
 
 		var deliveryMode queue.DeliveryMode
@@ -919,12 +989,13 @@ func (h *Handler) WebmailSend(c fiber.Ctx) error {
 			deliveryMode = queue.DeliveryLocal
 			idCopy := localMboxID
 			entryMailboxID = &idCopy
+			deliveredLocal = append(deliveredLocal, bare)
 		} else {
 			deliveryMode = queue.DeliveryRemoteSMTP
 			entryMailboxID = &mailboxID
 		}
 
-		entry := &queue.QueueEntry{
+		entries = append(entries, &queue.QueueEntry{
 			TenantID:        ctx.Mailbox.TenantID,
 			DomainID:        ctx.Mailbox.DomainID,
 			MailboxID:       entryMailboxID,
@@ -936,71 +1007,294 @@ func (h *Handler) WebmailSend(c fiber.Ctx) error {
 			DeliveryMode:    deliveryMode,
 			Status:          queue.StatusPending,
 			Priority:        0,
-		}
-		if err := qe.Enqueue(c.Context(), entry); err != nil {
-			h.logger.Error("webmail send enqueue failed",
-				zap.String("message_id", messageID),
-				zap.String("to", bare),
-				zap.Error(err),
-			)
-			enqueueErrors = append(enqueueErrors, fmt.Sprintf("%s: %v", bare, err))
-			continue
-		}
-		queuedCount++
-		if local {
-			deliveredLocal = append(deliveredLocal, bare)
-		}
-	}
-
-	// Unified send event: records billing usage, abuse counters, metrics atomically.
-	// Must run even on partial enqueue to account for successfully enqueued recipients.
-	if h.sendEnforcer != nil && queuedCount > 0 {
-		id := billing.SendIdentity{TenantID: ctx.Mailbox.TenantID, MailboxID: ctx.Mailbox.ID}
-		if reservedSend != nil {
-			if err := h.sendEnforcer.FinalizeSendReservation(c.Context(), id, msg.MessageID, queuedCount); err != nil {
-				h.logger.Error("webmail send quota reservation finalize failed",
-					zap.String("message_id", msg.MessageID),
-					zap.Int("queued_count", queuedCount),
-					zap.Error(err))
-				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-					"error":      "failed to finalize send accounting",
-					"id":         msg.ID,
-					"message_id": msg.MessageID,
-					"folder":     sentFolder.Path,
-					"status":     "stored",
-				})
-			}
-		} else {
-			h.sendEnforcer.RecordSend(c.Context(), id, msg.MessageID, queuedCount)
-		}
-	} else if h.sendEnforcer != nil && reservedSend != nil {
-		id := billing.SendIdentity{TenantID: ctx.Mailbox.TenantID, MailboxID: ctx.Mailbox.ID}
-		if err := h.sendEnforcer.CancelSendReservation(c.Context(), id, msg.MessageID); err != nil {
-			h.logger.Error("webmail send empty quota reservation release failed",
-				zap.String("message_id", msg.MessageID),
-				zap.Error(err))
-		}
-	}
-
-	if len(enqueueErrors) > 0 {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error":      "failed to enqueue some recipients: " + strings.Join(enqueueErrors, "; "),
-			"id":         msg.ID,
-			"message_id": msg.MessageID,
-			"folder":     sentFolder.Path,
-			"status":     "stored",
 		})
 	}
+
+	// ── Authoritative send-acceptance transaction (S-1/S-2) ──
+	// The domain operability recheck, the quota reservation, the
+	// durable Sent-folder message write, AND every recipient's queue
+	// row now commit inside ONE SQL transaction, with the domain row
+	// locked (FOR UPDATE on PostgreSQL) for the duration. This closes
+	// two TOCTOU/partial-state windows at once:
+	//   1. between the early domain check above and this point — a
+	//      concurrent domain-disable transaction serializes against
+	//      this lock, so whichever commits first is authoritative and
+	//      the loser observes a consistent post-state;
+	//   2. between message/quota acceptance and queue enqueue — since
+	//      both durable Enqueue and the message insert now use the
+	//      same *sql.Tx, it is no longer possible for quota to be
+	//      consumed and a Sent-folder row to exist while zero queue
+	//      rows exist for any recipient (or vice versa). One
+	//      recipient's enqueue failure now rolls back the whole send
+	//      atomically instead of silently reporting partial success —
+	//      a request either fully succeeds (message + quota + every
+	//      recipient's queue row) or fully fails with zero durable
+	//      effects.
+	//
+	// S-2: ALL filesystem bytes (the RFC822 payload and every
+	// attachment body) are staged BEFORE this transaction begins —
+	// MIME parsing, size/count limit enforcement, hashing, and the
+	// large writes happen with NO database lock held. Inside the
+	// transaction only bounded work runs: the domain lock + recheck,
+	// quota reservation/finalization, metadata inserts (message,
+	// attachments, queue rows), and the same-filesystem atomic
+	// renames that publish the staged files into their final paths.
+	// The transaction never performs long writes or hashing, and at
+	// commit time every row references an existing file. Any failure
+	// rolls back the whole send and removes staged/published bytes.
+	sqlDB, dbErr := h.db.DB()
+	if dbErr != nil {
+		h.logger.Error("webmail send: database unavailable for acceptance transaction",
+			zap.String("mailbox", ctx.Mailbox.Email))
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+			"error": "unable to accept send",
+			"code":  "INTERNAL_ERROR",
+		})
+	}
+	// domainRepo must be constructed BEFORE BeginTx: NewDomainAdminRepo
+	// runs its own dialect-detection query against the raw *sql.DB, and
+	// on a single-connection pool (sqlite) that deadlocks forever if an
+	// uncommitted transaction is already holding the only connection.
+	domainRepo := domainpkg.NewDomainAdminRepo(sqlDB)
+
+	// ── Staging (S-2): parse MIME, enforce limits, write + fsync +
+	// hash every byte BEFORE the transaction begins. The staged
+	// files are published into their final paths inside the
+	// transaction by bounded same-filesystem renames.
+	attemptKey := messageID
+	var staged []*storage.StagedFile
+	stageRFC822, stageErr := ctx.MailboxStore.StageRFC822(attemptKey, msg, rfc822)
+	if stageErr != nil {
+		h.logger.Error("webmail send: staging rfc822 failed",
+			zap.String("message_id", messageID), zap.Error(stageErr))
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "unable to stage message",
+			"code":  "INTERNAL_ERROR",
+		})
+	}
+	staged = append(staged, stageRFC822)
+
+	// Attachment staging mirrors the historical extraction rules
+	// exactly: at most MaxAttachmentsPerMessage parts (default 20),
+	// parts larger than MaxAttachmentSizeMB are skipped (default
+	// 25 MB), filenames sanitized, content type taken from the
+	// server-side parser.
+	maxAttSize := int64(h.cfg.CoreMail.MaxAttachmentSizeMB) * 1024 * 1024
+	if maxAttSize <= 0 {
+		maxAttSize = 25 * 1024 * 1024
+	}
+	maxAttCount := h.cfg.CoreMail.MaxAttachmentsPerMessage
+	if maxAttCount <= 0 {
+		maxAttCount = 20
+	}
+	type stagedAttachment struct {
+		part   *coremailmime.Part
+		staged *storage.StagedFile
+	}
+	var stagedAttachments []stagedAttachment
+	if mimeParts, mErr := coremailmime.ExtractParts(rfc822); mErr == nil {
+		var attachParts []*coremailmime.Part
+		for _, p := range mimeParts {
+			if p.IsAttachment {
+				attachParts = append(attachParts, p)
+			}
+		}
+		if len(attachParts) > maxAttCount {
+			attachParts = attachParts[:maxAttCount]
+		}
+		for i, p := range attachParts {
+			if int64(p.Size) > maxAttSize {
+				continue
+			}
+			filename := p.Filename
+			if filename == "" {
+				filename = fmt.Sprintf("attachment_%d", i+1)
+			}
+			sf, sErr := ctx.MailboxStore.StageAttachment(attemptKey, i, filename, p.Body)
+			if sErr != nil {
+				ctx.MailboxStore.AbortStaged(attemptKey, nil)
+				h.logger.Error("webmail send: staging attachment failed",
+					zap.String("message_id", messageID), zap.Error(sErr))
+				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+					"error": "unable to stage attachment",
+					"code":  "INTERNAL_ERROR",
+				})
+			}
+			staged = append(staged, sf)
+			stagedAttachments = append(stagedAttachments, stagedAttachment{part: p, staged: sf})
+		}
+	}
+
+	if h.webmailSendHooks != nil && h.webmailSendHooks.AfterStage != nil {
+		h.webmailSendHooks.AfterStage(len(staged))
+	}
+
+	tx, err := sqlDB.BeginTx(c.Context(), nil)
+	if err != nil {
+		ctx.MailboxStore.AbortStaged(attemptKey, nil)
+		h.logger.Error("webmail send: begin acceptance transaction failed",
+			zap.String("message_id", messageID), zap.Error(err))
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+			"error": "unable to accept send",
+			"code":  "INTERNAL_ERROR",
+		})
+	}
+	var published []string
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+			ctx.MailboxStore.AbortStaged(attemptKey, published)
+		}
+	}()
+
+	opOut := domainRepo.WithTx(tx).CheckOperabilityByIDTx(c.Context(), ctx.Mailbox.DomainID, ctx.Mailbox.TenantID, true)
+	if !opOut.Operational() {
+		return domainServiceError(c, opOut.Err)
+	}
+
+	id := billing.SendIdentity{TenantID: ctx.Mailbox.TenantID, MailboxID: ctx.Mailbox.ID}
+	result, err := h.sendEnforcer.ReserveSendTx(c.Context(), tx, id, messageID, intendedRecipientCount)
+	if err != nil {
+		h.logger.Error("webmail send quota reservation failed",
+			zap.String("message_id", messageID),
+			zap.Error(err))
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "cannot determine quota"})
+	}
+	if !result.Allowed {
+		return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{
+			"error": "send rejected: " + result.Reason, "limit": result.Limit, "remaining": result.Remaining,
+		})
+	}
+
+	// Metadata-only message insert: the RFC822 bytes were already
+	// staged and hashed BEFORE the transaction; this insert only
+	// persists the metadata, and the file is published by rename
+	// before commit. No file I/O happens under the domain lock.
+	if err := ctx.MailboxStore.CreateMessageTx(c.Context(), msg, tx); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": fmt.Sprintf("store message: %v", err),
+		})
+	}
+
+	// Attachment metadata is part of the SAME acceptance transaction
+	// as the Sent-message row and the recipient queue rows. The
+	// bytes were staged pre-transaction; here only the metadata rows
+	// are inserted (final paths computed from the now-known message
+	// row id), and the staged files are published by rename before
+	// commit. If any insert fails the whole send rolls back: zero
+	// attachment metadata rows survive, and no committed message can
+	// ever exist with missing or inconsistent attachment references.
+	if len(stagedAttachments) > 0 {
+		existing, countErr := ctx.MailboxStore.Attachments.CountByMessage(c.Context(), msg.ID, tx)
+		if countErr != nil {
+			h.logger.Error("webmail send: attachment idempotency check failed",
+				zap.String("message_id", messageID), zap.Error(countErr))
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"error": "failed to verify attachment metadata",
+				"code":  "INTERNAL_ERROR",
+			})
+		}
+		if existing == 0 {
+			for i, sa := range stagedAttachments {
+				finalPath := ctx.MailboxStore.AttachmentFinalPath(msg.ID, i, sa.part.Filename)
+				sa.staged.FinalPath = finalPath
+				att := &storage.Attachment{
+					MessageID:   msg.ID,
+					Filename:    sa.part.Filename,
+					ContentType: sa.part.ContentType,
+					SizeBytes:   int64(sa.part.Size),
+					SHA256:      sa.staged.SHA256,
+					StoragePath: finalPath,
+					CID:         sa.part.ContentID,
+				}
+				if err := ctx.MailboxStore.Attachments.Create(c.Context(), att, tx); err != nil {
+					h.logger.Error("webmail send: attachment metadata insert failed, rolling back whole send",
+						zap.String("message_id", messageID),
+						zap.Error(err))
+					return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+						"error": "failed to store attachment metadata",
+						"code":  "INTERNAL_ERROR",
+					})
+				}
+			}
+		}
+	}
+
+	for _, entry := range entries {
+		if err := qe.Repo.Enqueue(c.Context(), entry, tx); err != nil {
+			h.logger.Error("webmail send: enqueue failed inside acceptance transaction, rolling back whole send",
+				zap.String("message_id", messageID),
+				zap.String("to", entry.ToAddress),
+				zap.Error(err))
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"error": "failed to accept send",
+				"code":  "INTERNAL_ERROR",
+			})
+		}
+	}
+
+	if err := h.sendEnforcer.FinalizeSendReservationTx(c.Context(), tx, id, messageID, len(entries)); err != nil {
+		h.logger.Error("webmail send quota reservation finalize failed",
+			zap.String("message_id", messageID), zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "failed to finalize send accounting",
+			"code":  "INTERNAL_ERROR",
+		})
+	}
+
+	// Publish staged files (bounded same-filesystem renames) BEFORE
+	// commit: at commit time every row references an existing file.
+	published, err = ctx.MailboxStore.PublishStaged(staged)
+	if err != nil {
+		h.logger.Error("webmail send: publish staged files failed, rolling back whole send",
+			zap.String("message_id", messageID), zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "failed to publish message files",
+			"code":  "INTERNAL_ERROR",
+		})
+	}
+
+	if h.webmailSendHooks != nil && h.webmailSendHooks.BeforeCommit != nil {
+		h.webmailSendHooks.BeforeCommit(tx)
+	}
+
+	if err := tx.Commit(); err != nil {
+		h.logger.Error("webmail send: commit acceptance transaction failed",
+			zap.String("message_id", messageID), zap.Error(err))
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+			"error": "unable to accept send",
+			"code":  "INTERNAL_ERROR",
+		})
+	}
+	committed = true
+	// The staging directory is empty now (every file was renamed
+	// away); remove it so no empty attempt dirs accumulate.
+	ctx.MailboxStore.AbortStaged(attemptKey, nil)
 
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{
 		"id":               msg.ID,
 		"message_id":       msg.MessageID,
 		"status":           "queued",
-		"queued_count":     queuedCount,
+		"queued_count":     len(entries),
 		"local_count":      len(deliveredLocal),
-		"remote_count":     queuedCount - len(deliveredLocal),
+		"remote_count":     len(entries) - len(deliveredLocal),
 		"local_recipients": deliveredLocal,
 	})
+}
+
+// webmailSendTestHooks are deterministic test-only synchronization
+// seams for WebmailSend's staged acceptance (S-2). nil in production.
+type webmailSendTestHooks struct {
+	// AfterStage runs after every byte is staged (RFC822 + all
+	// attachment bodies) and immediately before BeginTx. Tests use
+	// it to prove staging completed before the domain lock and to
+	// assert no rows exist yet.
+	AfterStage func(stagedFileCount int)
+	// BeforeCommit runs immediately before tx.Commit with the live
+	// transaction. A test can roll the tx back here to force a
+	// deterministic commit failure.
+	BeforeCommit func(tx *sql.Tx)
 }
 
 // webmailParseMultipartSend parses a multipart/form-data request
@@ -1008,7 +1302,7 @@ func (h *Handler) WebmailSend(c fiber.Ctx) error {
 // bcc, subject, body) and file uploads, validates sizes and
 // filenames, detects MIME types server-side, and builds a
 // multipart/mixed RFC822 message with base64-encoded attachments.
-func (h *Handler) webmailParseMultipartSend(c fiber.Ctx, ctx *webmailUserContext, messageID string, now time.Time) ([]byte, struct {
+func (h *Handler) webmailParseMultipartSend(c fiber.Ctx, ctx *webmailUserContext, messageID, hostname string, now time.Time) ([]byte, struct {
 	To, Cc, Bcc, Subject, Body string
 }, error) {
 	var empty struct{ To, Cc, Bcc, Subject, Body string }
@@ -1097,7 +1391,7 @@ func (h *Handler) webmailParseMultipartSend(c fiber.Ctx, ctx *webmailUserContext
 	}
 
 	rfc822 := buildMultipartRFC822ForWebmail(ctx.Mailbox.Name, ctx.Mailbox.Email,
-		req.To, req.Cc, req.Bcc, req.Subject, req.Body, messageID, now, attachments)
+		req.To, req.Cc, req.Bcc, req.Subject, req.Body, messageID, hostname, now, attachments)
 
 	return rfc822, req, nil
 }
@@ -1122,7 +1416,7 @@ func detectMIMEType(filename string, data []byte) string {
 
 // buildMultipartRFC822ForWebmail constructs a multipart/mixed RFC 5322
 // message with a text/plain body and base64-encoded attachments.
-func buildMultipartRFC822ForWebmail(fromName, fromEmail, to, cc, bcc, subject, body, messageID string, date time.Time, attachments []coremailmime.AttachmentData) []byte {
+func buildMultipartRFC822ForWebmail(fromName, fromEmail, to, cc, bcc, subject, body, messageID, hostname string, date time.Time, attachments []coremailmime.AttachmentData) []byte {
 	boundary := fmt.Sprintf("orvix-mixed-%d", date.UnixNano())
 
 	var b strings.Builder
@@ -1140,7 +1434,7 @@ func buildMultipartRFC822ForWebmail(fromName, fromEmail, to, cc, bcc, subject, b
 	}
 	fmt.Fprintf(&b, "Subject: %s\r\n", escapeHeader(subject))
 	fmt.Fprintf(&b, "Date: %s\r\n", date.Format(time.RFC1123Z))
-	fmt.Fprintf(&b, "Message-ID: <%s@orvix.local>\r\n", messageID)
+	fmt.Fprintf(&b, "Message-ID: <%s@%s>\r\n", messageID, hostname)
 	fmt.Fprintf(&b, "MIME-Version: 1.0\r\n")
 	fmt.Fprintf(&b, "Content-Type: multipart/mixed; boundary=\"%s\"\r\n", boundary)
 	b.WriteString("\r\n")
@@ -1908,6 +2202,18 @@ func (h *Handler) WebmailSaveDraft(c fiber.Ctx) error {
 		subject = "(no subject)"
 	}
 
+	// Resolve the Message-ID hostname before any durable write, same
+	// policy as WebmailSend — see (*Handler).messageIDHostname.
+	msgIDHostname, hostErr := h.messageIDHostname(ctx.Mailbox.Email)
+	if hostErr != nil {
+		h.logger.Error("webmail save draft: no valid hostname for Message-ID generation",
+			zap.String("mailbox", ctx.Mailbox.Email), zap.Error(hostErr))
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+			"error": "mail server is not configured with a valid hostname",
+			"code":  "HOSTNAME_UNAVAILABLE",
+		})
+	}
+
 	if req.ID != 0 {
 		// Update existing draft — must belong to caller.
 		msg, _, err := ctx.MailboxStore.LoadMessage(c.Context(), req.ID, nil)
@@ -1937,6 +2243,7 @@ func (h *Handler) WebmailSaveDraft(c fiber.Ctx) error {
 			Subject:   req.Subject,
 			Body:      req.Body,
 			MessageID: msg.MessageID,
+			Hostname:  msgIDHostname,
 			Date:      now,
 			FromName:  ctx.Mailbox.Name,
 		})
@@ -1961,12 +2268,13 @@ func (h *Handler) WebmailSaveDraft(c fiber.Ctx) error {
 		Subject:   req.Subject,
 		Body:      req.Body,
 		MessageID: messageID,
+		Hostname:  msgIDHostname,
 		Date:      now,
 		FromName:  ctx.Mailbox.Name,
 	})
 	msg := &storage.Message{
 		MessageID:         messageID,
-		InternetMessageID: fmt.Sprintf("<%s@orvix.local>", messageID),
+		InternetMessageID: fmt.Sprintf("<%s@%s>", messageID, msgIDHostname),
 		TenantID:          ctx.Mailbox.TenantID,
 		DomainID:          ctx.Mailbox.DomainID,
 		MailboxID:         ctx.Mailbox.ID,
@@ -2209,7 +2517,10 @@ type rfc822Params struct {
 	Subject   string
 	Body      string
 	MessageID string
-	Date      time.Time
+	// Hostname is the id-right (domain) for the Message-ID header —
+	// resolved via (*Handler).messageIDHostname, never a literal.
+	Hostname string
+	Date     time.Time
 }
 
 // buildRFC822 constructs an RFC 5322 message. We use the
@@ -2234,7 +2545,7 @@ func buildRFC822(p rfc822Params) string {
 	}
 	fmt.Fprintf(&b, "Subject: %s\r\n", escapeHeader(p.Subject))
 	fmt.Fprintf(&b, "Date: %s\r\n", p.Date.Format(time.RFC1123Z))
-	fmt.Fprintf(&b, "Message-ID: <%s@orvix.local>\r\n", p.MessageID)
+	fmt.Fprintf(&b, "Message-ID: <%s@%s>\r\n", p.MessageID, p.Hostname)
 	fmt.Fprintf(&b, "MIME-Version: 1.0\r\n")
 	fmt.Fprintf(&b, "Content-Type: text/plain; charset=UTF-8\r\n")
 	fmt.Fprintf(&b, "Content-Transfer-Encoding: 8bit\r\n")
@@ -2263,6 +2574,27 @@ func sanitizeCRLF(s string) string {
 	s = strings.ReplaceAll(s, "\r", "")
 	s = strings.ReplaceAll(s, "\n", "")
 	return s
+}
+
+// messageIDHostname resolves the id-right (domain) to use for a
+// server-generated RFC822 Message-ID header. Preferred source is the
+// configured coremail.hostname; if that is unset/invalid, it falls
+// back to the authenticated sender's own mailbox domain — safe here
+// because every caller of this helper operates on an authenticated,
+// already-resolved local mailbox. If neither yields a valid Internet
+// hostname, an error is returned and the caller MUST fail the
+// request before any durable side effect rather than defaulting to
+// the private "orvix.local" pseudo-domain.
+func (h *Handler) messageIDHostname(senderEmail string) (string, error) {
+	configured := ""
+	if h.cfg != nil {
+		configured = h.cfg.CoreMail.Hostname
+	}
+	fallbackDomain := ""
+	if i := strings.LastIndex(senderEmail, "@"); i >= 0 {
+		fallbackDomain = senderEmail[i+1:]
+	}
+	return msgid.ResolveHostname(configured, fallbackDomain)
 }
 
 // generateMessageID returns a unique 32-char hex message ID.

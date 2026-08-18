@@ -1581,18 +1581,58 @@ func (h *Handler) RemoveAdminGroupMember(c fiber.Ctx) error {
 // Audit Log
 // ---------------------------------------------------------------------
 
-// ListAuditLogs returns the most recent rows from
-// coremail_audit. Filterable by actor and action.
+// ListAuditLogs returns the most recent rows from the canonical
+// orvix_audit store (the same store the Platform Audit page, detail, and
+// export read), with the legacy {logs: [...]} response shape. Filterable
+// by actor and action. The legacy coremail_audit table is intentionally
+// NOT queried here: service-layer transactional audits (org/domain/
+// mailbox/billing) are written ONLY to orvix_audit, so reading the legacy
+// store would make this page silently miss those actions.
 func (h *Handler) ListAdminAuditLogs(c fiber.Ctx) error {
 	if err := h.requireDB(c); err != nil {
 		return err
 	}
-	limit := int64(200)
+	limit := 200
 	if v, err := strconv.ParseInt(c.Query("limit"), 10, 64); err == nil && v > 0 && v <= 1000 {
-		limit = v
+		limit = int(v)
 	}
 	actor := strings.TrimSpace(c.Query("actor"))
 	action := strings.TrimSpace(c.Query("action"))
+
+	out := []map[string]any{}
+	if h.auditExtended != nil {
+		eq := &audit.ExtendedQuery{Limit: limit, Action: action}
+		if actor != "" {
+			if actorID, aerr := strconv.ParseUint(actor, 10, 64); aerr == nil && actorID > 0 {
+				aid := uint(actorID)
+				eq.ActorID = &aid
+			}
+		}
+		entries, _, serr := h.auditExtended.Search(c.Context(), eq)
+		if serr != nil {
+			return fiber.NewError(fiber.StatusInternalServerError, "list audit logs")
+		}
+		for _, e := range entries {
+			if actor != "" && !strings.Contains(e.Actor, actor) {
+				continue
+			}
+			out = append(out, map[string]any{
+				"id":         e.ID,
+				"actor":      e.Actor,
+				"role":       e.ActorRole,
+				"action":     e.Action,
+				"target":     e.Target,
+				"result":     e.Result,
+				"ip":         e.IP,
+				"user_agent": e.UserAgent,
+				"timestamp":  e.Timestamp.UTC().Format(time.RFC3339),
+			})
+		}
+		return c.JSON(fiber.Map{"logs": out})
+	}
+
+	// Legacy fallback: coremail_audit direct query (extended store
+	// unavailable).
 	where := []string{"1=1"}
 	args := []any{}
 	if actor != "" {
@@ -1609,10 +1649,9 @@ func (h *Handler) ListAdminAuditLogs(c fiber.Ctx) error {
 	      ORDER BY id DESC LIMIT ?`
 	rows, err := h.sqlDB().QueryContext(c.Context(), q, args...)
 	if err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("list audit logs: %v", err))
+		return fiber.NewError(fiber.StatusInternalServerError, "list audit logs")
 	}
 	defer rows.Close()
-	out := []map[string]any{}
 	for rows.Next() {
 		var (
 			id                                          int64
@@ -1620,7 +1659,7 @@ func (h *Handler) ListAdminAuditLogs(c fiber.Ctx) error {
 			ts                                          time.Time
 		)
 		if err := rows.Scan(&id, &actor, &role, &action, &target, &result, &ip, &ua, &ts); err != nil {
-			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("scan audit row: %v", err))
+			return fiber.NewError(fiber.StatusInternalServerError, "scan audit row")
 		}
 		out = append(out, map[string]any{
 			"id":         id,
@@ -2052,8 +2091,14 @@ func (h *Handler) tenantID(c fiber.Ctx) int64 {
 	return -1
 }
 
-// appendAudit records an admin mutation to coremail_audit. The
-// caller passes a verb-noun action ("acl.create") and a
+// appendAudit records an admin mutation. The canonical write goes to
+// orvix_audit (the extended store — the store the platform audit page,
+// the tenant audit page, the detail view, and the export all read), with
+// the legacy coremail_audit mirror kept for legacy consumers — the same
+// dual-write convention as writeAuditLog, so both stores' fields agree
+// (actor/role/tenant/action/target/result/ip/user_agent/time).
+//
+// The caller passes a verb-noun action ("acl.create") and a
 // target string. The handler reads actor / role / ip from the
 // auth locals. Errors are logged but never returned to the
 // caller — auditing must not block business writes.
@@ -2062,25 +2107,46 @@ func (h *Handler) tenantID(c fiber.Ctx) int64 {
 // writeAuditLog convention: "user:<id>" so admin / user rows
 // are indistinguishable in queries.
 func (h *Handler) appendAudit(c fiber.Ctx, action, target, result string) error {
-	if h.auditStore == nil {
-		return fiber.NewError(fiber.StatusServiceUnavailable, "audit store unavailable")
-	}
 	uid, _ := c.Locals("user_id").(uint)
+	role, _ := c.Locals("role").(string)
+	tenantID, _ := c.Locals("tenant_id").(uint)
 	actor := fmt.Sprintf("user:%d", uid)
 	ip := c.IP()
 	ua := string(c.Request().Header.UserAgent())
-	if err := h.auditStore.Record(c.Context(), &audit.Entry{
-		Actor:     actor,
-		Action:    action,
-		Target:    target,
-		Result:    result,
-		IP:        ip,
-		UserAgent: ua,
-	}); err != nil {
-		if h.logger != nil {
-			h.logger.Error("failed to write audit log", zap.Error(err))
+
+	if h.auditExtended != nil {
+		if err := h.auditExtended.Record(c.Context(), &audit.ExtendedEntry{
+			Actor:     actor,
+			ActorID:   uid,
+			ActorRole: role,
+			TenantID:  tenantID,
+			Action:    action,
+			Target:    target,
+			Result:    result,
+			IP:        ip,
+			UserAgent: ua,
+		}); err != nil {
+			if h.logger != nil {
+				h.logger.Error("failed to write extended audit log", zap.Error(err))
+			}
 		}
-		return fiber.NewError(fiber.StatusInternalServerError, "audit write failed")
+	}
+	if h.auditStore != nil {
+		if err := h.auditStore.Record(c.Context(), &audit.Entry{
+			Actor:     actor,
+			Role:      role,
+			Action:    action,
+			Target:    target,
+			Result:    result,
+			IP:        ip,
+			UserAgent: ua,
+			TenantID:  tenantID,
+		}); err != nil {
+			if h.logger != nil {
+				h.logger.Error("failed to write legacy audit log", zap.Error(err))
+			}
+			return fiber.NewError(fiber.StatusInternalServerError, "audit write failed")
+		}
 	}
 	return nil
 }

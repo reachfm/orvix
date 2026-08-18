@@ -214,12 +214,12 @@ func (r *DomainSQLRepo) List(ctx context.Context, filter DomainFilter, tx interf
 func (r *DomainSQLRepo) Update(ctx context.Context, d *Domain, tx interface{}) error {
 	d.UpdatedAt = time.Now().UTC()
 	e := r.execer(tx)
-	_, err := e.ExecContext(ctx, `
+	_, err := e.ExecContext(ctx, r.qf(`
 		UPDATE coremail_domains SET
 			status=?, plan=?, description=?, max_mailboxes=?, max_aliases=?, max_quota_mb=?,
 			dkim_enabled=?, dkim_selector=?, dmarc_enabled=?, mtasts_enabled=?,
 			catchall_address=?, abuse_contact=?, labels=?, updated_at=?
-		WHERE id = ? AND deleted_at IS NULL`,
+		WHERE id = ? AND deleted_at IS NULL`),
 		string(d.Status), d.Plan, d.Description, d.MaxMailboxes, d.MaxAliases, d.MaxQuotaMB,
 		boolToInt(d.DKIMEnabled), d.DKIMSelector, boolToInt(d.DMARCEnabled), boolToInt(d.MTASTSEnabled),
 		d.CatchallAddress, d.AbuseContact, d.Labels, d.UpdatedAt, d.ID,
@@ -230,7 +230,7 @@ func (r *DomainSQLRepo) Update(ctx context.Context, d *Domain, tx interface{}) e
 func (r *DomainSQLRepo) Delete(ctx context.Context, id uint, tx interface{}) error {
 	e := r.execer(tx)
 	now := time.Now().UTC()
-	_, err := e.ExecContext(ctx, "UPDATE coremail_domains SET status=?, deleted_at=? WHERE id=?", string(DomainDeleted), now, id)
+	_, err := e.ExecContext(ctx, r.qf("UPDATE coremail_domains SET status=?, deleted_at=? WHERE id=?"), string(DomainDeleted), now, id)
 	return err
 }
 
@@ -242,6 +242,15 @@ func (r *DomainSQLRepo) Delete(ctx context.Context, id uint, tx interface{}) err
 // here at all — this method only answers "if it is local, what's its
 // policy", so a not-found domain here must not itself cause a
 // different failure mode than an existing default-mode domain.
+//
+// Corrupt values fail closed (MAILBOX-ACCESS-MODE-PHASE1): the empty
+// string is the established pre-column default and keeps resolving to
+// internal_external exactly as before, but any other unrecognized
+// value is treated as internal_only rather than being silently
+// interpreted as unrestricted. The canonical policy service
+// (internal/coremail/mailpolicy) performs the same resolution with a
+// security-event emission and is what the production SMTP wiring uses;
+// this method remains for the legacy domain checker.
 func (r *DomainSQLRepo) GetMailAccessMode(ctx context.Context, name string, tx interface{}) (MailAccessMode, error) {
 	e := r.execer(tx)
 	var mode string
@@ -252,8 +261,11 @@ func (r *DomainSQLRepo) GetMailAccessMode(ctx context.Context, name string, tx i
 	if err != nil {
 		return "", fmt.Errorf("get mail access mode: %w", err)
 	}
-	if mode == "" || !MailAccessMode(mode).IsValid() {
+	if mode == "" {
 		return MailAccessInternalExternal, nil
+	}
+	if !MailAccessMode(mode).IsValid() {
+		return MailAccessInternalOnly, nil
 	}
 	return MailAccessMode(mode), nil
 }
@@ -282,21 +294,21 @@ func (r *DomainSQLRepo) SetMailAccessMode(ctx context.Context, id, tenantID uint
 func (r *DomainSQLRepo) CountByTenant(ctx context.Context, tenantID uint, tx interface{}) (int64, error) {
 	e := r.execer(tx)
 	var count int64
-	err := e.QueryRowContext(ctx, "SELECT COUNT(*) FROM coremail_domains WHERE tenant_id=? AND deleted_at IS NULL", tenantID).Scan(&count)
+	err := e.QueryRowContext(ctx, r.qf("SELECT COUNT(*) FROM coremail_domains WHERE tenant_id=? AND deleted_at IS NULL"), tenantID).Scan(&count)
 	return count, err
 }
 
 func (r *DomainSQLRepo) CountByReseller(ctx context.Context, resellerID uint, tx interface{}) (int64, error) {
 	e := r.execer(tx)
 	var count int64
-	err := e.QueryRowContext(ctx, "SELECT COUNT(*) FROM coremail_domains WHERE reseller_id=? AND deleted_at IS NULL", resellerID).Scan(&count)
+	err := e.QueryRowContext(ctx, r.qf("SELECT COUNT(*) FROM coremail_domains WHERE reseller_id=? AND deleted_at IS NULL"), resellerID).Scan(&count)
 	return count, err
 }
 
 func (r *DomainSQLRepo) Exists(ctx context.Context, name string, tx interface{}) (bool, error) {
 	e := r.execer(tx)
 	var count int64
-	err := e.QueryRowContext(ctx, "SELECT COUNT(*) FROM coremail_domains WHERE name=? AND deleted_at IS NULL", name).Scan(&count)
+	err := e.QueryRowContext(ctx, r.qf("SELECT COUNT(*) FROM coremail_domains WHERE name=? AND deleted_at IS NULL"), name).Scan(&count)
 	return count > 0, err
 }
 

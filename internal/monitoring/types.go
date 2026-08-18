@@ -94,6 +94,26 @@ type Health struct {
 	API           ComponentHealth `json:"api"`
 	Capacity      Capacity        `json:"capacity"`
 	OpenAlerts    int             `json:"openAlerts"`
+	// HostUptimeAvailable/HostUptimeSeconds are the real OS host
+	// uptime (time since boot), DISTINCT from UptimeSeconds above
+	// (which is process/service uptime). Only populated when the
+	// platform supports a safe, dependency-free source (currently
+	// Linux via sysinfo(2)); HostUptimeAvailable is false — never a
+	// fabricated 0 — everywhere else so the UI can label it
+	// "unavailable" instead of lying about server uptime.
+	HostUptimeAvailable bool    `json:"hostUptimeAvailable"`
+	HostUptimeSeconds   int64   `json:"hostUptimeSeconds"`
+	Network             Network `json:"network"`
+}
+
+// Network reports the host's own publicly-routable IPv4 address(es),
+// discovered by enumerating local OS network interfaces — never by
+// calling an external IP-lookup service. PrimaryPublicIPv4 is nil
+// (never a fabricated placeholder) when the host has no address that
+// looks publicly routable.
+type Network struct {
+	PrimaryPublicIPv4 *string  `json:"primaryPublicIPv4"`
+	Addresses         []string `json:"addresses,omitempty"`
 }
 
 // ComponentHealth is a per-subsystem status.

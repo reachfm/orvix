@@ -76,7 +76,7 @@ const rulesRunnerApplyTimeout = 30 * time.Second
 // AcceptMessage to surface a 4xx to the sending MTA,
 // which would risk a duplicate delivery retry. The contract
 // is "store first, decide later, never lose the original".
-func (r *Receiver) applyRulesRunner(ctx context.Context, rcpt resolvedRecipient, msg *storage.Message, rfc822Data []byte) {
+func (r *Receiver) applyRulesRunner(ctx context.Context, rcpt canonicalRecipient, msg *storage.Message, rfc822Data []byte) {
 	if r.RulesRunner == nil {
 		return
 	}
@@ -109,7 +109,7 @@ func (r *Receiver) applyRulesRunner(ctx context.Context, rcpt resolvedRecipient,
 		MailboxID:     rcpt.MailboxID,
 		TenantID:      rcpt.TenantID,
 		DomainID:      rcpt.DomainID,
-		MailboxEmail:  rcpt.Email,
+		MailboxEmail:  rcpt.Target,
 		MessageID:     msg.MessageID,
 		RFC822:        rfc822Data,
 		FromHeader:    fromHeader,
@@ -247,7 +247,7 @@ func (r *Receiver) applyFlags(ctx context.Context, messageID uint, flags *storag
 // for the rule decision. The event carries the message_id
 // and the SkipReason so the admin UI can surface "what
 // happened" without scraping logs.
-func (r *Receiver) auditRulesRunnerOutcome(rcpt resolvedRecipient, msg *storage.Message, out *rules.RunOutput) {
+func (r *Receiver) auditRulesRunnerOutcome(rcpt canonicalRecipient, msg *storage.Message, out *rules.RunOutput) {
 	if r.Observability == nil {
 		return
 	}
@@ -285,7 +285,7 @@ func (r *Receiver) rulesRunnerEventType(out *rules.RunOutput) observability.Even
 // telemetry endpoint surfaces; an EventHistory entry
 // carries the same data with a stable event type so the
 // dashboard can colour-code failures.
-func (r *Receiver) logRulesRunnerFailure(rcpt resolvedRecipient, msg *storage.Message, kind string, err error) {
+func (r *Receiver) logRulesRunnerFailure(rcpt canonicalRecipient, msg *storage.Message, kind string, err error) {
 	if r.Observability == nil {
 		return
 	}

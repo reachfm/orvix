@@ -40,7 +40,7 @@ func (r *AdminMailboxRepo) WithTx(tx *sql.Tx) *AdminMailboxRepo {
 
 func (r *AdminMailboxRepo) GetByID(ctx context.Context, id, tenantID uint) (*AdminMailbox, error) {
 	row := r.db.QueryRowContext(ctx,
-		"SELECT id, domain_id, tenant_id, email, local_part, name, status, quota_mb, used_bytes, msg_count, is_admin, allow_smtp, allow_imap, allow_pop3, allow_jmap, mfa_enabled, send_limit_per_hour, last_login, COALESCE(last_ip,''), created_at, updated_at FROM coremail_mailboxes WHERE id = "+r.dialect.Placeholder(1)+" AND tenant_id = "+r.dialect.Placeholder(2)+" AND deleted_at IS NULL",
+		"SELECT m.id, m.domain_id, m.tenant_id, m.email, m.local_part, m.name, m.status, m.quota_mb, m.used_bytes, m.msg_count, m.is_admin, m.allow_smtp, m.allow_imap, m.allow_pop3, m.allow_jmap, m.mfa_enabled, m.send_limit_per_hour, COALESCE(m.mail_access_mode,'inherit'), m.version, m.last_login, COALESCE(m.last_ip,''), m.created_at, m.updated_at FROM coremail_mailboxes m WHERE m.id = "+r.dialect.Placeholder(1)+" AND m.tenant_id = "+r.dialect.Placeholder(2)+" AND m.deleted_at IS NULL",
 		id, tenantID)
 	return scanAdminMailbox(row)
 }
@@ -82,10 +82,11 @@ func (r *AdminMailboxRepo) List(ctx context.Context, filter MailboxFilter) ([]Ad
 		filter.Limit = 500
 	}
 
-	query := `SELECT id, domain_id, tenant_id, email, local_part, name, status, quota_mb, used_bytes, msg_count,
-		is_admin, allow_smtp, allow_imap, allow_pop3, allow_jmap, mfa_enabled, send_limit_per_hour,
-		last_login, COALESCE(last_ip,''), created_at, updated_at
-		FROM coremail_mailboxes WHERE ` + clause + ` ORDER BY created_at DESC LIMIT ` + r.dialect.Placeholder(len(args)+1) + ` OFFSET ` + r.dialect.Placeholder(len(args)+2)
+	query := `SELECT m.id, m.domain_id, m.tenant_id, m.email, m.local_part, m.name, m.status, m.quota_mb, m.used_bytes, m.msg_count,
+		m.is_admin, m.allow_smtp, m.allow_imap, m.allow_pop3, m.allow_jmap, m.mfa_enabled, m.send_limit_per_hour,
+		COALESCE(m.mail_access_mode,'inherit'), m.version,
+		m.last_login, COALESCE(m.last_ip,''), m.created_at, m.updated_at
+		FROM coremail_mailboxes m WHERE ` + clause + ` ORDER BY m.created_at DESC LIMIT ` + r.dialect.Placeholder(len(args)+1) + ` OFFSET ` + r.dialect.Placeholder(len(args)+2)
 	args = append(args, filter.Limit, filter.Offset)
 
 	rows, err := r.db.QueryContext(ctx, query, args...)
@@ -113,34 +114,127 @@ func (r *AdminMailboxRepo) Create(ctx context.Context, m *AdminMailbox, password
 		m.Status = AdminMailboxActive
 	}
 
-	res, err := r.db.ExecContext(ctx,
-		`INSERT INTO coremail_mailboxes
+	insert := `INSERT INTO coremail_mailboxes
 			(domain_id, tenant_id, local_part, email, name, password_hash, auth_scheme,
 			 status, quota_mb, is_admin, allow_smtp, allow_imap, allow_pop3, allow_jmap,
-			 allow_webmail, send_limit_per_hour, recv_limit_per_hour, created_at, updated_at)
-		VALUES (`+r.dialect.Placeholders(19)+`)`,
+			 allow_webmail, send_limit_per_hour, recv_limit_per_hour, mail_access_mode, version, created_at, updated_at)
+		VALUES (` + r.dialect.Placeholders(21) + `)`
+	args := []any{
 		m.DomainID, m.TenantID, m.LocalPart, m.Email, m.Name, passwordHash, string(MailboxAuthSchemeArgon2id),
-		string(m.Status), m.QuotaMB, boolToInt(m.IsAdmin),
-		boolToInt(m.AllowSMTP), boolToInt(m.AllowIMAP), boolToInt(m.AllowPOP3), boolToInt(m.AllowJMAP),
-		true, m.SendLimit, 1000, m.CreatedAt, m.UpdatedAt,
-	)
+		string(m.Status), m.QuotaMB, r.databaseBool(m.IsAdmin),
+		r.databaseBool(m.AllowSMTP), r.databaseBool(m.AllowIMAP), r.databaseBool(m.AllowPOP3), r.databaseBool(m.AllowJMAP),
+		r.databaseBool(true), m.SendLimit, 1000, NormalizeMailAccessMode(m.MailAccessMode), 1, m.CreatedAt, m.UpdatedAt,
+	}
+	if r.dialect.IsPostgres() {
+		// PostgreSQL has no LastInsertId: the id is returned by the
+		// INSERT itself (same dialect-aware pattern as the domain and
+		// organization repositories).
+		if err := r.db.QueryRowContext(ctx, insert+" RETURNING id", args...).Scan(&m.ID); err != nil {
+			return nil, fmt.Errorf("create mailbox: %w", err)
+		}
+		m.MailAccessMode = string(NormalizeMailAccessMode(m.MailAccessMode))
+		m.Version = 1
+		return m, nil
+	}
+	res, err := r.db.ExecContext(ctx, insert, args...)
 	if err != nil {
 		return nil, fmt.Errorf("create mailbox: %w", err)
 	}
 	id, _ := res.LastInsertId()
 	m.ID = uint(id)
+	m.MailAccessMode = string(NormalizeMailAccessMode(m.MailAccessMode))
+	m.Version = 1
 	return m, nil
+}
+
+// databaseBool encodes a boolean for the active dialect: real bools
+// for PostgreSQL BOOLEAN columns, 0/1 integers for SQLite (same
+// pattern as the queue repository).
+func (r *AdminMailboxRepo) databaseBool(b bool) any {
+	if r.dialect.IsPostgres() {
+		return b
+	}
+	return boolToInt(b)
 }
 
 func (r *AdminMailboxRepo) Update(ctx context.Context, m *AdminMailbox) error {
 	m.UpdatedAt = time.Now().UTC()
 	_, err := r.db.ExecContext(ctx,
-		`UPDATE coremail_mailboxes SET name=`+r.dialect.Placeholder(1)+`, quota_mb=`+r.dialect.Placeholder(2)+`, is_admin=`+r.dialect.Placeholder(3)+`, allow_smtp=`+r.dialect.Placeholder(4)+`, allow_imap=`+r.dialect.Placeholder(5)+`, allow_pop3=`+r.dialect.Placeholder(6)+`, allow_jmap=`+r.dialect.Placeholder(7)+`, send_limit_per_hour=`+r.dialect.Placeholder(8)+`, updated_at=`+r.dialect.Placeholder(9)+`
-		 WHERE id=`+r.dialect.Placeholder(10)+` AND tenant_id=`+r.dialect.Placeholder(11)+` AND deleted_at IS NULL`,
+		`UPDATE coremail_mailboxes SET name=`+r.dialect.Placeholder(1)+`, quota_mb=`+r.dialect.Placeholder(2)+`, is_admin=`+r.dialect.Placeholder(3)+`, allow_smtp=`+r.dialect.Placeholder(4)+`, allow_imap=`+r.dialect.Placeholder(5)+`, allow_pop3=`+r.dialect.Placeholder(6)+`, allow_jmap=`+r.dialect.Placeholder(7)+`, send_limit_per_hour=`+r.dialect.Placeholder(8)+`, mail_access_mode=`+r.dialect.Placeholder(9)+`, updated_at=`+r.dialect.Placeholder(10)+`
+		 WHERE id=`+r.dialect.Placeholder(11)+` AND tenant_id=`+r.dialect.Placeholder(12)+` AND deleted_at IS NULL`,
 		m.Name, m.QuotaMB, boolToInt(m.IsAdmin), boolToInt(m.AllowSMTP), boolToInt(m.AllowIMAP),
-		boolToInt(m.AllowPOP3), boolToInt(m.AllowJMAP), m.SendLimit, m.UpdatedAt, m.ID, m.TenantID,
+		boolToInt(m.AllowPOP3), boolToInt(m.AllowJMAP), m.SendLimit, NormalizeMailAccessMode(m.MailAccessMode), m.UpdatedAt, m.ID, m.TenantID,
 	)
 	return err
+}
+
+// UpdateMailAccessMode is the guarded access-mode mutation. The
+// tenant_id predicate is IN the SQL, so a cross-tenant id affects zero
+// rows and resolves to a safe not-found contract (no disclosure that
+// the mailbox exists under another tenant). The version predicate
+// provides optimistic concurrency: a concurrent guarded mutation wins,
+// the loser sees zero rows affected and maps to a precondition failure.
+// On success it returns the new version.
+func (r *AdminMailboxRepo) UpdateMailAccessMode(ctx context.Context, id, tenantID uint, mode string, expectedVersion int) (affected int64, newVersion int, err error) {
+	normalized := string(NormalizeMailAccessMode(mode))
+	res, err := r.db.ExecContext(ctx,
+		"UPDATE coremail_mailboxes SET mail_access_mode="+r.dialect.Placeholder(1)+", version=version+1, updated_at="+r.dialect.Placeholder(2)+" WHERE id="+r.dialect.Placeholder(3)+" AND tenant_id="+r.dialect.Placeholder(4)+" AND version="+r.dialect.Placeholder(5)+" AND deleted_at IS NULL",
+		normalized, time.Now().UTC(), id, tenantID, expectedVersion)
+	if err != nil {
+		return 0, 0, err
+	}
+	affected, err = res.RowsAffected()
+	if err != nil {
+		return 0, 0, err
+	}
+	return affected, expectedVersion + 1, nil
+}
+
+// GetMailAccessModeState reads the configured and effective access
+// mode for a mailbox. The effective mode resolves "inherit" through
+// the owning domain. A corrupt mailbox value (anything outside the
+// three canonical persisted values) fails closed to internal_only;
+// a corrupt domain value fails closed to internal_only as well.
+// sql.ErrNoRows is returned for unknown or cross-tenant mailboxes.
+func (r *AdminMailboxRepo) GetMailAccessModeState(ctx context.Context, id, tenantID uint) (configured, effective string, version int, err error) {
+	row := r.db.QueryRowContext(ctx,
+		`SELECT m.mail_access_mode, d.mail_access_mode, m.version
+		 FROM coremail_mailboxes m LEFT JOIN coremail_domains d ON d.id = m.domain_id
+		 WHERE m.id=`+r.dialect.Placeholder(1)+` AND m.tenant_id=`+r.dialect.Placeholder(2)+` AND m.deleted_at IS NULL`,
+		id, tenantID)
+	var mailboxMode, domainMode sql.NullString
+	if err := row.Scan(&mailboxMode, &domainMode, &version); err != nil {
+		return "", "", 0, err
+	}
+	configured = string(NormalizeMailAccessMode(mailboxMode.String))
+	effective = resolveEffectiveMailAccessMode(configured, domainMode.String)
+	return configured, effective, version, nil
+}
+
+// resolveEffectiveMailAccessMode is the single effective-mode
+// resolution used by the admin read path. It mirrors the canonical
+// mailpolicy package semantics: an explicit mailbox mode wins; inherit
+// resolves through the domain (empty domain -> the established
+// internal_external default); any corrupt value fails closed to
+// internal_only. The delivery-path policy service
+// (internal/coremail/mailpolicy) applies the identical rules.
+func resolveEffectiveMailAccessMode(mailboxMode, domainMode string) string {
+	switch MailAccessMode(mailboxMode) {
+	case MailAccessInternalOnly, MailAccessInternalExternal:
+		return mailboxMode
+	}
+	// inherit (or anything unrecognized at the mailbox level — treat
+	// as inherit + fail closed through the domain rules below).
+	switch MailAccessMode(strings.TrimSpace(domainMode)) {
+	case MailAccessInternalOnly, MailAccessInternalExternal:
+		return domainMode
+	case "":
+		// Pre-column domain rows: the established default.
+		return string(MailAccessInternalExternal)
+	default:
+		// Corrupt domain value: fail closed.
+		return string(MailAccessInternalOnly)
+	}
 }
 
 func (r *AdminMailboxRepo) UpdateStatus(ctx context.Context, id, tenantID uint, status AdminMailboxStatus) error {
@@ -220,6 +314,18 @@ func (r *AdminMailboxRepo) ExistsByEmail(ctx context.Context, email string, excl
 	err := r.db.QueryRowContext(ctx,
 		"SELECT COUNT(*) FROM coremail_mailboxes WHERE email="+r.dialect.Placeholder(1)+" AND id!="+r.dialect.Placeholder(2)+" AND deleted_at IS NULL", email, excludeID).Scan(&count)
 	return count > 0, err
+}
+
+// GetIDByEmail returns the live (non-deleted) mailbox ID for email, or
+// 0 with a nil error if none exists.
+func (r *AdminMailboxRepo) GetIDByEmail(ctx context.Context, email string) (uint, error) {
+	var id uint
+	err := r.db.QueryRowContext(ctx,
+		"SELECT id FROM coremail_mailboxes WHERE email="+r.dialect.Placeholder(1)+" AND deleted_at IS NULL", email).Scan(&id)
+	if err == sql.ErrNoRows {
+		return 0, nil
+	}
+	return id, err
 }
 
 // ResolveDomain looks up a domain by name inside the authenticated tenant
@@ -321,7 +427,7 @@ func scanAdminMailbox(row interface {
 		&m.ID, &m.DomainID, &m.TenantID, &m.Email, &m.LocalPart, &m.Name,
 		&status, &m.QuotaMB, &m.UsedBytes, &m.MsgCount,
 		&isAdmin, &allowSMTP, &allowIMAP, &allowPOP3, &allowJMAP, &mfaEnabled,
-		&m.SendLimit, &m.LastLogin, &m.LastIP, &m.CreatedAt, &m.UpdatedAt,
+		&m.SendLimit, &m.MailAccessMode, &m.Version, &m.LastLogin, &m.LastIP, &m.CreatedAt, &m.UpdatedAt,
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -336,6 +442,10 @@ func scanAdminMailbox(row interface {
 	m.AllowPOP3 = intToBool(allowPOP3)
 	m.AllowJMAP = intToBool(allowJMAP)
 	m.MFAEnabled = intToBool(mfaEnabled)
+	m.MailAccessMode = string(NormalizeMailAccessMode(m.MailAccessMode))
+	if m.MailAccessMode == "" {
+		m.MailAccessMode = string(MailAccessInherit)
+	}
 	return &m, nil
 }
 

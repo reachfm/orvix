@@ -21,7 +21,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-WEBMAIL_DIR="${WEBMAIL_DIR:-$SCRIPT_DIR/../webmail}"
+WEBMAIL_DIR="${WEBMAIL_DIR:-$SCRIPT_DIR/../../web/webmail-release}"
 
 # Convert POSIX /mnt/... and /c/... paths to native Windows
 # paths for the Chromium binary and Node script. Some Node

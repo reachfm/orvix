@@ -13,6 +13,7 @@ import (
 	"net/mail"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -34,6 +35,7 @@ import (
 	"github.com/orvix/orvix/internal/configtruth"
 	"github.com/orvix/orvix/internal/coremail"
 	"github.com/orvix/orvix/internal/coremail/delivery"
+	"github.com/orvix/orvix/internal/coremail/mailpolicy"
 	"github.com/orvix/orvix/internal/coremail/push"
 	"github.com/orvix/orvix/internal/coremail/queue"
 	"github.com/orvix/orvix/internal/coremail/storage"
@@ -58,6 +60,7 @@ import (
 	"github.com/orvix/orvix/internal/ruler"
 	"github.com/orvix/orvix/internal/runtime"
 	settingsbridge "github.com/orvix/orvix/internal/settings/bridge"
+	"github.com/orvix/orvix/internal/support"
 	"github.com/orvix/orvix/internal/supportaccess"
 	"github.com/orvix/orvix/internal/tlsmgmt"
 	"github.com/orvix/orvix/internal/trustmgmt"
@@ -88,7 +91,14 @@ type Handler struct {
 	// skipped (never the case in the production router).
 	authLimiter *auth.AuthLimiter
 	auditStore  *audit.Store
-	webmailSvc  *webmailmgmt.Service
+	// auditExtended is the enterprise extended audit store (orvix_audit
+	// table) used by the platform Audit Log list/detail/export surface.
+	// It carries the richer entries (actor_id, actor_role, tenant_id,
+	// ip, user_agent, reason, before/after). nil means the extended
+	// store is unavailable and the handlers fall back to the legacy
+	// coremail_audit store.
+	auditExtended *audit.ExtendedStore
+	webmailSvc    *webmailmgmt.Service
 
 	// mailStore is the same *storage.MailStore instance
 	// used by the coremail runtime module. The webmail
@@ -110,10 +120,19 @@ type Handler struct {
 	// (Milestone 8), set via SetAttemptHistoryRepo.
 	historyRepo delivery.AttemptHistoryRepository
 
+	// webmailSendHooks are deterministic test-only synchronization
+	// seams for the WebmailSend staged acceptance (S-2). nil in
+	// production; every field must be nil-safe.
+	webmailSendHooks *webmailSendTestHooks
+
 	// incidentSvc is lazily initialized by h.incidentService().
 	incidentSvc *incident.Service
 	// supportAccessSvc is lazily initialized by h.supportAccessService().
 	supportAccessSvc *supportaccess.Service
+	// mailboxSessionRepo is lazily initialized by h.mailboxSessionRepository();
+	// backs the audited, per-mailbox, time-boxed read-only support-view
+	// sessions (distinct from the tenant-wide supportAccessSvc grants above).
+	mailboxSessionRepo *supportaccess.MailboxSessionRepository
 	// webhookSvc is lazily initialized by h.webhookService().
 	webhookSvc *webhooks.Service
 	jobSvc     *platformjobs.Service
@@ -231,16 +250,17 @@ type Handler struct {
 	settingsBridge *settingsbridge.Bridge
 
 	// Enterprise admin services.
-	mailboxAdminSvc  *mailboxadminsvc.Service
-	orgAdminSvc      *orgadminsvc.Service
-	domainAdminSvc   *domainadminsvc.Service
-	platformAdminSvc *platformsvc.PlatformService
-	dashboardSvc     *dashboardsvc.DashboardService
-	bulkProvisionSvc *bulkprovision.Service
-	relaySvc         *relay.Service
-	clusterSvc       *cluster.Service
-	retentionSvc     *retention.Service
-	platformBillSvc  *platformbilling.Service
+	mailboxAdminSvc    *mailboxadminsvc.Service
+	orgAdminSvc        *orgadminsvc.Service
+	domainAdminSvc     *domainadminsvc.Service
+	platformAdminSvc   *platformsvc.PlatformService
+	dashboardSvc       *dashboardsvc.DashboardService
+	bulkProvisionSvc   *bulkprovision.Service
+	bulkMailboxStaging *importer.StagingService
+	relaySvc           *relay.Service
+	clusterSvc         *cluster.Service
+	retentionSvc       *retention.Service
+	platformBillSvc    *platformbilling.Service
 
 	billingSvc   *billing.Service
 	usageSvc     *billing.UsageService
@@ -260,6 +280,19 @@ type Handler struct {
 	mailControlSvc *mailcontrol.Service
 
 	deliverabilitySvc *deliverability.Service
+
+	// supportRepo is the canonical Support Ticket repository shared
+	// by the tenant-facing Support page and the Platform Support
+	// Inbox. Wired via SetSupportRepository. nil falls back to a
+	// repository built lazily on the underlying sql.DB so the
+	// handlers never panic on a misconfigured router.
+	supportRepo *support.Repository
+
+	// mailPolicy is the canonical mailbox-level mail-access policy
+	// (internal/coremail/mailpolicy), enforced on the webmail send
+	// path. Wired by the router; nil disables enforcement (test
+	// harnesses that predate the policy keep their behavior).
+	mailPolicy *mailpolicy.Policy
 
 	// platformIdem is the idempotency store for platform control-plane
 	// mutations (relay create/update/rotate/test). Wired by the router;
@@ -456,6 +489,12 @@ func (h *Handler) SetOrganizationAdminService(s *orgadminsvc.Service) {
 	h.orgAdminSvc = s
 }
 
+// SetAuditExtendedStore wires the enterprise extended audit store
+// (orvix_audit) used by the platform Audit Log list/detail surface.
+func (h *Handler) SetAuditExtendedStore(s *audit.ExtendedStore) {
+	h.auditExtended = s
+}
+
 // SetDomainAdminService wires the domain admin service.
 func (h *Handler) SetDomainAdminService(s *domainadminsvc.Service) {
 	h.domainAdminSvc = s
@@ -471,6 +510,8 @@ func (h *Handler) SetAutomationJobs(service *platformjobs.Service, worker *platf
 	h.jobSvc = service
 	h.jobWorker = worker
 }
+
+func (h *Handler) AutomationJobsService() *platformjobs.Service { return h.jobSvc }
 
 func (h *Handler) StartAutomationWorker(ctx context.Context) {
 	if h.jobWorker == nil {
@@ -529,6 +570,16 @@ func (h *Handler) SetBulkProvisionService(s *bulkprovision.Service) {
 	h.bulkProvisionSvc = s
 }
 
+// SetBulkMailboxStaging wires the confined staging directory used to
+// hold an uploaded bulk-mailbox file between the platform stage and
+// validate/execute steps. Reuses internal/platform/importer's existing
+// staging primitive (confined paths, random server-generated IDs,
+// atomic fsync+rename writes, symlink rejection, hash verification) —
+// deliberately NOT a second staging subsystem.
+func (h *Handler) SetBulkMailboxStaging(s *importer.StagingService) {
+	h.bulkMailboxStaging = s
+}
+
 // SetRelayService wires the outbound relay control plane service.
 func (h *Handler) SetRelayService(s *relay.Service) {
 	h.relaySvc = s
@@ -554,6 +605,13 @@ func (h *Handler) SetPlatformBillingService(s *platformbilling.Service) {
 // SetPlatformAdminService wires the platform admin service.
 func (h *Handler) SetPlatformAdminService(s *platformsvc.PlatformService) {
 	h.platformAdminSvc = s
+}
+
+// SetSupportRepository wires the canonical support-ticket repository
+// (shared by the tenant-facing Support page and the Platform Support
+// Inbox). Wired by the router at boot.
+func (h *Handler) SetSupportRepository(r *support.Repository) {
+	h.supportRepo = r
 }
 
 // SetDashboardService wires the dashboard aggregation service.
@@ -1052,6 +1110,17 @@ func (h *Handler) LogoutAll(c fiber.Ctx) error {
 }
 
 // ChangePassword changes the user's password and invalidates all sessions except current.
+//
+// Architecture: the same identity that logs in via /auth/login MUST be
+// accepted as current_password here. Both paths now share ONE canonical
+// password verifier (auth.VerifyPasswordWithRehash, called through
+// h.auth.VerifyPassword), supporting both Argon2id (canonical) and bcrypt
+// (legacy / reset-script) hashes. The user lookup uses raw SQL with the
+// dialect placeholder — matching the Login handler exactly — so the same
+// `users.password_hash` column is read the same way both endpoints read
+// it. The update is also raw SQL with RowsAffected-checked: a previous
+// GORM .Table().Update() path silently affected 0 rows in some
+// SQLite/Postgres combinations.
 func (h *Handler) ChangePassword(c fiber.Ctx) error {
 	userID := c.Locals("user_id").(uint)
 
@@ -1069,15 +1138,18 @@ func (h *Handler) ChangePassword(c fiber.Ctx) error {
 		})
 	}
 
-	var user struct {
-		ID           uint
-		PasswordHash string
+	sqlDB, err := h.db.DB()
+	if err != nil {
+		h.logger.Error("change-password: failed to get underlying DB", zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "internal error"})
 	}
-	if err := h.db.Table("users").First(&user, userID).Error; err != nil {
+	var passwordHash string
+	err = sqlDB.QueryRow("SELECT password_hash FROM users WHERE id = "+h.dialect.Placeholder(1), userID).Scan(&passwordHash)
+	if err != nil {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "user not found"})
 	}
 
-	if !h.auth.VerifyPassword(req.CurrentPassword, user.PasswordHash) {
+	if !h.auth.VerifyPassword(req.CurrentPassword, passwordHash) {
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "current password is incorrect"})
 	}
 
@@ -1087,8 +1159,13 @@ func (h *Handler) ChangePassword(c fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "password change failed"})
 	}
 
-	if err := h.db.Table("users").Where("id = ?", userID).Update("password_hash", newHash).Error; err != nil {
+	res, err := sqlDB.Exec("UPDATE users SET password_hash = "+h.dialect.Placeholder(1)+" WHERE id = "+h.dialect.Placeholder(2), newHash, userID)
+	if err != nil {
 		h.logger.Error("failed to update password", zap.Error(err))
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "password change failed"})
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		h.logger.Error("password update affected 0 rows", zap.Uint("user_id", userID))
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "password change failed"})
 	}
 
@@ -1204,8 +1281,15 @@ func (h *Handler) DeleteAPIKey(c fiber.Ctx) error {
 // shell. Derivation is fail-closed:
 //   - RolePlatformSuperAdmin (or the legacy RoleSuperAdmin) → "platform".
 //     No `organization` field.
-//   - Any tenant role with a non-NULL tenant_id → "organization" and an
-//     `organization` object with id/name/slug.
+//   - Canonical tenant administration roles (tenant_admin, tenant_operator,
+//     tenant_support, tenant_readonly) with a non-NULL tenant_id →
+//     "organization" and an `organization` object with id/name/slug.
+//   - RoleUser (per-mailbox webmail end-user) → NOT the full Organization
+//     Admin shell. RoleUser has no Organization administration privileges,
+//     so it resolves to portal="" and the client fails closed with the
+//     access-unavailable state. Webmail has its own separate surface.
+//   - RoleBilling → portal="" (fail closed): the billing-only persona is
+//     not intentionally supported by a visible shell today.
 //   - Anything else (unknown role, tenant role without tenant_id) →
 //     empty portal string. The client MUST refuse to render a shell.
 //
@@ -1246,9 +1330,11 @@ func (h *Handler) Me(c fiber.Ctx) error {
 			}
 		}
 	default:
-		// Unknown / legacy un-normalized role → no portal. The client
+		// RoleUser (webmail end-user), RoleBilling (unsupported persona),
+		// unknown / legacy un-normalized role → no portal. The client
 		// shows an access-denied screen instead of falling through to
-		// the platform shell.
+		// the platform shell or granting a RoleUser the full Organization
+		// Admin console.
 		portal = ""
 	}
 
@@ -3350,38 +3436,137 @@ func (h *Handler) ValidateLicense(c fiber.Ctx) error {
 }
 
 // ListAuditLogs returns audit log entries with safe fields only.
+// ListAuditLogs returns the platform audit log with real filtering
+// (action/actor/tenant_id/result), safe pagination (limit/offset, plus
+// page/page_size aliases the console uses) and the rich extended entry
+// contract {entries, total, limit, offset}. Entries are the extended
+// orvix_audit rows (actor_id, actor_role, tenant_id, ip, user_agent,
+// reason, before/after) — never a lossy projection. When the extended
+// store is unavailable, it falls back to the legacy coremail_audit
+// store with the same envelope (entries carry the legacy fields).
 func (h *Handler) ListAuditLogs(c fiber.Ctx) error {
-	if h.auditStore == nil {
-		return c.JSON([]struct{}{})
+	q := parseAuditQuery(c)
+
+	// Normalize pagination: accept limit/offset or page/page_size.
+	limit, offset := q.Limit, q.Offset
+	if raw := strings.TrimSpace(c.Query("page_size")); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+			limit = n
+		}
 	}
-	logs, _, err := h.auditStore.Search(c.Context(), &audit.Query{Limit: 100})
+	if raw := strings.TrimSpace(c.Query("offset")); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+			offset = n
+		}
+	}
+	if raw := strings.TrimSpace(c.Query("page")); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+			offset = (n - 1) * limit
+		}
+	}
+	if limit <= 0 {
+		limit = 25
+	}
+	if limit > 500 {
+		limit = 500
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
+	if h.auditExtended != nil {
+		eq := &audit.ExtendedQuery{
+			Action: q.Action, Result: q.Result, Target: q.Target,
+			Limit: limit, Offset: offset,
+		}
+		if q.TenantID != 0 {
+			tid := q.TenantID
+			eq.TenantID = &tid
+		}
+		if actorID, err := strconv.ParseUint(q.Actor, 10, 64); err == nil && actorID > 0 {
+			aid := uint(actorID)
+			eq.ActorID = &aid
+		} else if q.Actor != "" {
+			// Non-numeric actor filter: match the actor string prefix
+			// (e.g. "user:42") — the extended store has no LIKE column
+			// for actor, so filter in memory after a bounded query.
+			eq.Limit = 500
+			entries, _, searchErr := h.auditExtended.Search(c.Context(), eq)
+			if searchErr != nil {
+				h.logger.Error("failed to list extended audit logs", zap.Error(searchErr))
+				return c.JSON(fiber.Map{"entries": []audit.ExtendedEntry{}, "total": 0, "limit": limit, "offset": offset})
+			}
+			filtered := make([]audit.ExtendedEntry, 0, len(entries))
+			for _, e := range entries {
+				if strings.Contains(e.Actor, q.Actor) {
+					filtered = append(filtered, e)
+				}
+			}
+			start := offset
+			if start > len(filtered) {
+				start = len(filtered)
+			}
+			end := start + limit
+			if end > len(filtered) {
+				end = len(filtered)
+			}
+			page := filtered[start:end]
+			if page == nil {
+				page = []audit.ExtendedEntry{}
+			}
+			return c.JSON(fiber.Map{"entries": page, "total": len(filtered), "limit": limit, "offset": offset})
+		}
+		entries, total, err := h.auditExtended.Search(c.Context(), eq)
+		if err != nil {
+			h.logger.Error("failed to list extended audit logs", zap.Error(err))
+			return c.JSON(fiber.Map{"entries": []audit.ExtendedEntry{}, "total": 0, "limit": limit, "offset": offset})
+		}
+		if entries == nil {
+			entries = []audit.ExtendedEntry{}
+		}
+		return c.JSON(fiber.Map{"entries": entries, "total": total, "limit": limit, "offset": offset})
+	}
+
+	// Legacy fallback: coremail_audit store, same envelope.
+	if h.auditStore == nil {
+		return c.JSON(fiber.Map{"entries": []struct{}{}, "total": 0, "limit": limit, "offset": offset})
+	}
+	logs, total, err := h.auditStore.Search(c.Context(), &audit.Query{
+		TenantID: q.TenantID, Actor: q.Actor, Action: q.Action, Result: q.Result,
+		Limit: limit, Offset: offset,
+	})
 	if err != nil {
 		h.logger.Error("failed to list audit logs", zap.Error(err))
-		return c.JSON([]struct{}{})
+		return c.JSON(fiber.Map{"entries": []struct{}{}, "total": 0, "limit": limit, "offset": offset})
 	}
 	type safeEntry struct {
 		ID        int64  `json:"id"`
 		Action    string `json:"action"`
 		Actor     string `json:"actor"`
+		Role      string `json:"actor_role"`
 		Target    string `json:"target"`
 		Result    string `json:"result"`
+		TenantID  uint   `json:"tenant_id"`
+		IP        string `json:"ip"`
+		UserAgent string `json:"user_agent"`
 		Timestamp string `json:"timestamp"`
 	}
-	var result []safeEntry
+	result := make([]safeEntry, 0, len(logs))
 	for _, e := range logs {
 		result = append(result, safeEntry{
 			ID:        e.ID,
 			Action:    e.Action,
 			Actor:     e.Actor,
+			Role:      e.Role,
 			Target:    e.Target,
 			Result:    e.Result,
+			TenantID:  e.TenantID,
+			IP:        e.IP,
+			UserAgent: e.UserAgent,
 			Timestamp: e.Timestamp.Format(time.RFC3339),
 		})
 	}
-	if result == nil {
-		result = []safeEntry{}
-	}
-	return c.JSON(result)
+	return c.JSON(fiber.Map{"entries": result, "total": total, "limit": limit, "offset": offset})
 }
 
 // AdminSummary returns aggregate counts for the admin dashboard.
@@ -3768,20 +3953,58 @@ func (h *Handler) UpdateFeatureFlag(c fiber.Ctx) error {
 func (h *Handler) writeAuditLog(c fiber.Ctx, action, resource string) {
 	userID, _ := c.Locals("user_id").(uint)
 	ip := c.IP()
+	role, _ := c.Locals("role").(string)
+	tenantID, _ := c.Locals("tenant_id").(uint)
 
-	if h.auditStore == nil {
+	if h.auditStore == nil && h.auditExtended == nil {
 		h.logger.Error("audit store unavailable")
 		return
 	}
-	if err := h.auditStore.Record(c.Context(), &audit.Entry{
-		Actor:     fmt.Sprintf("user:%d", userID),
-		Action:    action,
-		Target:    resource,
-		Result:    "success",
-		IP:        ip,
-		UserAgent: c.Get("User-Agent"),
-	}); err != nil {
-		h.logger.Error("failed to write audit log", zap.Error(err))
+
+	// Canonical write: orvix_audit (extended store) — the store the
+	// Platform Audit page, the tenant audit page, the detail view, and
+	// the export ALL read. This is the source of truth for every
+	// product-facing audit surface.
+	if h.auditExtended != nil {
+		requestID := strings.TrimSpace(c.Get("X-Request-ID"))
+		if requestID == "" {
+			requestID = strings.TrimSpace(c.Get("X-Correlation-ID"))
+		}
+		if err := h.auditExtended.Record(c.Context(), &audit.ExtendedEntry{
+			Actor:     fmt.Sprintf("user:%d", userID),
+			ActorID:   userID,
+			ActorRole: role,
+			TenantID:  tenantID,
+			Action:    action,
+			Target:    resource,
+			Result:    "success",
+			RequestID: requestID,
+			IP:        ip,
+			UserAgent: c.Get("User-Agent"),
+		}); err != nil {
+			h.logger.Error("failed to write extended audit log", zap.Error(err))
+		}
+	}
+
+	// Legacy mirror: coremail_audit. Kept ONLY for legacy consumers
+	// (admin/audit-logs page, dashboard recent activity, compliance
+	// queries) that predate the extended store; the fields mirror the
+	// canonical write (role + tenant_id now included so the two stores
+	// agree). Best-effort: a failure here is logged and never blocks the
+	// business action.
+	if h.auditStore != nil {
+		if err := h.auditStore.Record(c.Context(), &audit.Entry{
+			Actor:     fmt.Sprintf("user:%d", userID),
+			Role:      role,
+			Action:    action,
+			Target:    resource,
+			Result:    "success",
+			IP:        ip,
+			UserAgent: c.Get("User-Agent"),
+			TenantID:  tenantID,
+		}); err != nil {
+			h.logger.Error("failed to write legacy audit log", zap.Error(err))
+		}
 	}
 }
 

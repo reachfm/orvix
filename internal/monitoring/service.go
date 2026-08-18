@@ -128,17 +128,23 @@ func (s *Service) EnsureSchema(ctx context.Context) error {
 // DataSources.DiskPathLabels (or fall back to the basename). No env
 // values, no file contents, no tokens, no private absolute paths.
 func (s *Service) GetHealth(ctx context.Context) *Health {
+	hostUptime, hostUptimeOK := hostUptimeSeconds()
+	primaryIP, allIPs := PrimaryPublicIPv4()
+
 	h := &Health{
-		Status:        "ok",
-		UptimeSeconds: int64(time.Since(s.uptimeFrom()).Seconds()),
-		GeneratedAt:   time.Now().UTC(),
-		Disk:          s.collectDisk(),
-		DB:            s.collectDBHealth(ctx),
-		Queue:         s.collectQueueHealth(),
-		Backup:        s.collectBackupHealth(),
-		API:           s.collectAPIHealth(),
-		Capacity:      s.collectCapacityShim(ctx),
-		OpenAlerts:    0,
+		Status:              "ok",
+		UptimeSeconds:       int64(time.Since(s.uptimeFrom()).Seconds()),
+		GeneratedAt:         time.Now().UTC(),
+		Disk:                s.collectDisk(),
+		DB:                  s.collectDBHealth(ctx),
+		Queue:               s.collectQueueHealth(),
+		Backup:              s.collectBackupHealth(),
+		API:                 s.collectAPIHealth(),
+		Capacity:            s.collectCapacityShim(ctx),
+		OpenAlerts:          0,
+		HostUptimeAvailable: hostUptimeOK,
+		HostUptimeSeconds:   hostUptime,
+		Network:             Network{PrimaryPublicIPv4: primaryIP, Addresses: allIPs},
 	}
 
 	t := s.thresholds()

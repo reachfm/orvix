@@ -124,6 +124,112 @@ const MOCK_SETTINGS = {
 };
 const MOCK_PUSH_STATUS = { available: false, enabled: false };
 
+// ── 2b. CSRF regression-test state (item 2 runtime coverage) ──
+//
+// A real, stateful CSRF contract: GET /api/v1/csrf-token issues the
+// current token; every non-GET/HEAD webmail mutation (except the
+// pre-session login) must present it via X-CSRF-Token or is
+// rejected. MOCK_MODE lets a test phase force exactly one of a
+// specific failure on the NEXT matching mutation, so the phase can
+// assert webmail.js's real retry/no-retry behavior rather than a
+// reimplementation of it. REQUEST_LOG records every request the
+// mock actually received (method, path, whether a CSRF header was
+// present, its value) so a phase can assert on it via
+// GET /__test__/state instead of instrumenting the page itself —
+// this also doubles as the "no secrets leaked" check: the log is
+// scanned for password/token literal values before each phase ends.
+const CSRF_STATE = {
+    token: 'mock-csrf-token-1234567890',
+    rotateOnNextMutation: false,
+};
+const MOCK_MODE = {
+    forceOrdinary403Once: false,
+    force429Once: false,
+    force500Once: false,
+};
+const REQUEST_LOG = [];
+const COUNTERS = { messagesSent: 0 };
+
+// resetMockTestState clears observation state (the request log, the
+// message counter, and any pending forced-failure mode) between
+// phases. It deliberately does NOT touch CSRF_STATE.token: the
+// client's csrfTokenCache is a real, persistent client-side cache
+// that this reset has no way to invalidate remotely, so rotating the
+// server's expected token here would desync from what the client
+// still has cached and turn every "clean" phase into an accidental
+// CSRF-retry scenario. Only phase 12 (which explicitly tests the
+// retry path) sets rotateOnNextMutation itself, via /__test__/mode.
+function resetMockTestState() {
+    CSRF_STATE.rotateOnNextMutation = false;
+    MOCK_MODE.forceOrdinary403Once = false;
+    MOCK_MODE.force429Once = false;
+    MOCK_MODE.force500Once = false;
+    REQUEST_LOG.length = 0;
+    COUNTERS.messagesSent = 0;
+}
+
+// Endpoints exempt from the CSRF/cookie mutation gate below —
+// login has no session yet (matches the real backend: CSRF is a
+// double-submit cookie check that cannot apply before a session
+// cookie exists), and the __test__ control endpoints are harness
+// plumbing, not part of the webmail contract under test.
+const CSRF_EXEMPT_PATHS = new Set(['/api/v1/webmail/login']);
+
+// csrfGate runs BEFORE any mutation handler below. Returns a
+// {status,body} response to short-circuit with, or null to let the
+// real handler proceed. Every call (whether it short-circuits or
+// not) is recorded to REQUEST_LOG first.
+function csrfGate(method, urlPath, req) {
+    const hasCsrfHeader = Object.prototype.hasOwnProperty.call(req.headers, 'x-csrf-token');
+    const csrfHeaderValue = req.headers['x-csrf-token'] || '';
+    REQUEST_LOG.push({
+        t: Date.now(),
+        method,
+        path: urlPath,
+        contentType: req.headers['content-type'] || '',
+        hasCsrfHeader,
+        csrfHeaderValue,
+    });
+
+    if (method === 'GET' || method === 'HEAD' || CSRF_EXEMPT_PATHS.has(urlPath) || urlPath.startsWith('/__test__/')) {
+        return null;
+    }
+
+    // Forced-failure modes consume themselves (fire once), so a test
+    // phase can assert "exactly one retry" / "no retry" precisely.
+    if (MOCK_MODE.forceOrdinary403Once) {
+        MOCK_MODE.forceOrdinary403Once = false;
+        return { status: 403, body: { error: 'forbidden: insufficient permissions' } };
+    }
+    if (MOCK_MODE.force429Once) {
+        MOCK_MODE.force429Once = false;
+        return { status: 429, headers: { 'Retry-After': '2' }, body: { error: 'too many requests' } };
+    }
+    if (MOCK_MODE.force500Once) {
+        MOCK_MODE.force500Once = false;
+        return { status: 500, body: { error: 'internal server error' } };
+    }
+
+    if (CSRF_STATE.rotateOnNextMutation) {
+        // Simulate the server-side token rotating out from under a
+        // client that cached the old value (e.g. a new browser tab
+        // logged in elsewhere, or the cookie/session rotated). The
+        // client's cached token is now stale -> this request 403s
+        // with a CSRF-flavored message; webmail.js's api()/
+        // sendMessageWithAttachments() must clear its cache, refetch
+        // via GET /api/v1/csrf-token (which now returns the ROTATED
+        // value below), and retry exactly once.
+        CSRF_STATE.rotateOnNextMutation = false;
+        CSRF_STATE.token = 'mock-csrf-token-rotated-' + Date.now();
+        return { status: 403, body: { error: 'csrf token invalid' } };
+    }
+
+    if (!hasCsrfHeader || csrfHeaderValue !== CSRF_STATE.token) {
+        return { status: 403, body: { error: 'csrf token missing or invalid in header' } };
+    }
+    return null;
+}
+
 // mockFor returns {status, body, headers?}.
 //
 // The mock follows the production auth-gate contract:
@@ -150,6 +256,28 @@ function hasAuthedCookie(req) {
 }
 
 function mockFor(method, urlPath, body, req) {
+    // ── __test__ control plane (harness-only, not part of the
+    // webmail contract) ──
+    if (urlPath === '/__test__/state') {
+        return { status: 200, body: { requests: REQUEST_LOG, counters: COUNTERS, csrfToken: CSRF_STATE.token } };
+    }
+    if (method === 'POST' && urlPath === '/__test__/mode') {
+        let parsed = {};
+        try { parsed = body ? JSON.parse(body) : {}; } catch (e) { /* ignore */ }
+        Object.assign(MOCK_MODE, parsed);
+        if (parsed.rotateOnNextMutation) CSRF_STATE.rotateOnNextMutation = true;
+        return { status: 200, body: { ok: true, mode: MOCK_MODE } };
+    }
+    if (method === 'POST' && urlPath === '/__test__/reset') {
+        resetMockTestState();
+        return { status: 200, body: { ok: true } };
+    }
+
+    // Every other request passes through the CSRF/failure-injection
+    // gate first (also logs it to REQUEST_LOG).
+    const gated = csrfGate(method, urlPath, req);
+    if (gated) return gated;
+
     if (method === 'POST' && urlPath === '/api/v1/webmail/login') {
         return {
             status: 200,
@@ -272,11 +400,69 @@ function mockFor(method, urlPath, body, req) {
         return { status: 200, body: MOCK_USER };
     }
     if (method === 'GET' && urlPath === '/api/v1/csrf-token') {
-        // The webmail SPA's csrfFetch probes this endpoint on
-        // first mutating call (and caches). A real backend
-        // signs an HMAC bound to the session; the mock returns
-        // a stable opaque token.
-        return { status: 200, body: { csrf_token: 'mock-csrf-token-1234567890' } };
+        // The webmail SPA's csrfFetch/getCsrfToken probes this on
+        // first mutating call (and caches). CSRF_STATE.token is
+        // mutable so a test phase can force a mid-flow rotation.
+        return { status: 200, body: { csrf_token: CSRF_STATE.token } };
+    }
+
+    // ── Mutation endpoints (item 2 runtime CSRF/retry coverage) ──
+    // Every one of these is reached only after csrfGate() above has
+    // already validated (or forced-failed) the CSRF header, so
+    // reaching here means the header was present and correct.
+    if (method === 'POST' && urlPath === '/api/v1/webmail/send') {
+        if (!hasAuthedCookie(req)) return { status: 401, body: { error: 'unauthenticated' } };
+        const ct = req.headers['content-type'] || '';
+        if (ct.indexOf('multipart/form-data') === 0) {
+            // Multipart attachment send. Not parsed field-by-field —
+            // the CSRF-header assertion already happened in
+            // csrfGate(); reaching here only proves the header was
+            // valid on a multipart request specifically.
+            COUNTERS.messagesSent += 1;
+            return { status: 200, body: { status: 'queued', id: 'mock-msg-' + COUNTERS.messagesSent } };
+        }
+        let parsed = null;
+        try { parsed = body ? JSON.parse(body) : null; } catch (e) { return { status: 400, body: { error: 'invalid request' } }; }
+        if (!parsed || !parsed.to) return { status: 400, body: { error: 'to is required' } };
+        COUNTERS.messagesSent += 1;
+        return { status: 200, body: { status: 'queued', id: 'mock-msg-' + COUNTERS.messagesSent } };
+    }
+    if (method === 'POST' && urlPath === '/api/v1/webmail/drafts') {
+        if (!hasAuthedCookie(req)) return { status: 401, body: { error: 'unauthenticated' } };
+        return { status: 200, body: { id: 501, status: 'saved' } };
+    }
+    if (method === 'PUT' && urlPath.startsWith('/api/v1/webmail/drafts/')) {
+        if (!hasAuthedCookie(req)) return { status: 401, body: { error: 'unauthenticated' } };
+        return { status: 200, body: { status: 'saved' } };
+    }
+    if (method === 'DELETE' && urlPath.startsWith('/api/v1/webmail/drafts/')) {
+        if (!hasAuthedCookie(req)) return { status: 401, body: { error: 'unauthenticated' } };
+        return { status: 200, body: { status: 'deleted' } };
+    }
+    if (method === 'PATCH' && urlPath.startsWith('/api/v1/webmail/messages/') && !urlPath.endsWith('/delete') && !urlPath.endsWith('/archive') && !urlPath.endsWith('/move') && urlPath.indexOf('/batch') === -1) {
+        // Flag mutation, e.g. PATCH /api/v1/webmail/messages/:id
+        if (!hasAuthedCookie(req)) return { status: 401, body: { error: 'unauthenticated' } };
+        return { status: 200, body: { status: 'updated' } };
+    }
+    if (method === 'POST' && /\/api\/v1\/webmail\/messages\/[^/]+\/delete$/.test(urlPath)) {
+        if (!hasAuthedCookie(req)) return { status: 401, body: { error: 'unauthenticated' } };
+        return { status: 200, body: { status: 'deleted' } };
+    }
+    if (method === 'POST' && /\/api\/v1\/webmail\/messages\/[^/]+\/archive$/.test(urlPath)) {
+        if (!hasAuthedCookie(req)) return { status: 401, body: { error: 'unauthenticated' } };
+        return { status: 200, body: { status: 'archived' } };
+    }
+    if (method === 'POST' && /\/api\/v1\/webmail\/messages\/[^/]+\/move$/.test(urlPath)) {
+        if (!hasAuthedCookie(req)) return { status: 401, body: { error: 'unauthenticated' } };
+        return { status: 200, body: { status: 'moved' } };
+    }
+    if (method === 'POST' && urlPath === '/api/v1/webmail/messages/batch') {
+        if (!hasAuthedCookie(req)) return { status: 401, body: { error: 'unauthenticated' } };
+        return { status: 200, body: { status: 'ok', affected: 1 } };
+    }
+    if (method === 'PUT' && urlPath === '/api/v1/webmail/settings') {
+        if (!hasAuthedCookie(req)) return { status: 401, body: { error: 'unauthenticated' } };
+        return { status: 200, body: { status: 'saved' } };
     }
     return { status: 404, body: { error: 'mocked 404 for ' + method + ' ' + urlPath } };
 }
@@ -366,7 +552,7 @@ const server = http.createServer(async (req, res) => {
     try {
         const url = new URL(req.url, 'http://127.0.0.1');
         const p = url.pathname;
-        if (p.startsWith('/api/v1/webmail/') || p === '/api/v1/me' || p === '/api/v1/csrf-token') {
+        if (p.startsWith('/api/v1/webmail/') || p === '/api/v1/me' || p === '/api/v1/csrf-token' || p.startsWith('/__test__/')) {
             const body = await readBody(req);
             const m = mockFor(req.method, p, body, req);
             jsonResponse(res, m.status, m.body, m.headers);
@@ -640,11 +826,19 @@ if (!compose || !compose.ok) {
 console.log(`PASS  phase 4 — compose modal opened (via ${compose.openedBy})`);
 
 // Close the compose modal so it does not cover the Settings panel
-// for the rest of the smoke.
+// for the rest of the smoke. The modal's own class is just "modal"
+// (there is no ".compose-modal" class anywhere in webmail.js) — the
+// previous selector here was always a no-op, silently leaving this
+// modal open in the DOM for the rest of the run. Scope to the
+// Compose dialog specifically via its aria-label, matching the real
+// close button (aria-label="Close", inside .modal-header).
 await evalExpr(`
 (function () {
-    const close = document.querySelector('.compose-modal [aria-label*="close" i], .compose-modal button.icon-btn');
+    const dialog = document.querySelector('.modal[role="dialog"][aria-label="Compose message"]');
+    const close = dialog && dialog.querySelector('button[aria-label="Close"]');
     if (close) close.click();
+    const backdrop = dialog && dialog.closest('.modal-backdrop');
+    if (backdrop) backdrop.remove();
 })()
 `, false);
 await sleep(300);
@@ -966,7 +1160,274 @@ await evalExpr(`
 `, false);
 await sleep(100);
 
-// ── 15. Done ─────────────────────────────────────────────────
+// ── 15. Phase 11 — CSRF header present on an ordinary send;
+//        exactly one send request, exactly one queued message ────
+//
+// Opens compose, fills a valid message (non-empty subject/body so
+// the warn_on_empty_subject confirm() dialog — which would hang
+// headless Chrome — never fires), sends once, and asserts against
+// the mock's own request log: exactly one POST /api/v1/webmail/send,
+// it carried X-CSRF-Token with the current token value, and the
+// server's message counter incremented by exactly 1. This is the
+// "one click produces exactly one message" and "CSRF header on every
+// mutation" requirement, verified from the server side rather than
+// trusting client-side behavior alone.
+
+async function sendComposeMessage(to, subject, bodyText) {
+    return evalExpr(`
+(async () => {
+    // Clear any leftover toast from a prior phase first so a stale
+    // .toast.success/.error can never be mistaken for this action's
+    // result.
+    document.querySelectorAll('.toast').forEach(t => t.remove());
+    const api = window.OrvixWebmail || window.orvixWebmail || null;
+    if (api && typeof api.openCompose === 'function') api.openCompose();
+    // 8s / 12s rather than the 4s/6s other phases use: this helper runs
+    // up to 4 times back-to-back (phases 11-14) under real CI load
+    // (this workflow runs concurrently with a dozen others sharing
+    // runner capacity), so it gets more slack against transient
+    // slowness rather than a tight budget tuned for an idle machine.
+    const deadline1 = Date.now() + 8000;
+    let modal = null;
+    while (Date.now() < deadline1) {
+        // Pick the LAST match, not the first: if a prior phase's
+        // compose modal somehow failed to close, this favors the
+        // freshly-opened one rather than a stale duplicate.
+        const dialogs = document.querySelectorAll('.modal[role="dialog"][aria-label="Compose message"]');
+        modal = dialogs.length ? dialogs[dialogs.length - 1] : null;
+        if (modal) break;
+        await new Promise(r => setTimeout(r, 100));
+    }
+    if (!modal) return { ok: false, reason: 'compose modal did not open' };
+    const toInput = modal.querySelector('input[placeholder="recipient@example.com"]');
+    const subjInput = modal.querySelector('input[placeholder="Subject"]');
+    const bodyInput = modal.querySelector('textarea.compose-body');
+    if (!toInput || !subjInput || !bodyInput) return { ok: false, reason: 'compose fields missing' };
+    const setVal = (el, v) => { el.value = v; el.dispatchEvent(new Event('input', { bubbles: true })); };
+    setVal(toInput, ${JSON.stringify(to)});
+    setVal(subjInput, ${JSON.stringify(subject)});
+    setVal(bodyInput, ${JSON.stringify(bodyText)});
+    const sendBtn = modal.querySelector('.modal-footer .btn.primary');
+    if (!sendBtn) return { ok: false, reason: 'send button missing' };
+    sendBtn.click();
+    // toast() auto-removes itself after 3.5s (see webmail.js), so
+    // polling for a still-visible .toast element races that timeout —
+    // under real CI load (this workflow runs alongside a dozen others
+    // sharing runner scheduling) a 100ms poll can genuinely straddle a
+    // toast's entire visible window and see nothing on either side of
+    // it, even though the send itself completed correctly. Key off the
+    // DURABLE signals instead: success removes the whole modal
+    // backdrop (see the sendBtn click handler's .then()); failure
+    // resets sendBtn.disabled back to false while the modal stays
+    // open (see setSending(false) in the same handler's final .then()).
+    // Grab toast text opportunistically for diagnostics only — never
+    // gate the outcome on it.
+    const deadline2 = Date.now() + 12000;
+    let result = null;
+    while (Date.now() < deadline2) {
+        const stillOpen = document.querySelector('.modal[role="dialog"][aria-label="Compose message"]');
+        if (!stillOpen) {
+            const t = document.querySelector('.toast.success');
+            result = { ok: true, outcome: 'success', text: t ? t.textContent : '(toast already dismissed)' };
+            break;
+        }
+        if (!sendBtn.disabled) {
+            const t = document.querySelector('.toast.error');
+            result = { ok: true, outcome: 'error', text: t ? t.textContent : '(toast already dismissed)' };
+            break;
+        }
+        await new Promise(r => setTimeout(r, 100));
+    }
+    if (!result) {
+        let mockState = null;
+        try { mockState = await fetch('/__test__/state').then(r => r.json()); } catch (e) { mockState = { fetchError: String(e) }; }
+        result = {
+            ok: false,
+            reason: 'neither modal-closed (success) nor button-reenabled (failure) within 12s',
+            diagnostics: {
+                sendBtnDisabled: sendBtn.disabled,
+                sendBtnHTML: sendBtn.outerHTML.slice(0, 200),
+                sendRequestsSeen: (mockState && mockState.requests || []).filter(r => r.path === '/api/v1/webmail/send'),
+                totalRequestsLogged: (mockState && mockState.requests || []).length,
+            },
+        };
+    }
+    // Force-close the modal for the next phase (success already
+    // removed it; failure leaves it open).
+    const dialog = document.querySelector('.modal[role="dialog"][aria-label="Compose message"]');
+    const backdrop = dialog && dialog.closest('.modal-backdrop');
+    if (backdrop) backdrop.remove();
+    return result;
+})()
+`, true);
+}
+
+async function mockState() {
+    return evalExpr(`fetch('/__test__/state').then(r => r.json())`, true);
+}
+async function mockReset() {
+    return evalExpr(`fetch('/__test__/reset', { method: 'POST' }).then(r => r.json())`, true);
+}
+
+await mockReset();
+const send1 = await sendComposeMessage('r1-recipient@orvix.local', 'Smoke phase 11', 'exactly one message, one click');
+if (!send1 || !send1.ok || send1.outcome !== 'success') {
+    console.error('FAIL phase 11 — ordinary send did not succeed:', JSON.stringify(send1));
+    chromeProc.kill('SIGKILL');
+    process.exit(1);
+}
+const state1 = await mockState();
+const sendCalls1 = (state1.requests || []).filter(r => r.method === 'POST' && r.path === '/api/v1/webmail/send');
+if (sendCalls1.length !== 1) {
+    console.error(`FAIL phase 11 — expected exactly 1 POST /send, got ${sendCalls1.length}:`, JSON.stringify(sendCalls1));
+    chromeProc.kill('SIGKILL');
+    process.exit(1);
+}
+if (!sendCalls1[0].hasCsrfHeader || sendCalls1[0].csrfHeaderValue !== state1.csrfToken) {
+    console.error('FAIL phase 11 — send request did not carry the current CSRF token:', JSON.stringify(sendCalls1[0]), 'current token:', state1.csrfToken);
+    chromeProc.kill('SIGKILL');
+    process.exit(1);
+}
+if (state1.counters.messagesSent !== 1) {
+    console.error(`FAIL phase 11 — expected messagesSent=1, got ${state1.counters.messagesSent}`);
+    chromeProc.kill('SIGKILL');
+    process.exit(1);
+}
+console.log('PASS  phase 11 — one click produced exactly one /send request carrying the correct X-CSRF-Token, exactly one message queued');
+
+// ── 16. Phase 12 — CSRF pre-handler 403 causes exactly one retry,
+//        which succeeds; still exactly one message queued ────────
+//
+// The mock rotates its CSRF token out from under the client on the
+// NEXT mutation only (simulating a stale cached token), 403s that
+// one request with a CSRF-flavored message, then answers normally.
+// webmail.js's api()/sendMessageWithAttachments() must clear its
+// cache, refetch via GET /api/v1/csrf-token (now returning the
+// rotated value), and retry exactly once — never duplicating the
+// send.
+
+await mockReset();
+await evalExpr(`fetch('/__test__/mode', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ rotateOnNextMutation: true }) })`, true);
+const send2 = await sendComposeMessage('r1-recipient@orvix.local', 'Smoke phase 12', 'csrf rotation forces exactly one retry');
+if (!send2 || !send2.ok || send2.outcome !== 'success') {
+    console.error('FAIL phase 12 — send after a forced CSRF rotation did not eventually succeed:', JSON.stringify(send2));
+    chromeProc.kill('SIGKILL');
+    process.exit(1);
+}
+const state2 = await mockState();
+const sendCalls2 = (state2.requests || []).filter(r => r.method === 'POST' && r.path === '/api/v1/webmail/send');
+if (sendCalls2.length !== 2) {
+    console.error(`FAIL phase 12 — expected exactly 2 attempts (1 rejected + 1 retry), got ${sendCalls2.length}:`, JSON.stringify(sendCalls2));
+    chromeProc.kill('SIGKILL');
+    process.exit(1);
+}
+if (sendCalls2[1].csrfHeaderValue !== state2.csrfToken || sendCalls2[1].csrfHeaderValue === sendCalls2[0].csrfHeaderValue) {
+    console.error('FAIL phase 12 — the retry did not use a freshly refetched token:', JSON.stringify(sendCalls2));
+    chromeProc.kill('SIGKILL');
+    process.exit(1);
+}
+if (state2.counters.messagesSent !== 1) {
+    console.error(`FAIL phase 12 — a CSRF-triggered retry must still produce exactly one queued message, got ${state2.counters.messagesSent}`);
+    chromeProc.kill('SIGKILL');
+    process.exit(1);
+}
+console.log('PASS  phase 12 — CSRF pre-handler 403 caused exactly one retry with a freshly refetched token; exactly one message queued');
+
+// ── 17. Phase 13 — ordinary (non-CSRF) 403 is NEVER retried ───────
+//
+// A permission-denied 403 with no "csrf" in the message must fail
+// immediately with no automatic retry — retrying a genuinely
+// forbidden request is not a CSRF-bootstrap concern and doing so
+// blindly could duplicate a send if the handler had partially run.
+
+await mockReset();
+await evalExpr(`fetch('/__test__/mode', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ forceOrdinary403Once: true }) })`, true);
+const send3 = await sendComposeMessage('r1-recipient@orvix.local', 'Smoke phase 13', 'ordinary 403 must not retry');
+if (!send3 || !send3.ok || send3.outcome !== 'error') {
+    console.error('FAIL phase 13 — an ordinary 403 should surface as a failed send, got:', JSON.stringify(send3));
+    chromeProc.kill('SIGKILL');
+    process.exit(1);
+}
+const state3 = await mockState();
+const sendCalls3 = (state3.requests || []).filter(r => r.method === 'POST' && r.path === '/api/v1/webmail/send');
+if (sendCalls3.length !== 1) {
+    console.error(`FAIL phase 13 — an ordinary 403 must not be retried; expected exactly 1 attempt, got ${sendCalls3.length}`);
+    chromeProc.kill('SIGKILL');
+    process.exit(1);
+}
+if (state3.counters.messagesSent !== 0) {
+    console.error(`FAIL phase 13 — a rejected send must not queue a message, got messagesSent=${state3.counters.messagesSent}`);
+    chromeProc.kill('SIGKILL');
+    process.exit(1);
+}
+console.log('PASS  phase 13 — ordinary 403 surfaced as a failure with no automatic retry, no message queued');
+
+// ── 18. Phase 14 — 429 is NEVER auto-retried (no retry loop) ─────
+//
+// The mock answers 429 with Retry-After once. webmail.js has no
+// automatic retry-after-backoff loop for ordinary mutations (only
+// the single unambiguous-CSRF-403 retry exists) — a 429 must
+// surface as a failed send on the first attempt, not spin.
+
+await mockReset();
+await evalExpr(`fetch('/__test__/mode', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ force429Once: true }) })`, true);
+const send4 = await sendComposeMessage('r1-recipient@orvix.local', 'Smoke phase 14', '429 must not loop-retry');
+if (!send4 || !send4.ok || send4.outcome !== 'error') {
+    console.error('FAIL phase 14 — a 429 should surface as a failed send (no retry loop), got:', JSON.stringify(send4));
+    chromeProc.kill('SIGKILL');
+    process.exit(1);
+}
+const state4 = await mockState();
+const sendCalls4 = (state4.requests || []).filter(r => r.method === 'POST' && r.path === '/api/v1/webmail/send');
+if (sendCalls4.length !== 1) {
+    console.error(`FAIL phase 14 — a 429 must not be auto-retried; expected exactly 1 attempt, got ${sendCalls4.length}`);
+    chromeProc.kill('SIGKILL');
+    process.exit(1);
+}
+if (state4.counters.messagesSent !== 0) {
+    console.error(`FAIL phase 14 — a 429-rejected send must not queue a message, got messagesSent=${state4.counters.messagesSent}`);
+    chromeProc.kill('SIGKILL');
+    process.exit(1);
+}
+console.log('PASS  phase 14 — 429 surfaced as a single failed attempt honoring Retry-After without an automatic retry loop');
+
+// ── 19. Phase 15 — no secret material ever left the browser as a
+//        URL, and every send request logged by the mock used the
+//        header (never a query string) for the CSRF token ─────────
+//
+// Scans every request path the mock recorded across phases 11-14
+// for the CSRF token value and the login password used in Phase 2
+// — neither may ever appear in a URL. The console log is scanned
+// too, since a logged fetch call or error object containing a raw
+// token/password would be an equally real leak.
+
+const state5 = await mockState();
+const allPaths = (state5.requests || []).map(r => r.path);
+const secretsToCheck = [state5.csrfToken, 'pw-not-used-by-mock', 'BrandNewPw2026'];
+let leaked = [];
+for (const p of allPaths) {
+    for (const secret of secretsToCheck) {
+        if (secret && p.includes(secret)) leaked.push({ where: 'url', path: p, secret });
+    }
+}
+// consoleLog is the Node-side array the CDP Runtime.consoleAPICalled
+// listener has been appending to since the page first attached
+// (see section 4) — this is the real transcript, not a page-side
+// stand-in that could itself be wiped by a navigation.
+const consoleText = consoleLog.map((e) => e.text || '').join('\n');
+for (const secret of secretsToCheck) {
+    if (secret && consoleText.includes(secret)) {
+        leaked.push({ where: 'console', secret });
+    }
+}
+if (leaked.length > 0) {
+    console.error('FAIL phase 15 — secret material leaked into a URL or console log:', JSON.stringify(leaked));
+    chromeProc.kill('SIGKILL');
+    process.exit(1);
+}
+console.log('PASS  phase 15 — no CSRF token or password appeared in any request URL or console log across phases 11-14');
+
+// ── 20. Done ─────────────────────────────────────────────────
 
 chromeProc.kill('SIGKILL');
 server.close();

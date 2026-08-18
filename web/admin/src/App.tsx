@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { LayoutDashboard, Globe, Users, Shield, Zap, Activity, Settings, Server, Building, Mail, Monitor, HardDrive, HeartPulse, CreditCard, Keyboard, User, AtSign, BarChart, AlertTriangle, UserPlus, Send, LogOut, FileText, Bell, ShieldAlert } from "lucide-react";
+import { LayoutDashboard, Globe, Users, Shield, Zap, Activity, Settings, Server, Building, Mail, Monitor, HardDrive, HeartPulse, CreditCard, Keyboard, User, AtSign, BarChart, AlertTriangle, UserPlus, Send, LogOut, FileText, Bell, ShieldAlert, Upload, MessageSquare } from "lucide-react";
 import Dashboard from "./components/Dashboard";
 import Domains from "./components/Domains";
 import UsersPage from "./components/UsersPage";
@@ -16,6 +16,7 @@ import SignupPage from "./components/SignupPage";
 import LoginPage from "./components/LoginPage";
 import ForgotPasswordPage from "./components/ForgotPasswordPage";
 import ResetPasswordPage from "./components/ResetPasswordPage";
+import InvitationAcceptPage from "./components/InvitationAcceptPage";
 import AccountSettingsPage from "./components/AccountSettingsPage";
 import OrganizationOverviewPage from "./components/OrganizationOverviewPage";
 import InvitationsPage from "./components/InvitationsPage";
@@ -52,8 +53,11 @@ import PlatformRelaysPage from "./features/platform/relay/page";
 import PlatformSuppressionsPage from "./features/platform/suppressions/page";
 import PlatformDeliverabilityPage from "./features/platform/deliverability/page";
 import BulkMailboxesPage from "./features/platform/bulk-mailboxes/page";
+import BulkMailboxImportPage from "./features/platform/bulk-mailbox-import/page";
+import SupportInboxPage from "./features/platform/support-inbox/page";
 import { initCSRF, api } from "./api";
 import ThemeToggle from "./shared/theme/ThemeToggle";
+import PlatformShell from "./features/platform/shell/PlatformShell";
 
 type Tab = "dashboard" | "domains" | "users" | "firewall" | "modules" | "audit" | "settings"
   | "enterprise" | "mailboxes" | "organizations" | "health" | "platform-home"
@@ -62,12 +66,13 @@ type Tab = "dashboard" | "domains" | "users" | "firewall" | "modules" | "audit" 
   | "account-settings" | "org-overview" | "invitations" | "members-roles" | "ownership-transfer"
   | "suspension-deletion" | "customer-mailboxes" | "aliases" | "groups" | "usage-quotas"
   | "invoices" | "security" | "support" | "preferences"
-  | "login" | "signup" | "forgot-password" | "reset-password"
+  | "login" | "signup" | "forgot-password" | "reset-password" | "invitation-accept"
   | "platform-billing" | "platform-imports" | "automation-jobs" | "support-access"
   | "platform-incidents" | "platform-retention" | "platform-audit" | "platform-dr"
   | "platform-config-truth" | "platform-domains" | "platform-mailboxes"
   | "platform-aliases" | "platform-groups" | "platform-relays"
-  | "platform-suppressions" | "platform-deliverability" | "platform-bulk-mailboxes";
+  | "platform-suppressions" | "platform-deliverability" | "platform-bulk-mailboxes"
+  | "platform-bulk-mailbox-import" | "platform-support-inbox";
 
 // PORTAL-SEPARATION-PHASE1 / PLATFORM-SHELL: the explicit allow-list for
 // each portal. portal="platform" (Platform Super Admin, tenant_id=NULL)
@@ -120,16 +125,18 @@ type Tab = "dashboard" | "domains" | "users" | "firewall" | "modules" | "audit" 
 const PLATFORM_TAB_IDS: Tab[] = [
   "platform-home", "organizations", "platform-billing", "platform-imports", "automation-jobs",
   "platform-incidents", "platform-retention", "platform-dr", "enterprise", "mail-operations",
-  "reliability", "health", "platform-audit", "support-access",
+  "reliability", "health", "platform-audit", "platform-support-inbox", "support-access",
   "platform-security", "modules", "platform-configuration", "platform-config-truth",
   "platform-domains", "platform-mailboxes", "platform-aliases", "platform-groups",
   "platform-relays", "platform-suppressions", "platform-deliverability", "platform-bulk-mailboxes",
+  "platform-bulk-mailbox-import",
   "account-settings", "security", "preferences",
 ];
 const ORGANIZATION_TAB_IDS: Tab[] = [
   "dashboard", "domains", "org-overview", "customer-mailboxes", "aliases", "groups", "usage-quotas",
   "invitations", "members-roles", "ownership-transfer", "suspension-deletion", "invoices",
   "billing", "apikeys", "account-settings", "security", "preferences", "support",
+  "audit",
 ];
 
 const tabs: { id: Tab; label: string; icon: typeof LayoutDashboard; section?: string }[] = [
@@ -151,6 +158,7 @@ const tabs: { id: Tab; label: string; icon: typeof LayoutDashboard; section?: st
   { id: "platform-suppressions", label: "Suppressions", icon: Shield },
   { id: "platform-deliverability", label: "Deliverability", icon: BarChart },
   { id: "platform-bulk-mailboxes", label: "Bulk Mailboxes", icon: Users },
+  { id: "platform-bulk-mailbox-import", label: "Bulk Import", icon: Upload },
   { id: "platform-incidents", label: "Incidents", icon: AlertTriangle },
   { id: "platform-retention", label: "Retention", icon: FileText },
   { id: "platform-dr", label: "DR", icon: HardDrive },
@@ -159,6 +167,7 @@ const tabs: { id: Tab; label: string; icon: typeof LayoutDashboard; section?: st
   { id: "health", label: "Health", icon: HeartPulse },
   { id: "platform-audit", label: "Audit Log", icon: Activity, section: "Security" },
   { id: "support-access", label: "Support Access", icon: ShieldAlert },
+  { id: "platform-support-inbox", label: "Support Inbox", icon: MessageSquare },
   { id: "platform-security", label: "Security", icon: ShieldAlert },
   { id: "modules", label: "Modules", icon: Zap, section: "System" },
   { id: "platform-configuration", label: "Configuration", icon: Settings },
@@ -246,6 +255,7 @@ export default function App() {
     const tabMap: Record<string, Tab> = {
       "/": "dashboard", "/login": "login", "/signup": "signup",
       "/forgot-password": "forgot-password", "/reset-password": "reset-password",
+      "/invitations/accept": "invitation-accept",
     };
     setCurrentTab(tabMap[route] || "dashboard");
   };
@@ -255,6 +265,7 @@ export default function App() {
     if (path === "/admin/signup") return "signup";
     if (path === "/admin/forgot-password") return "forgot-password";
     if (path === "/admin/reset-password") return "reset-password";
+    if (path === "/admin/invitations/accept") return "invitation-accept";
     return "dashboard";
   };
 
@@ -277,6 +288,7 @@ export default function App() {
       case "signup": return <SignupPage />;
       case "forgot-password": return <ForgotPasswordPage />;
       case "reset-password": return <ResetPasswordPage />;
+      case "invitation-accept": return <InvitationAcceptPage />;
       default: return <LoginPage />;
     }
   }
@@ -339,6 +351,8 @@ export default function App() {
       case "platform-suppressions": return <PlatformSuppressionsPage />;
       case "platform-deliverability": return <PlatformDeliverabilityPage />;
       case "platform-bulk-mailboxes": return <BulkMailboxesPage />;
+      case "platform-bulk-mailbox-import": return <BulkMailboxImportPage />;
+      case "platform-support-inbox": return <SupportInboxPage />;
       case "health": return <SystemHealth />;
       case "mail-operations": return <MailOperationsPage />;
       case "reliability": return <ReliabilityPage />;
@@ -371,6 +385,26 @@ export default function App() {
       default: return portal === "platform" ? <OverviewPage email={userEmail} onNavigate={setCurrentTab} /> : <Dashboard />;
     }
   };
+
+  // PLATFORM-SHELL-REDESIGN: portal === "platform" renders the premium
+  // PlatformShell (sidebar + top bar with search/alerts/theme). The
+  // organization portal keeps its original layout below completely
+  // unchanged — this is a purely visual branch, not a new
+  // authorization path; filteredTabs/allowedTabIds/renderContent are
+  // exactly the same values either way.
+  if (portal === "platform") {
+    return (
+      <PlatformShell
+        tabs={filteredTabs}
+        currentTab={currentTab}
+        onSelectTab={setCurrentTab}
+        userEmail={userEmail}
+        onLogout={() => { api.logout().catch(() => {}); setAuthenticated(false); }}
+      >
+        {renderContent()}
+      </PlatformShell>
+    );
+  }
 
   return (
     <div className="flex h-screen overflow-hidden">

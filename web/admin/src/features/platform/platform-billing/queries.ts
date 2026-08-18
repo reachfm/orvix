@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { createAdjustment, getAdjustments, getBalance, getReconciliation } from "./api";
+import { createAdjustment, getAdjustments, getBalance, getBillingOverview, getReconciliation } from "./api";
 import type { CreateAdjustmentRequest } from "./contract";
 
 /**
@@ -45,6 +45,14 @@ export function useReconciliation(tenantId: number | null) {
   return useQuery({
     queryKey: billingKeys.reconciliation(tenantId ?? 0),
     queryFn: () => getReconciliation(tenantId as number),
+    enabled: tenantId !== null,
+  });
+}
+
+export function useBillingOverview(tenantId: number | null) {
+  return useQuery({
+    queryKey: ["platform-billing", "overview", tenantId ?? 0],
+    queryFn: () => getBillingOverview(tenantId as number),
     enabled: tenantId !== null,
   });
 }

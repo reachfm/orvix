@@ -267,6 +267,330 @@ components:
         offset:
           type: integer
 
+    # ── Enterprise Completion Pass surface (Phase 2 API Platform) ──
+
+    OrganizationCreateRequest:
+      type: object
+      required: [name, owner_email]
+      properties:
+        name:
+          type: string
+          description: Organization display name; slugified when slug is omitted
+        slug:
+          type: string
+          description: Unique tenant slug; derived from name when omitted
+        domain:
+          type: string
+          description: Organization domain; UNIQUE across tenants (at most one tenant may omit it)
+        owner_email:
+          type: string
+          format: email
+          description: REQUIRED — the initial owner is established via a real tenant_admin invitation/activation model (one-time token, hashed at rest), never an invented owner user
+        plan_id:
+          type: string
+          description: Billing plan id; defaults to the free plan (consistent with self-signup)
+        max_domains:
+          type: integer
+        max_mailboxes:
+          type: integer
+
+    OrganizationCreateResponse:
+      type: object
+      required: [organization, invitation, invite_token, warning]
+      properties:
+        organization:
+          $ref: '#/components/schemas/Organization'
+          description: >
+            Created in pending_activation state — active=false. The
+            organization becomes operational (active=true) ONLY when the
+            owner invitation is redeemed via POST /auth/invitations/accept.
+            An ownerless ACTIVE organization never exists.
+        invitation:
+          $ref: '#/components/schemas/Invitation'
+        invite_token:
+          type: string
+          description: One-time owner activation token. Returned ONLY in the live response — never in an idempotent replay, never persisted (only its SHA-256 hash is stored). Redeem at POST /auth/invitations/accept with a password
+        warning:
+          type: string
+
+    InvitationAcceptRequest:
+      type: object
+      required: [token, password]
+      properties:
+        token:
+          type: string
+          description: One-time invitation token (from POST /platform/organizations or POST /enterprise/invitations)
+        password:
+          type: string
+          description: New account password (>= 8 chars, upper/lower/digit — same policy as signup)
+        name:
+          type: string
+          description: Optional display name for the new member
+
+    InvitationAcceptResponse:
+      type: object
+      required: [status, user_id, organization_id, email, role, organization_active]
+      properties:
+        status:
+          type: string
+          enum: [accepted]
+        user_id:
+          type: integer
+        organization_id:
+          type: integer
+        email:
+          type: string
+          description: The invited email — always taken from the invitation row, never from the client
+        role:
+          type: string
+        organization_active:
+          type: boolean
+          description: True unless the organization carries a deliberate open suspension
+
+    AuditEntry:
+      type: object
+      description: Rich extended audit entry (orvix_audit row)
+      required: [id, actor, action, result, timestamp]
+      properties:
+        id:
+          type: integer
+          format: int64
+        actor:
+          type: string
+          example: "user:42"
+        actor_id:
+          type: integer
+        actor_role:
+          type: string
+        tenant_id:
+          type: integer
+        action:
+          type: string
+          example: organization.create
+        target:
+          type: string
+        target_id:
+          type: integer
+        result:
+          type: string
+          enum: [success, failure]
+        reason:
+          type: string
+        before:
+          type: string
+        after:
+          type: string
+        request_id:
+          type: string
+        ip:
+          type: string
+        user_agent:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+
+    AuditLogListResponse:
+      type: object
+      required: [entries, total, limit, offset]
+      properties:
+        entries:
+          type: array
+          items:
+            $ref: '#/components/schemas/AuditEntry'
+        total:
+          type: integer
+          description: Total matching rows (unbounded by this page)
+        limit:
+          type: integer
+        offset:
+          type: integer
+
+    PlatformGroup:
+      type: object
+      required: [id, tenant_id, name, member_count, created_at, updated_at]
+      properties:
+        id:
+          type: integer
+        tenant_id:
+          type: integer
+        name:
+          type: string
+        description:
+          type: string
+        member_count:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    GroupMemberAddRequest:
+      type: object
+      required: [email]
+      properties:
+        email:
+          type: string
+          format: email
+
+    BillingStateResponse:
+      type: object
+      required: [tenant_id, subscription, plan, usage, invoices, payment_provider]
+      properties:
+        tenant_id:
+          type: integer
+        subscription:
+          allOf:
+            - $ref: '#/components/schemas/Subscription'
+          description: Real subscription row; null when none exists
+        plan:
+          allOf:
+            - $ref: '#/components/schemas/Plan'
+          description: Real plan row; null when no subscription exists
+        usage:
+          allOf:
+            - $ref: '#/components/schemas/UsageRecord'
+          description: Live usage for the current period; null when unavailable
+        invoices:
+          type: array
+          items:
+            type: object
+          description: Real provider/webhook invoice rows; empty array when none — never fabricated paid invoices
+        payment_provider:
+          type: object
+          required: [provider, enabled, configured, note]
+          properties:
+            provider:
+              type: string
+            enabled:
+              type: boolean
+            configured:
+              type: boolean
+              description: Honest configuration read — false when no provider is wired or it is disabled
+            note:
+              type: string
+              example: "payment provider not configured"
+
+    PlatformBillingOverviewResponse:
+      allOf:
+        - $ref: '#/components/schemas/BillingStateResponse'
+        - type: object
+          required: [balance, adjustments, reconciliation]
+          properties:
+            balance:
+              allOf:
+                - type: object
+                  description: platformbilling.Balance — integer minor units + currency
+              description: Current ledger balance; null when the ledger store is unavailable
+            adjustments:
+              type: array
+              items:
+                type: object
+              description: Ledger adjustment history (never null — empty array when none)
+            reconciliation:
+              allOf:
+                - type: object
+                  description: Read-only reconciliation report; never auto-corrects
+              description: Reconciliation result; null when the ledger store is unavailable
+
+    InvitationResendResponse:
+      type: object
+      required: [invitation, token, warning]
+      properties:
+        invitation:
+          $ref: '#/components/schemas/Invitation'
+        token:
+          type: string
+          description: NEW one-time token; the previous token is invalidated (stored hash rotated)
+        warning:
+          type: string
+
+    # ── Support Tickets (FINAL-ENTERPRISE-COMPLETION) ───────────────
+    SupportTicket:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        reference_id:
+          type: string
+        tenant_id:
+          type: integer
+          format: int64
+        user_id:
+          type: integer
+          format: int64
+        user_email:
+          type: string
+          format: email
+        category:
+          type: string
+        subject:
+          type: string
+        description:
+          type: string
+        status:
+          type: string
+          enum:
+            [open, in_progress, waiting_for_customer, customer_replied, resolved, closed]
+        priority:
+          type: string
+          enum: [low, normal, high, urgent]
+        assigned_to_id:
+          type: [integer, "null"]
+          format: int64
+        last_reply_at:
+          type: [string, "null"]
+          format: date-time
+        last_reply_by:
+          type: [string, "null"]
+          enum: [tenant, platform, ""]
+        closed_at:
+          type: [string, "null"]
+          format: date-time
+        resolved_at:
+          type: [string, "null"]
+          format: date-time
+        delivery_status:
+          type: string
+          enum: [pending, sent, failed, disabled]
+        delivery_error:
+          type: [string, "null"]
+    SupportTicketMessage:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        ticket_id:
+          type: integer
+          format: int64
+        author_user_id:
+          type: integer
+          format: int64
+        author_email:
+          type: string
+          format: email
+        author_kind:
+          type: string
+          enum: [tenant, platform]
+        body:
+          type: string
+
 paths:
   /health:
     get:
@@ -313,6 +637,56 @@ paths:
                     type: string
         '401':
           description: Invalid credentials
+
+  /auth/invitations/accept:
+    post:
+      summary: Redeem an organization invitation (public, token-authenticated)
+      description: >
+        The PUBLIC activation path for invited members — most importantly
+        the PSA-created organization owner. The organization starts in
+        pending_activation (active=false) and this endpoint is the ONLY
+        transition to active. The invited email is taken from the
+        invitation row, never from the client; the password is
+        strength-checked and bcrypt-hashed (same policy as signup).
+        Platform identities can never be minted into tenant accounts; an
+        existing active user with the invited email is a stable CONFLICT.
+        The one-time token is consumed on success — a replay returns
+        INVALID_STATE_TRANSITION, never a duplicate user. The organization
+        is activated unless a deliberate suspension record exists.
+        Throttled per-IP like other credential-accepting endpoints.
+      tags: [Authentication]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InvitationAcceptRequest'
+      responses:
+        '200':
+          description: Invitation accepted (user created, organization activated)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InvitationAcceptResponse'
+        '400':
+          description: Invalid body / weak password (code VALIDATION_FAILED)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Unknown or malformed token (code NOT_FOUND)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Revoked/expired/already-used token (code INVALID_STATE_TRANSITION) or an account with the invited email already exists / platform identity (code CONFLICT)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
 
   /billing/plans:
     get:
@@ -369,6 +743,31 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Subscription'
+
+  /enterprise/billing/state:
+    get:
+      summary: Coherent commercial state for the authenticated tenant
+      description: >
+        Subscription, plan, billing period, live usage, invoice state,
+        and the payment/provider configuration. EVERY field is read from
+        the real billing/usage/invoice stores — no fabricated MRR, cards,
+        or paid invoices. payment_provider.configured=false is surfaced
+        honestly when no provider is wired; missing rows are null/empty.
+      operationId: getBillingState
+      tags: [Billing]
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Billing state envelope
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BillingStateResponse'
+        '401':
+          description: Authentication required
+        '403':
+          description: Tenant role required
 
   /enterprise/billing/usage:
     get:
@@ -495,6 +894,229 @@ paths:
           schema:
             type: integer
 
+  /enterprise/invitations:
+    get:
+      summary: List the tenant's invitations (pending/accepted/revoked)
+      tags: [Organizations]
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Invitation list (newest first)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Invitation'
+        '401':
+          description: Authentication required
+        '403':
+          description: Tenant role required
+    post:
+      summary: Invite a member to the organization
+      description: >
+        Creates a pending invitation with a one-time token (returned once,
+        hashed at rest, 7-day expiry). Role must be a canonical tenant
+        administration role (tenant_admin / tenant_operator /
+        tenant_support / tenant_readonly). A duplicate PENDING invitation
+        for the same email is a stable 409 CONFLICT — resend the existing
+        one to rotate its token instead. The invitee redeems the token at
+        POST /auth/invitations/accept.
+      tags: [Organizations]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, role]
+              properties:
+                email:
+                  type: string
+                  format: email
+                role:
+                  type: string
+                  enum: [tenant_admin, tenant_operator, tenant_support, tenant_readonly]
+      responses:
+        '201':
+          description: Invitation created (one-time token in this response only)
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                example: no-store
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [invitation, token]
+                properties:
+                  invitation:
+                    $ref: '#/components/schemas/Invitation'
+                  token:
+                    type: string
+                    description: One-time redemption token; shown only here, only its SHA-256 hash is stored
+        '400':
+          description: Invalid email or role (code VALIDATION_FAILED)
+        '401':
+          description: Authentication required
+        '403':
+          description: Tenant role / invitations.write required
+        '409':
+          description: A pending invitation already exists for this email (code CONFLICT)
+
+  /enterprise/invitations/{id}/revoke:
+    post:
+      summary: Revoke a pending invitation
+      description: >
+        Marks the invitation revoked; the token can no longer be redeemed.
+        Revoking an already-accepted invitation is a stable conflict.
+      tags: [Organizations]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Invitation revoked
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: revoked
+        '400':
+          description: Invalid invitation id (code VALIDATION_FAILED)
+        '401':
+          description: Authentication required
+        '403':
+          description: Tenant role / invitations.write required
+        '404':
+          description: Invitation not found in tenant (code NOT_FOUND)
+        '409':
+          description: Invitation already accepted (code INVALID_STATE_TRANSITION)
+
+  /enterprise/audit/logs:
+    get:
+      summary: The tenant's audit entries (canonical envelope)
+      description: >
+        Reads the SAME canonical store the Platform Audit page reads
+        (orvix_audit), scoped to the authenticated tenant, with the same
+        {entries, total, limit, offset} envelope and rich extended entry
+        fields — the tenant-facing audit page never sees different actions
+        than the platform page, nor a second incompatible model.
+        Filters: action, actor, target, result, since, until. Pagination:
+        limit/offset or page (limit clamps to 500).
+      tags: [Organizations]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: action
+          in: query
+          schema:
+            type: string
+        - name: actor
+          in: query
+          schema:
+            type: string
+        - name: target
+          in: query
+          schema:
+            type: string
+        - name: result
+          in: query
+          schema:
+            type: string
+            enum: [success, failure]
+        - name: since
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: until
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 100
+            maximum: 500
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+        - name: page
+          in: query
+          schema:
+            type: integer
+            description: 1-based page alias; offset = (page - 1) * limit
+      responses:
+        '200':
+          description: Canonical audit envelope (tenant-scoped)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditLogListResponse'
+        '401':
+          description: Authentication required
+        '403':
+          description: Tenant role required
+
+  /enterprise/invitations/{id}/resend:
+    post:
+      summary: Re-issue (rotate) a pending invitation's one-time token
+      description: >
+        The new token replaces the previous one (stored hash rotated), so
+        any prior copy is invalidated. Only pending invitations can be
+        re-issued; accepted/revoked/expired ones are a stable 409
+        INVALID_STATE_TRANSITION. The one-time token response carries
+        Cache-Control: no-store.
+      operationId: resendInvitation
+      tags: [Organizations]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: New one-time token issued
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                example: no-store
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InvitationResendResponse'
+        '400':
+          description: Invalid invitation id (code VALIDATION_FAILED)
+        '401':
+          description: Authentication required
+        '403':
+          description: Tenant role / invitations.write required
+        '404':
+          description: Invitation not found in tenant (code NOT_FOUND)
+        '409':
+          description: Invitation is not pending (code INVALID_STATE_TRANSITION)
+
   /admin/queue/summary:
     get:
       summary: Queue metrics
@@ -536,6 +1158,331 @@ paths:
       tags: [Platform]
       security:
         - bearerAuth: []
+      parameters:
+        - name: q
+          in: query
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+        - name: offset
+          in: query
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Paginated organization list
+        '401':
+          description: Authentication required
+        '403':
+          description: Platform role required
+    post:
+      summary: Create an organization (Platform Super Admin)
+      description: >
+        PSA-initiated organization creation with the owner-required
+        invitation/activation model: owner_email is REQUIRED and the
+        initial tenant_admin owner is established via a one-time
+        invitation token (hashed at rest, 7-day expiry) — never an
+        invented owner. The organization is created in pending_activation
+        state (active=false) and becomes operational ONLY when the owner
+        redeems the token at POST /auth/invitations/accept — an ownerless
+        ACTIVE organization never exists. Org row + owner invitation +
+        audit commit in one transaction; subscription initialized
+        consistently with self-signup (free plan default).
+        Idempotency-Key is required; a replay returns the stored
+        (token-free) result with X-Idempotency-Replay: true. The live
+        response carries Cache-Control: no-store.
+      tags: [Platform]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OrganizationCreateRequest'
+      responses:
+        '201':
+          description: Organization created (one-time invite_token shown ONLY here)
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                example: no-store
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrganizationCreateResponse'
+        '400':
+          description: Missing owner_email / invalid owner_email / missing Idempotency-Key (code VALIDATION_FAILED)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Authentication required
+        '403':
+          description: Platform role required (or CSRF missing)
+        '409':
+          description: Duplicate slug or duplicate domain (code CONFLICT), or idempotency-key reuse with a different body (code IDEMPOTENCY_KEY_REUSE_MISMATCH)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Platform admin service unavailable (code UNAVAILABLE)
+
+  /platform/billing/tenants/{tenant_id}/overview:
+    get:
+      summary: Coherent Platform Billing control-plane view for one tenant
+      description: >
+        Subscription + plan + billing period, live usage, invoice state,
+        account balance, ledger adjustments, reconciliation, and honest
+        payment/provider configuration (configured:false + note when no
+        provider is wired — never MRR/cards/paid-invoice fabrication).
+        Missing rows are null/empty, never placeholders.
+      operationId: getPlatformBillingOverview
+      tags: [Platform]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/tenantId'
+      responses:
+        '200':
+          description: Billing overview envelope
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlatformBillingOverviewResponse'
+        '400':
+          description: Invalid tenant id (code VALIDATION_FAILED)
+        '401':
+          description: Authentication required
+        '403':
+          description: Platform role required
+
+  /platform/domains/{tenant_id}/{id}/dkim/revoke:
+    post:
+      summary: Revoke a domain's DKIM configuration (Platform Super Admin)
+      description: >
+        Disables the domain's DKIM config through the same transactional
+        revoke path the tenant console uses (config disabled, domain DKIM
+        state cleared, DKIM selector-history entry + audit). Never exposes
+        key material; never mutates public DNS. Tenant-scoped (cross-tenant
+        ids are 404).
+      operationId: revokePlatformDomainDKIM
+      tags: [Platform]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/tenantId'
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: DKIM revoked
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, domain_id, revoked]
+                properties:
+                  status: { type: string, example: ok }
+                  domain_id: { type: integer }
+                  revoked: { type: boolean, example: true }
+        '400':
+          description: Invalid tenant or domain id (code VALIDATION_FAILED)
+        '401':
+          description: Authentication required
+        '403':
+          description: Platform role / PermDomainsWrite required
+        '404':
+          description: Domain not found in tenant (code NOT_FOUND)
+        '409':
+          description: DKIM not configured for this domain (code CONFLICT)
+
+  /platform/groups/{tenant_id}:
+    post:
+      summary: Create a tenant group (Platform Super Admin)
+      description: >
+        Provisions a group in the SAME coremail_groups table the tenant
+        self-service Groups page uses. Name required (<= 64 chars);
+        duplicate (tenant_id, name) is a stable 409. Audited.
+      operationId: createPlatformGroup
+      tags: [Platform]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/tenantId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, maxLength: 64 }
+                description: { type: string, maxLength: 500 }
+      responses:
+        '201':
+          description: Group created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlatformGroup'
+        '400':
+          description: Missing/invalid name (code VALIDATION_FAILED)
+        '401':
+          description: Authentication required
+        '403':
+          description: Platform role / PermGroupsWrite required
+        '404':
+          description: Tenant not found (code NOT_FOUND)
+        '409':
+          description: Duplicate group name (code CONFLICT)
+
+  /platform/groups/{tenant_id}/{id}:
+    delete:
+      summary: Soft-delete a tenant group (Platform Super Admin)
+      description: >
+        deleted_at tombstone, audited. Destructive: requires the typed
+        X-Confirm header DELETE-GROUP-<id>.
+      operationId: deletePlatformGroup
+      tags: [Platform]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/tenantId'
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+        - name: X-Confirm
+          in: header
+          required: true
+          schema:
+            type: string
+            example: DELETE-GROUP-7
+      responses:
+        '200':
+          description: Group soft-deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, id]
+                properties:
+                  status: { type: string, example: ok }
+                  id: { type: integer }
+        '401':
+          description: Authentication required
+        '403':
+          description: Platform role / PermGroupsWrite required
+        '404':
+          description: Group not found in tenant (code NOT_FOUND)
+        '428':
+          description: Typed confirmation required (code PRECONDITION_FAILED)
+
+  /platform/groups/{tenant_id}/{id}/members:
+    post:
+      summary: Add a member to a tenant group (Platform Super Admin)
+      description: >
+        Validated member email; duplicate (group_id, email) is a stable
+        409; membership is scoped to the tenant through the group
+        ownership predicate. Audited.
+      operationId: addPlatformGroupMember
+      tags: [Platform]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/tenantId'
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GroupMemberAddRequest'
+      responses:
+        '201':
+          description: Member added (email normalized)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, group_id, email]
+                properties:
+                  status: { type: string, example: ok }
+                  group_id: { type: integer }
+                  email: { type: string, format: email }
+        '400':
+          description: Missing/invalid email (code VALIDATION_FAILED)
+        '401':
+          description: Authentication required
+        '403':
+          description: Platform role / PermGroupsWrite required
+        '404':
+          description: Group not found in tenant (code NOT_FOUND)
+        '409':
+          description: Email already a member (code CONFLICT)
+
+  /platform/groups/{tenant_id}/{id}/members/{member_id}:
+    delete:
+      summary: Remove a member from a tenant group (Platform Super Admin)
+      description: >
+        The member row is scoped through the group's tenant ownership, so
+        a cross-tenant member id can never be removed. Audited.
+      operationId: removePlatformGroupMember
+      tags: [Platform]
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/tenantId'
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+        - name: member_id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Member removed
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, group_id, member_id]
+                properties:
+                  status: { type: string, example: ok }
+                  group_id: { type: integer }
+                  member_id: { type: integer }
+        '401':
+          description: Authentication required
+        '403':
+          description: Platform role / PermGroupsWrite required
+        '404':
+          description: Group member not found (code NOT_FOUND)
 
   /platform/relays:
     get:
@@ -1291,3 +2238,493 @@ paths:
           description: Per-item results
         '400':
           description: Malformed body or unknown action
+
+  /audit/logs:
+    get:
+      summary: List platform audit entries (filtered, paginated envelope)
+      description: >
+        Returns {entries, total, limit, offset} with rich extended
+        entries (actor_id, actor_role, tenant_id, ip, user_agent, …).
+        Filters: action, actor (numeric user id or 'user:<id>' prefix),
+        tenant_id, result. Pagination: limit/offset or page/page_size
+        (limit clamps to 500).
+      operationId: listAuditLogs
+      tags: [Security]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: action
+          in: query
+          schema:
+            type: string
+        - name: actor
+          in: query
+          schema:
+            type: string
+        - name: tenant_id
+          in: query
+          schema:
+            type: integer
+        - name: result
+          in: query
+          schema:
+            type: string
+            enum: [success, failure]
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 25
+            maximum: 500
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+        - name: page
+          in: query
+          schema:
+            type: integer
+            description: 1-based page alias; offset = (page - 1) * limit
+        - name: page_size
+          in: query
+          schema:
+            type: integer
+            description: Alias for limit
+      responses:
+        '200':
+          description: Paginated audit envelope
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditLogListResponse'
+        '401':
+          description: Authentication required
+        '403':
+          description: Platform role required
+
+  /audit/logs/export:
+    get:
+      summary: Export filtered audit entries (JSON or CSV stream)
+      description: >
+        Reads the SAME canonical store as GET /audit/logs and
+        GET /audit/logs/{id} (orvix_audit), so an export can never
+        disagree with the platform audit page — entries carry the rich
+        extended fields (actor_id, actor_role, tenant_id, …), never a
+        lossy projection.
+      tags: [Security]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: format
+          in: query
+          schema:
+            type: string
+            enum: [json, csv]
+            default: json
+        - name: action
+          in: query
+          schema:
+            type: string
+        - name: actor
+          in: query
+          schema:
+            type: string
+        - name: tenant_id
+          in: query
+          schema:
+            type: integer
+        - name: result
+          in: query
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Export stream (application/json or text/csv attachment)
+        '400':
+          description: Invalid format
+        '401':
+          description: Authentication required
+        '403':
+          description: Platform role required
+
+  /audit/logs/{id}:
+    get:
+      summary: One extended audit entry
+      operationId: getAuditEntry
+      tags: [Security]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        '200':
+          description: Extended audit entry (same contract as list rows)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditEntry'
+        '400':
+          description: Invalid id (code VALIDATION_FAILED)
+        '401':
+          description: Authentication required
+        '403':
+          description: Platform role required
+        '404':
+          description: Entry not found (code NOT_FOUND)
+
+  # ── Support Tickets (FINAL-ENTERPRISE-COMPLETION) ───────────────
+  # Shared between tenant-facing Support page (own tickets only) and
+  # Platform Support Inbox (every ticket across every tenant). The
+  # round-trip invariant is: TenantAdmin creates Ticket X →
+  # POST /account/support-requests persists + returns X → TenantAdmin
+  # can read X via GET /account/support-requests/{ref} → Platform
+  # Support Inbox reads the SAME X via GET
+  # /platform/support/tickets/{ref}; Tenant B cannot see X.
+
+  /account/support-requests:
+    post:
+      summary: Create a support ticket (tenant-scoped to the caller's tenant)
+      operationId: submitSupportRequest
+      tags: [Support]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [category, subject, description]
+              properties:
+                category:
+                  type: string
+                  enum: [general, billing, technical, security]
+                subject:
+                  type: string
+                description:
+                  type: string
+                priority:
+                  type: string
+                  enum: [low, normal, high, urgent]
+                  default: normal
+      responses:
+        '201':
+          description: Ticket persisted; full ticket row returned (reference_id, status, delivery_status)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SupportTicket'
+        '400':
+          description: Missing fields (code VALIDATION_ERROR)
+        '401':
+          description: Authentication required
+        '429':
+          description: Rate-limited (5/10min per user)
+    get:
+      summary: List the caller's own support tickets (tenant-scoped)
+      operationId: listOwnSupportRequests
+      tags: [Support]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+            maximum: 200
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+        - name: status
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Paginated envelope
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  entries:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/SupportTicket'
+                  total:
+                    type: integer
+                  limit:
+                    type: integer
+                  offset:
+                    type: integer
+        '401':
+          description: Authentication required
+
+  /account/support-requests/{ref}:
+    get:
+      summary: Read own ticket detail + reply thread
+      operationId: getOwnSupportRequest
+      tags: [Support]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: ref
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Ticket + message thread
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ticket:
+                    $ref: '#/components/schemas/SupportTicket'
+                  messages:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/SupportTicketMessage'
+        '401':
+          description: Authentication required
+        '404':
+          description: Ticket not found (code NOT_FOUND)
+
+  /account/support-requests/{ref}/reply:
+    post:
+      summary: Reply on own ticket (tenant author)
+      operationId: replyOnOwnSupportRequest
+      tags: [Support]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: ref
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [body]
+              properties:
+                body:
+                  type: string
+      responses:
+        '201':
+          description: Reply persisted; ticket status transitioned
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    $ref: '#/components/schemas/SupportTicketMessage'
+        '400':
+          description: Missing body (code VALIDATION_ERROR)
+        '401':
+          description: Authentication required
+        '404':
+          description: Ticket not found (code NOT_FOUND)
+        '409':
+          description: Ticket is closed or resolved (code INVALID_STATE_TRANSITION)
+
+  /platform/support/tickets:
+    get:
+      summary: List every support ticket across every tenant (Platform Support Inbox)
+      operationId: listPlatformSupportTickets
+      tags: [Platform Support]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+            maximum: 200
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+        - name: status
+          in: query
+          schema:
+            type: string
+        - name: category
+          in: query
+          schema:
+            type: string
+        - name: tenant_id
+          in: query
+          schema:
+            type: integer
+        - name: search
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Paginated envelope
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  entries:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/SupportTicket'
+                  total:
+                    type: integer
+                  limit:
+                    type: integer
+                  offset:
+                    type: integer
+        '401':
+          description: Authentication required
+        '403':
+          description: Platform role required (platform_super_admin / superadmin)
+
+  /platform/support/tickets/{ref}:
+    get:
+      summary: Read any ticket detail + reply thread
+      operationId: getPlatformSupportTicket
+      tags: [Platform Support]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: ref
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Ticket + message thread
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ticket:
+                    $ref: '#/components/schemas/SupportTicket'
+                  messages:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/SupportTicketMessage'
+        '401':
+          description: Authentication required
+        '403':
+          description: Platform role required
+        '404':
+          description: Ticket not found (code NOT_FOUND)
+
+  /platform/support/tickets/{ref}/reply:
+    post:
+      summary: Platform operator reply on any ticket
+      operationId: replyOnPlatformSupportTicket
+      tags: [Platform Support]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: ref
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [body]
+              properties:
+                body:
+                  type: string
+      responses:
+        '201':
+          description: Reply persisted; ticket status transitioned
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    $ref: '#/components/schemas/SupportTicketMessage'
+        '400':
+          description: Missing body (code VALIDATION_ERROR)
+        '401':
+          description: Authentication required
+        '403':
+          description: Platform role required
+        '404':
+          description: Ticket not found (code NOT_FOUND)
+        '409':
+          description: Ticket is closed (code INVALID_STATE_TRANSITION)
+
+  /platform/support/tickets/{ref}/status:
+    post:
+      summary: Guarded status transition (canonical graph)
+      operationId: updatePlatformSupportTicketStatus
+      tags: [Platform Support]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: ref
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status:
+                  type: string
+                  enum:
+                    [open, in_progress, waiting_for_customer, customer_replied, resolved, closed]
+      responses:
+        '200':
+          description: Updated ticket
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ticket:
+                    $ref: '#/components/schemas/SupportTicket'
+        '400':
+          description: Invalid status (code VALIDATION_ERROR)
+        '401':
+          description: Authentication required
+        '403':
+          description: Platform role required
+        '404':
+          description: Ticket not found (code NOT_FOUND)
+        '409':
+          description: Transition not allowed from current status (code INVALID_STATE_TRANSITION)

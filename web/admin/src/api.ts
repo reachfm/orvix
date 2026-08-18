@@ -1,7 +1,35 @@
 const BASE = "/api/v1";
 
+// REQUEST_TIMEOUT_MS bounds every request this client makes. Without it, a
+// backend that accepts the connection but never answers (e.g. a stuck DB
+// transaction starving the connection pool — the 2026-08 production
+// incident where admin login hung forever on "Signing in...") leaves the
+// UI in a silent spinner state with no way for the user to know anything
+// is wrong. AbortController turns that into a visible, retriable error
+// after a bounded wait.
+const REQUEST_TIMEOUT_MS = 15000;
+
 let csrfTokenValue = "";
 let csrfTokenPromise: Promise<string> | null = null;
+
+async function fetchWithTimeout(input: string, init?: RequestInit): Promise<Response> {
+  const controller = new AbortController();
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, REQUEST_TIMEOUT_MS);
+  try {
+    return await fetch(input, { ...init, signal: controller.signal });
+  } catch (err) {
+    if (timedOut) {
+      throw new ApiError("REQUEST_TIMEOUT", "The server took too long to respond. Please try again.", 0);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 /**
  * ApiError carries the stable machine-readable `code` from the typed backend
@@ -97,7 +125,7 @@ export async function initCSRF(): Promise<void> {
     return;
   }
   csrfTokenPromise = (async () => {
-    const res = await fetch(`${BASE}/csrf-token`, { credentials: "include" });
+    const res = await fetchWithTimeout(`${BASE}/csrf-token`, { credentials: "include" });
     if (!res.ok) {
       csrfTokenPromise = null;
       throw new Error(`CSRF token fetch failed: ${res.status}`);
@@ -125,6 +153,8 @@ export function resetCSRFToken(): void {
 interface RequestOptions extends RequestInit {
   skipCSRF?: boolean;
   _csrfRetried?: boolean;
+  /** When true, resolves with the raw Response body as a Blob instead of parsing JSON — for file downloads (e.g. the bulk mailbox template). */
+  responseType?: "json" | "blob";
 }
 
 // Exported so feature modules under src/features/**/api.ts can perform
@@ -140,9 +170,14 @@ export async function request<T>(path: string, options?: RequestOptions): Promis
     await initCSRF();
   }
 
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-  };
+  const isFormData = typeof FormData !== "undefined" && options?.body instanceof FormData;
+
+  const headers: Record<string, string> = {};
+  if (!isFormData) {
+    // multipart/form-data requires a browser-generated boundary in the
+    // Content-Type header — never set it manually for a FormData body.
+    headers["Content-Type"] = "application/json";
+  }
 
   if (options?.headers) {
     const incoming = options.headers as Record<string, string>;
@@ -155,10 +190,10 @@ export async function request<T>(path: string, options?: RequestOptions): Promis
     headers["X-CSRF-Token"] = csrfTokenValue;
   }
 
-  const res = await fetch(`${BASE}${path}`, {
+  const res = await fetchWithTimeout(`${BASE}${path}`, {
+    ...options,
     credentials: "include",
     headers,
-    ...options,
   });
 
   if (!res.ok) {
@@ -181,6 +216,10 @@ export async function request<T>(path: string, options?: RequestOptions): Promis
     return undefined as unknown as T;
   }
 
+  if (options?.responseType === "blob") {
+    return (await res.blob()) as unknown as T;
+  }
+
   return res.json();
 }
 
@@ -193,6 +232,19 @@ export const api = {
   getUsage: () => request<any>("/enterprise/billing/usage"),
   checkQuota: (resource: string, used: number) =>
     request<any>(`/enterprise/billing/quota?resource=${resource}&used=${used}`),
+  // GET /enterprise/billing/state — coherent real subscription/plan/
+  // usage/invoice summary with HONEST payment-provider configuration
+  // state (configured:false + "provider not configured" when no
+  // provider is wired; never fabricated cards/MRR/paid invoices).
+  getBillingState: () =>
+    request<{
+      tenant_id: number;
+      subscription: any | null;
+      plan: any | null;
+      usage: any | null;
+      invoices: any[];
+      payment_provider: { provider: string; enabled: boolean; configured: boolean; note: string };
+    }>("/enterprise/billing/state"),
 
   // Customer domains
   listDomains: () => request<any>("/customer/domains"),
@@ -260,8 +312,10 @@ export const api = {
 
   // Invitations
   listInvitations: () => request<any[]>("/enterprise/invitations"),
+  // CreateInvitation returns {"invitation": ..., "token": ...} — the
+  // one-time token is shown exactly once by the caller (InvitationsPage).
   createInvitation: (data: any) =>
-    request("/enterprise/invitations", { method: "POST", body: JSON.stringify(data) }),
+    request<{ invitation: any; token: string }>("/enterprise/invitations", { method: "POST", body: JSON.stringify(data) }),
   revokeInvitation: (id: number) =>
     request(`/enterprise/invitations/${id}/revoke`, { method: "POST" }),
 
@@ -300,14 +354,55 @@ export const api = {
   getProfile: () => request<any>("/account/profile"),
   updateProfile: (data: any) =>
     request("/account/profile", { method: "PATCH", body: JSON.stringify(data) }),
-  submitSupportRequest: (data: { category: string; subject: string; message: string }) =>
+  submitSupportRequest: (data: {
+    category: string;
+    subject: string;
+    description?: string;
+    message?: string;
+    priority?: string;
+  }) =>
     request<any>("/account/support-requests", { method: "POST", body: JSON.stringify(data) }),
+  // Tenant-side support ticket history (own tickets).
+  listOwnSupportRequests: (params: { limit?: number; offset?: number; status?: string } = {}) => {
+    const qs = new URLSearchParams();
+    if (params.limit) qs.set("limit", String(params.limit));
+    if (params.offset) qs.set("offset", String(params.offset));
+    if (params.status) qs.set("status", params.status);
+    const tail = qs.toString();
+    return request<{ entries: any[]; total: number; limit: number; offset: number }>(
+      `/account/support-requests${tail ? `?${tail}` : ""}`,
+    );
+  },
+  getOwnSupportRequest: (ref: string) =>
+    request<{ ticket: any; messages: any[] }>(`/account/support-requests/${encodeURIComponent(ref)}`),
+  replyOnOwnSupportRequest: (ref: string, body: string) =>
+    request<{ message: any }>(
+      `/account/support-requests/${encodeURIComponent(ref)}/reply`,
+      { method: "POST", body: JSON.stringify({ body }) },
+    ),
   changePassword: (data: any) =>
     request("/auth/change-password", { method: "POST", body: JSON.stringify(data) }),
 
   // Signup
   signup: (data: any) =>
     request("/auth/signup", { method: "POST", body: JSON.stringify(data) }),
+
+  // Signup — email OTP verification flow (Phase D/E)
+  signupStart: (data: { email: string; password: string; name?: string }) =>
+    request<{ message: string; email: string }>("/auth/signup/start", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+  signupResend: (email: string) =>
+    request<{ message: string }>("/auth/signup/resend", {
+      method: "POST",
+      body: JSON.stringify({ email }),
+    }),
+  signupVerify: (email: string, code: string) =>
+    request<{ access_token: string; access_expires_in: number; refresh_expires_in: number }>(
+      "/auth/signup/verify",
+      { method: "POST", body: JSON.stringify({ email, code }) },
+    ),
 
   // Dashboard
   getDashboard: () => request<any>("/enterprise/dashboard"),
@@ -395,8 +490,40 @@ export const api = {
   listInvoices: () => request<any[]>("/enterprise/billing/invoices"),
   getInvoice: (id: number) => request<any>(`/enterprise/billing/invoices/${id}`),
 
-  // Audit logs
-  listAuditLogs: () => request<any[]>("/enterprise/audit/logs"),
+  // Enterprise API keys (tenant-scoped, /enterprise/api-keys)
+  listEnterpriseApiKeys: () => request<any[]>("/enterprise/api-keys"),
+  createEnterpriseApiKey: (data: { name: string; scopes: string[] }) =>
+    request("/enterprise/api-keys", { method: "POST", body: JSON.stringify(data) }),
+  rotateEnterpriseApiKey: (id: number, scopes?: string[]) =>
+    request(`/enterprise/api-keys/${id}/rotate`, { method: "POST", body: JSON.stringify({ scopes: scopes || [] }) }),
+  deleteEnterpriseApiKey: (id: number) =>
+    request(`/enterprise/api-keys/${id}`, { method: "DELETE" }),
+
+  // Audit logs — the tenant-facing audit page reads the CANONICAL
+  // {entries, total, limit, offset} envelope (same store + contract as the
+  // platform audit page). The wrapper unwraps .entries so existing
+  // consumers keep receiving the entry array; new UI should use
+  // features/platform/audit/api.ts for the full paginated envelope.
+  listAuditLogs: async (): Promise<any[]> => {
+    const data = await request<any>("/enterprise/audit/logs");
+    if (Array.isArray(data)) return data; // legacy bare-array fallback
+    return data?.entries ?? [];
+  },
+  // Full paginated envelope for the tenant audit page (filters:
+  // action/actor/result + page/page_size, same contract as the
+  // platform audit page).
+  listAuditLogsEnvelope: (params: { page?: number; page_size?: number; action?: string; actor?: string; result?: string } = {}) => {
+    const p = new URLSearchParams();
+    if (params.page) p.set("page", String(params.page));
+    if (params.page_size) p.set("page_size", String(params.page_size));
+    if (params.action) p.set("action", params.action);
+    if (params.actor) p.set("actor", params.actor);
+    if (params.result) p.set("result", params.result);
+    const qs = p.toString();
+    return request<{ entries: any[]; total: number; limit: number; offset: number }>(
+      `/enterprise/audit/logs${qs ? `?${qs}` : ""}`,
+    );
+  },
 
   // Sessions
   listSessions: () => request<any>("/account/sessions"),
@@ -419,4 +546,27 @@ export const api = {
     request("/auth/forgot-password", { method: "POST", body: JSON.stringify({ email }) }),
   resetPassword: (token: string, password: string) =>
     request("/auth/reset-password", { method: "POST", body: JSON.stringify({ token, password }) }),
+
+  // Public invitation acceptance — the ONLY activation path for a
+  // PSA-created organization owner (POST /auth/invitations/accept).
+  // The email comes from the invitation row server-side, never from
+  // this payload. Stable codes: 404 NOT_FOUND (unknown token),
+  // 409 INVALID_STATE_TRANSITION (revoked/expired/already used),
+  // 409 CONFLICT (an account already exists for the invited email).
+  acceptInvitation: (data: { token: string; password: string; name?: string }) =>
+    request<{
+      status: string;
+      user_id: number;
+      organization_id: number;
+      email: string;
+      role: string;
+      organization_active: boolean;
+    }>("/auth/invitations/accept", { method: "POST", body: JSON.stringify(data) }),
+
+  // Enterprise invitations — resend rotates the one-time token; the new
+  // token is returned exactly once and replaces any prior copy.
+  resendInvitation: (id: number) =>
+    request<{ invitation: any; token: string; warning: string }>(`/enterprise/invitations/${id}/resend`, {
+      method: "POST",
+    }),
 };

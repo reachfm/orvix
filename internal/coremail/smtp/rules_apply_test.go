@@ -113,6 +113,8 @@ var smtpTestMailboxesDDL = []string{
 		auth_scheme TEXT NOT NULL DEFAULT 'argon2id',
 		status TEXT NOT NULL DEFAULT 'active',
 		quota_mb INTEGER NOT NULL DEFAULT 1024,
+		mail_access_mode TEXT NOT NULL DEFAULT 'inherit',
+		version INTEGER NOT NULL DEFAULT 1,
 		created_at DATETIME NOT NULL,
 		updated_at DATETIME NOT NULL,
 		deleted_at DATETIME
@@ -207,8 +209,9 @@ func TestApplyRulesRunner_MessageDurable_OnRunnerPanic(t *testing.T) {
 	msg, rfc822 := storeInboundMessage(t, store, 1, 1, 1,
 		"alice@example.com", "Carol <carol@external.test>")
 
-	rcpt := resolvedRecipient{
-		Email:     "alice@example.com",
+	rcpt := canonicalRecipient{
+		Presented: "alice@example.com",
+		Target:    "alice@example.com",
 		MailboxID: 1,
 		DomainID:  1,
 		TenantID:  1,
@@ -236,7 +239,7 @@ func TestApplyRulesRunner_MessageDurable_OnRunnerError(t *testing.T) {
 	})
 	msg, rfc822 := storeInboundMessage(t, store, 1, 1, 1,
 		"alice@example.com", "Carol <carol@external.test>")
-	rcpt := resolvedRecipient{Email: "alice@example.com", MailboxID: 1, DomainID: 1, TenantID: 1, Domain: "example.com"}
+	rcpt := canonicalRecipient{Target: "alice@example.com", MailboxID: 1, DomainID: 1, TenantID: 1, Domain: "example.com"}
 	recv.applyRulesRunner(context.Background(), rcpt, msg, rfc822)
 	if got := countMessagesInFolder(t, db, msg.MessageID, "INBOX"); got != 1 {
 		t.Fatalf("expected original in INBOX after runner error, got %d", got)
@@ -257,7 +260,7 @@ func TestApplyRulesRunner_MoveAppliedOnHealthyRun(t *testing.T) {
 	})
 	msg, rfc822 := storeInboundMessage(t, store, 1, 1, 1,
 		"alice@example.com", "Carol <carol@external.test>")
-	rcpt := resolvedRecipient{Email: "alice@example.com", MailboxID: 1, DomainID: 1, TenantID: 1, Domain: "example.com"}
+	rcpt := canonicalRecipient{Target: "alice@example.com", MailboxID: 1, DomainID: 1, TenantID: 1, Domain: "example.com"}
 	recv.applyRulesRunner(context.Background(), rcpt, msg, rfc822)
 	if got := countMessagesInFolder(t, db, msg.MessageID, "INBOX"); got != 0 {
 		t.Fatalf("expected message moved out of INBOX, got %d in INBOX", got)
@@ -279,7 +282,7 @@ func TestApplyRulesRunner_SetFlagAppliedOnHealthyRun(t *testing.T) {
 	})
 	msg, rfc822 := storeInboundMessage(t, store, 1, 1, 1,
 		"alice@example.com", "Carol <carol@external.test>")
-	rcpt := resolvedRecipient{Email: "alice@example.com", MailboxID: 1, DomainID: 1, TenantID: 1, Domain: "example.com"}
+	rcpt := canonicalRecipient{Target: "alice@example.com", MailboxID: 1, DomainID: 1, TenantID: 1, Domain: "example.com"}
 	recv.applyRulesRunner(context.Background(), rcpt, msg, rfc822)
 	got, err := store.Messages.GetByID(context.Background(), msg.ID, nil)
 	if err != nil {
@@ -321,7 +324,7 @@ func TestApplyRulesRunner_NilRunnerIsSafe(t *testing.T) {
 
 	msg, rfc822 := storeInboundMessage(t, store, 1, 1, 1,
 		"alice@example.com", "Carol <carol@external.test>")
-	rcpt := resolvedRecipient{Email: "alice@example.com", MailboxID: 1, DomainID: 1, TenantID: 1, Domain: "example.com"}
+	rcpt := canonicalRecipient{Target: "alice@example.com", MailboxID: 1, DomainID: 1, TenantID: 1, Domain: "example.com"}
 
 	// Nil runner — applyRulesRunner must short-circuit,
 	// not panic.
@@ -355,7 +358,7 @@ func TestApplyRulesRunner_CopyKeepsOriginalAndCreatesSecondCopy(t *testing.T) {
 
 	msg, rfc822 := storeInboundMessage(t, store, 1, 1, 1,
 		"alice@example.com", "Carol <carol@external.test>")
-	rcpt := resolvedRecipient{Email: "alice@example.com", MailboxID: 1, DomainID: 1, TenantID: 1, Domain: "example.com"}
+	rcpt := canonicalRecipient{Target: "alice@example.com", MailboxID: 1, DomainID: 1, TenantID: 1, Domain: "example.com"}
 
 	// Provision the destination folder (Receipts is
 	// not a system folder; production mailbox
@@ -415,7 +418,7 @@ func TestApplyRulesRunner_MoveRelocatesOriginal_DoesNotCopy(t *testing.T) {
 
 	msg, rfc822 := storeInboundMessage(t, store, 1, 1, 1,
 		"alice@example.com", "Carol <carol@external.test>")
-	rcpt := resolvedRecipient{Email: "alice@example.com", MailboxID: 1, DomainID: 1, TenantID: 1, Domain: "example.com"}
+	rcpt := canonicalRecipient{Target: "alice@example.com", MailboxID: 1, DomainID: 1, TenantID: 1, Domain: "example.com"}
 
 	// Provision the destination folder (Important is not
 	// a system folder).

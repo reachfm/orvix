@@ -12,6 +12,8 @@ import (
 	"path"
 	"strings"
 	"time"
+
+	"golang.org/x/text/encoding/htmlindex"
 )
 
 // Part represents a single MIME part extracted from a message.
@@ -84,6 +86,10 @@ func singlePart(headers textproto.MIMEHeader, body []byte) []*Part {
 	if filename == "" {
 		filename = SanitizeFilename(headers.Get("Content-Description"))
 	}
+	isAttachment := cd != "" || filename != "" || !strings.HasPrefix(mediaType, "text/")
+	if !isAttachment {
+		body = decodePartBody(headers, body, ctParams)
+	}
 
 	return []*Part{{
 		Headers:      headers,
@@ -91,9 +97,73 @@ func singlePart(headers textproto.MIMEHeader, body []byte) []*Part {
 		Filename:     filename,
 		ContentType:  mediaType,
 		ContentID:    headers.Get("Content-ID"),
-		IsAttachment: cd != "" || filename != "" || !strings.HasPrefix(mediaType, "text/"),
+		IsAttachment: isAttachment,
 		Size:         len(body),
 	}}
+}
+
+// decodePartBody applies Content-Transfer-Encoding decoding
+// (quoted-printable / base64) and, for text parts, charset
+// transcoding to UTF-8 — both were previously never applied anywhere
+// in this package, so a quoted-printable body (extremely common:
+// Outlook, Gmail, and most MUAs default to it for any non-ASCII
+// plain-text or HTML body) passed straight through with its "=3D"-
+// style escapes and soft line breaks intact. Only ever called for
+// non-attachment (displayable text/*) parts — attachment bytes are
+// decoded separately by the attachment-extraction path, which already
+// handles its own encoding.
+func decodePartBody(headers textproto.MIMEHeader, body []byte, ctParams map[string]string) []byte {
+	switch strings.ToLower(strings.TrimSpace(headers.Get("Content-Transfer-Encoding"))) {
+	case "quoted-printable":
+		body = decodeQuotedPrintable(body)
+	case "base64":
+		body = decodeBase64Body(body)
+	}
+	return transcodeToUTF8(body, ctParams["charset"])
+}
+
+// decodeBase64Body decodes a base64 part body, tolerating the
+// embedded CRLF line-wrapping virtually every real MUA emits (raw
+// base64.StdEncoding.Decode rejects embedded whitespace outright). On
+// any decode failure the original bytes are returned unchanged rather
+// than dropping the part's content — a safe, visible fallback beats a
+// silently empty body.
+func decodeBase64Body(body []byte) []byte {
+	clean := make([]byte, 0, len(body))
+	for _, b := range body {
+		if b == '\r' || b == '\n' || b == ' ' || b == '\t' {
+			continue
+		}
+		clean = append(clean, b)
+	}
+	decoded := make([]byte, base64.StdEncoding.DecodedLen(len(clean)))
+	if n, err := base64.StdEncoding.Decode(decoded, clean); err == nil {
+		return decoded[:n]
+	}
+	if n, err := base64.RawStdEncoding.Decode(decoded, clean); err == nil {
+		return decoded[:n]
+	}
+	return body
+}
+
+// transcodeToUTF8 converts body from the declared charset to UTF-8.
+// An empty, already-UTF-8, or unrecognized charset name is a no-op —
+// unrecognized names fail safe by leaving the original bytes
+// untouched rather than corrupting or dropping content.
+func transcodeToUTF8(body []byte, charset string) []byte {
+	charset = strings.TrimSpace(charset)
+	if charset == "" || strings.EqualFold(charset, "utf-8") || strings.EqualFold(charset, "us-ascii") || strings.EqualFold(charset, "ascii") {
+		return body
+	}
+	enc, err := htmlindex.Get(charset)
+	if err != nil {
+		return body
+	}
+	converted, err := enc.NewDecoder().Bytes(body)
+	if err != nil {
+		return body
+	}
+	return converted
 }
 
 func extractMultipart(body []byte, boundary string) ([]*Part, error) {
@@ -137,13 +207,18 @@ func extractMultipart(body []byte, boundary string) ([]*Part, error) {
 			continue
 		}
 
+		isAttachment := cd != "" || filename != "" || !strings.HasPrefix(mediaType, "text/")
+		if !isAttachment {
+			partData = decodePartBody(p.Header, partData, ctParams)
+		}
+
 		parts = append(parts, &Part{
 			Headers:      p.Header,
 			Body:         partData,
 			Filename:     filename,
 			ContentType:  mediaType,
 			ContentID:    p.Header.Get("Content-ID"),
-			IsAttachment: cd != "" || filename != "" || !strings.HasPrefix(mediaType, "text/"),
+			IsAttachment: isAttachment,
 			Size:         len(partData),
 		})
 

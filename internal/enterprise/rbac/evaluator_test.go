@@ -20,15 +20,27 @@ func TestEvaluatorPermissionMatrixAndTenantScope(t *testing.T) {
 	if e.HasPermission(ctx, auth.RoleReadOnly, 2, authrbac.PermDomainsWrite) {
 		t.Fatalf("read-only auditor must not mutate domains")
 	}
-	// RoleUser is now the tenant owner/member role with full tenant
-	// write permissions. This is intentional — signup-created owners
-	// need to manage their tenant.
-	if !e.HasPermission(ctx, auth.RoleUser, 3, authrbac.PermMailboxesWrite) {
-		t.Fatalf("tenant owner (RoleUser) must have mailbox write permission")
+	// RoleUser is the per-mailbox webmail end-user role. It has NO
+	// tenant administration privileges in the global matrix — a plain
+	// mailbox user must not manage domains, mailboxes, members, or
+	// billing. Signup-created Organization owners are persisted as
+	// tenant_admin (customer_auth.go / customer_signup_otp.go).
+	if e.HasPermission(ctx, auth.RoleUser, 3, authrbac.PermMailboxesWrite) {
+		t.Fatalf("webmail end-user (RoleUser) must NOT have mailbox write permission")
+	}
+	if e.HasPermission(ctx, auth.RoleUser, 3, authrbac.PermDomainsWrite) {
+		t.Fatalf("webmail end-user (RoleUser) must NOT have domain write permission")
+	}
+	// TenantAdmin keeps the full tenant administration surface.
+	if !e.HasPermission(ctx, auth.RoleTenantAdmin, 3, authrbac.PermMailboxesWrite) {
+		t.Fatalf("tenant_admin must have mailbox write permission")
 	}
 	// Platform permissions are still denied for tenant roles.
 	if e.HasPermission(ctx, auth.RoleUser, 3, authrbac.PermPlatformOrganizationsWrite) {
-		t.Fatalf("tenant owner must not have platform organization write")
+		t.Fatalf("tenant role must not have platform organization write")
+	}
+	if e.HasPermission(ctx, auth.RoleTenantAdmin, 3, authrbac.PermPlatformOrganizationsWrite) {
+		t.Fatalf("tenant_admin must not have platform organization write")
 	}
 	if e.CanManageTenant(auth.RoleAdmin, 0, 1) {
 		t.Fatalf("missing actor tenant must fail closed")
@@ -64,10 +76,10 @@ func TestEvaluatorDBBackedGroupGrant(t *testing.T) {
 	}
 
 	e := NewEvaluator(db)
-	// RoleUser now has PermMailboxesWrite from the global matrix.
-	// Use a permission that RoleUser does not have — PermQueueAction —
-	// to test that DB-backed group grants extend permissions beyond
-	// the global matrix, but unassigned users do not inherit them.
+	// RoleUser no longer holds PermQueueAction from the global matrix —
+	// the DB-backed group grant is what authorizes the assigned user, so
+	// this still proves grants extend permissions beyond the global
+	// matrix, while unassigned users do not inherit them.
 	if !e.HasPermission(context.Background(), auth.RoleUser, 42, authrbac.PermQueueAction) {
 		t.Fatalf("DB-backed group grant should authorize assigned permission via group")
 	}

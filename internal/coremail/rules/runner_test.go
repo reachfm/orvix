@@ -417,6 +417,75 @@ func TestRunner_ForwardingEnqueuesOneMessage(t *testing.T) {
 	}
 }
 
+// TestRunner_ForwardAndVacationMessageIDUsesRealHostnameNotOrvixLocal
+// pins the ORVIX — SURGICAL INTERNET MESSAGE-ID FIX for the two
+// system-generated outbound origination paths in the rules engine:
+// forwarding and vacation auto-reply. newFixture's Dependencies
+// leaves Hostname empty, so this also exercises the documented safe
+// fallback to the mailbox's own domain (alice@example.com ->
+// example.com) — the private "orvix.local" pseudo-domain must never
+// appear in either header.
+func TestRunner_ForwardAndVacationMessageIDUsesRealHostnameNotOrvixLocal(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+
+	f.createMailbox(ctx, 1, 1, 1, "alice@example.com")
+	f.createForwardingRow(ctx, 1, "bob@elsewhere.test", true)
+	f.createVacationRow(ctx, 1, "Out", "away", 86400)
+
+	rfc822 := makeInboundRFC822("Carol <carol@external.test>", "alice@example.com",
+		"hi alice", "hello there")
+	in := f.inboundInput(1, 1, 1, "alice@example.com", "Carol <carol@external.test>", rfc822)
+
+	if _, err := f.runner.Run(ctx, in); err != nil {
+		t.Fatalf("runner.Run: %v", err)
+	}
+
+	sent, err := f.store.Folders.GetByPath(ctx, 1, "Sent", nil)
+	if err != nil || sent == nil {
+		t.Fatalf("get Sent folder: %v", err)
+	}
+	rows, err := f.db.Query(
+		"SELECT id FROM coremail_messages WHERE mailbox_id = ? AND folder_id = ? AND deleted = 0 ORDER BY id ASC",
+		1, sent.ID)
+	if err != nil {
+		t.Fatalf("query sent messages: %v", err)
+	}
+	var ids []uint
+	for rows.Next() {
+		var id uint
+		if err := rows.Scan(&id); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		ids = append(ids, id)
+	}
+	rows.Close()
+	if len(ids) == 0 {
+		t.Fatal("expected at least one Sent message (forward and/or vacation)")
+	}
+	for _, id := range ids {
+		_, rfc822Bytes, err := f.store.LoadMessage(ctx, id, nil)
+		if err != nil {
+			t.Fatalf("LoadMessage(%d): %v", id, err)
+		}
+		body := string(rfc822Bytes)
+		if strings.Contains(body, "@orvix.local") {
+			t.Fatalf("Sent message %d still contains the private orvix.local pseudo-domain in Message-ID:\n%s", id, body)
+		}
+		idx := strings.Index(body, "Message-ID: <")
+		if idx < 0 {
+			t.Fatalf("Sent message %d missing Message-ID header:\n%s", id, body)
+		}
+		line := body[idx:]
+		if end := strings.IndexAny(line, "\r\n"); end >= 0 {
+			line = line[:end]
+		}
+		if !strings.HasSuffix(line, "@example.com>") {
+			t.Fatalf("Sent message %d Message-ID id-right = %q, want the mailbox-domain fallback \"example.com\"", id, line)
+		}
+	}
+}
+
 // ── Test 3: forwarding marker prevents loop ───────────────────
 //
 // If an inbound message already carries the
@@ -766,6 +835,8 @@ CREATE TABLE IF NOT EXISTS coremail_mailboxes (
 	auth_scheme TEXT NOT NULL DEFAULT 'argon2id',
 	status TEXT NOT NULL DEFAULT 'active',
 	quota_mb INTEGER NOT NULL DEFAULT 1024,
+	mail_access_mode TEXT NOT NULL DEFAULT 'inherit',
+	version INTEGER NOT NULL DEFAULT 1,
 	created_at DATETIME NOT NULL,
 	updated_at DATETIME NOT NULL,
 	deleted_at DATETIME
@@ -994,7 +1065,7 @@ func TestBuildVacationRfc822_RejectsHeaderInjectionInSubject(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := buildVacationRfc822(in, tc.subject, "body")
+			_, err := buildVacationRfc822(in, tc.subject, "body", "mail.example.test")
 			if err == nil {
 				t.Fatalf("buildVacationRfc822 accepted injection subject %q; want error", tc.subject)
 			}
@@ -1016,7 +1087,7 @@ func TestBuildVacationRfc822_AllowsUnicodeSubjectAndBody(t *testing.T) {
 		FromHeader:   "Carol <carol@external.test>",
 		ReceivedAt:   time.Now().UTC(),
 	}
-	out, err := buildVacationRfc822(in, "Отпуск 🏖️", "Я в отпуске")
+	out, err := buildVacationRfc822(in, "Отпуск 🏖️", "Я в отпуске", "mail.example.test")
 	if err != nil {
 		t.Fatalf("unicode subject rejected: %v", err)
 	}

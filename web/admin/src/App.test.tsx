@@ -54,7 +54,7 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-describe("Platform Administration shell (portal=platform)", () => {
+describe("Platform Admin shell (portal=platform)", () => {
   beforeEach(() => {
     installFetchMock({
       "/api/v1/me": PLATFORM_ME,
@@ -112,21 +112,21 @@ describe("Platform Administration shell (portal=platform)", () => {
     });
   });
 
-  it("renders the Platform Administration shell, not the tenant dashboard", async () => {
+  it("renders the Platform Admin shell, not the tenant dashboard", async () => {
     render(<Wrapper><App /></Wrapper>);
-    await waitFor(() => expect(screen.getByText("Platform Administration")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText("Platform Admin")).toBeInTheDocument());
     expect(screen.queryByText("Failed to load dashboard")).not.toBeInTheDocument();
   });
 
   it("never renders the Customer Portal navigation group", async () => {
     render(<Wrapper><App /></Wrapper>);
-    await waitFor(() => expect(screen.getByText("Platform Administration")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText("Platform Admin")).toBeInTheDocument());
     expect(screen.queryByText("Customer Portal")).not.toBeInTheDocument();
   });
 
   it("never renders tenant-only navigation items", async () => {
     render(<Wrapper><App /></Wrapper>);
-    await waitFor(() => expect(screen.getByText("Platform Administration")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText("Platform Admin")).toBeInTheDocument());
     // Tenant-family-only items must never appear in the platform shell.
     for (const label of ["Invitations", "Ownership", "Invoices", "Usage"]) {
       expect(screen.queryByRole("button", { name: new RegExp(`^${label}$`, "i") })).not.toBeInTheDocument();
@@ -139,7 +139,7 @@ describe("Platform Administration shell (portal=platform)", () => {
 
   it("shows exactly the final verified platform navigation set", async () => {
     render(<Wrapper><App /></Wrapper>);
-    await waitFor(() => expect(screen.getByText("Platform Administration")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText("Platform Admin")).toBeInTheDocument());
     for (const label of ["Organizations", "Summary", "Mail Queue", "Domains", "Mailboxes", "Aliases", "Groups", "Relays", "Suppressions", "Deliverability", "Bulk Mailboxes", "Reliability", "Health", "Security", "Modules", "Configuration"]) {
       expect(screen.getAllByRole("button", { name: new RegExp(`^${label}$`, "i") }).length).toBeGreaterThan(0);
     }
@@ -147,7 +147,7 @@ describe("Platform Administration shell (portal=platform)", () => {
 
   it("never renders a License nav item — Orvix is hosted SaaS, not a licensed self-hosted product", async () => {
     render(<Wrapper><App /></Wrapper>);
-    await waitFor(() => expect(screen.getByText("Platform Administration")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText("Platform Admin")).toBeInTheDocument());
     expect(screen.queryByRole("button", { name: /^License$/i })).not.toBeInTheDocument();
   });
 
@@ -175,7 +175,7 @@ describe("Platform Administration shell (portal=platform)", () => {
   for (const c of PLATFORM_NAV_CASES) {
     it(`platform nav item "${c.label}" renders its intended component with no tenant call`, async () => {
       render(<Wrapper><App /></Wrapper>);
-      await waitFor(() => expect(screen.getByText("Platform Administration")).toBeInTheDocument());
+      await waitFor(() => expect(screen.getByText("Platform Admin")).toBeInTheDocument());
       fireEvent.click(screen.getAllByRole("button", { name: new RegExp(`^${c.label}$`, "i") })[0]);
       await waitFor(() => {
         const matches = typeof c.expectHeading === "string"
@@ -193,7 +193,7 @@ describe("Platform Administration shell (portal=platform)", () => {
 
   it("makes zero calls to /api/v1/enterprise/dashboard or any other tenant-owned endpoint during bootstrap", async () => {
     render(<Wrapper><App /></Wrapper>);
-    await waitFor(() => expect(screen.getByText("Platform Administration")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText("Platform Admin")).toBeInTheDocument());
     // Give any stray effect a tick to fire before asserting the negative.
     await new Promise((r) => setTimeout(r, 20));
     for (const suffix of TENANT_OWNED_SUFFIXES) {
@@ -203,7 +203,7 @@ describe("Platform Administration shell (portal=platform)", () => {
 
   it("navigating the platform overview cards opens the corresponding platform page without a tenant call", async () => {
     render(<Wrapper><App /></Wrapper>);
-    await waitFor(() => expect(screen.getByText("Platform Administration")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText("Platform Admin")).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: /^organizations$/i }));
     await waitFor(() => expect(screen.getByRole("button", { name: /^organizations$/i })).toBeInTheDocument());
     for (const suffix of TENANT_OWNED_SUFFIXES) {
@@ -213,7 +213,7 @@ describe("Platform Administration shell (portal=platform)", () => {
 
   it("a deep-link/stale tab id outside the platform allow-list falls back to the Platform landing page, never a tenant page", async () => {
     render(<Wrapper><App /></Wrapper>);
-    await waitFor(() => expect(screen.getByText("Platform Administration")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText("Platform Admin")).toBeInTheDocument());
     // There is no route to reach a tenant-only tab id as a platform
     // identity through the UI itself (the sidebar only offers
     // PLATFORM_TAB_IDS) — this test documents that structural guarantee
@@ -255,10 +255,10 @@ describe("Customer Portal shell (portal=organization) — unchanged", () => {
     expect(screen.getByText("Customer Portal")).toBeInTheDocument();
   });
 
-  it("never renders Platform Administration navigation", async () => {
+  it("never renders Platform Admin navigation", async () => {
     render(<Wrapper><App /></Wrapper>);
     await waitFor(() => expect(screen.getByText("Orvix Admin")).toBeInTheDocument());
-    expect(screen.queryByText("Platform Administration")).not.toBeInTheDocument();
+    expect(screen.queryByText("Platform Admin")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /^overview$/i })).not.toBeInTheDocument();
   });
 
@@ -292,7 +292,7 @@ describe("Fail-closed / cross-cutting authorization behavior", () => {
     });
     render(<Wrapper><App /></Wrapper>);
     await waitFor(() => expect(screen.getByText("Access Unavailable")).toBeInTheDocument());
-    expect(screen.queryByText("Platform Administration")).not.toBeInTheDocument();
+    expect(screen.queryByText("Platform Admin")).not.toBeInTheDocument();
     expect(screen.queryByText("Customer Portal")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /^dashboard$/i })).not.toBeInTheDocument();
   });
@@ -311,7 +311,7 @@ describe("Fail-closed / cross-cutting authorization behavior", () => {
     });
     render(<Wrapper><App /></Wrapper>);
     await waitFor(() => expect(screen.getByText("Access Unavailable")).toBeInTheDocument());
-    expect(screen.queryByText("Platform Administration")).not.toBeInTheDocument();
+    expect(screen.queryByText("Platform Admin")).not.toBeInTheDocument();
   });
 
   it("401 from /me clears auth and returns to the login screen", async () => {
@@ -322,7 +322,7 @@ describe("Fail-closed / cross-cutting authorization behavior", () => {
     });
     render(<Wrapper><App /></Wrapper>);
     await waitFor(() => expect(screen.getByRole("heading", { name: "Sign In" })).toBeInTheDocument());
-    expect(screen.queryByText("Platform Administration")).not.toBeInTheDocument();
+    expect(screen.queryByText("Platform Admin")).not.toBeInTheDocument();
     expect(screen.queryByText("Customer Portal")).not.toBeInTheDocument();
   });
 });

@@ -33,8 +33,22 @@ type CommandHandler struct {
 	// nil-means-disabled convention). An empty/unknown return value is
 	// treated as internal_external (safe default), never as a reason
 	// to reject — only an explicit internal_only blocks external mail.
+	//
+	// DEPRECATED (MAILBOX-ACCESS-MODE-PHASE1): production wiring uses
+	// mailAccessPolicy below. This legacy domain-level checker is kept
+	// for backward-compatible test wiring and as the fallback when no
+	// canonical policy checker is installed.
 	mailAccessMode func(ctx context.Context, domain string) (string, error)
-	onAuthEvent    func(eventType string, identity string, detail string)
+	// mailAccessPolicy is the CANONICAL mailbox-level mail-access
+	// policy decision hook (internal/coremail/mailpolicy). When set it
+	// REPLACES the legacy domain checker: it classifies the sender by
+	// authenticated mailbox identity and the recipient by its
+	// effective mailbox mode, so a forged local MAIL FROM from a
+	// remote path is never treated as internal. A non-nil error means
+	// the policy could not be evaluated and the caller must fail
+	// closed with a temporary failure.
+	mailAccessPolicy func(ctx context.Context, session *Session, rcptAddr string, rcptIsLocal bool) (allow bool, reason string, err error)
+	onAuthEvent      func(eventType string, identity string, detail string)
 	// acceptanceEngine applies admin acceptance rules at
 	// MAIL FROM + RCPT TO. nil means "no rules configured"
 	// and the handler falls back to legacy direct-accept
@@ -88,12 +102,27 @@ func (h *CommandHandler) SetLocalDomainChecker(fn func(ctx context.Context, doma
 	h.isLocalDomain = fn
 }
 
-// SetMailAccessModeChecker wires the domain mail-access-mode lookup
-// used to enforce internal_only vs internal_external at RCPT TO. nil
-// disables the check (no policy restriction beyond existing relay
-// protection).
+// SetMailAccessModeChecker wires the legacy domain mail-access-mode
+// lookup used to enforce internal_only vs internal_external at RCPT
+// TO. nil disables the check (no policy restriction beyond existing
+// relay protection).
+//
+// DEPRECATED: production wiring uses SetMailAccessPolicy, which
+// enforces the canonical mailbox-level policy. This setter is retained
+// for backward-compatible test wiring; when both are set, the policy
+// checker takes precedence.
 func (h *CommandHandler) SetMailAccessModeChecker(fn func(ctx context.Context, domain string) (string, error)) {
 	h.mailAccessMode = fn
+}
+
+// SetMailAccessPolicy wires the canonical mailbox-level mail-access
+// policy decision hook. When set, it replaces the legacy domain
+// checker in handleRCPT. The callback returns (allow, reason, err):
+// allow=false with a non-empty reason is a stable policy denial;
+// err != nil means the policy could not be evaluated and handleRCPT
+// fails closed with a temporary failure.
+func (h *CommandHandler) SetMailAccessPolicy(fn func(ctx context.Context, session *Session, rcptAddr string, rcptIsLocal bool) (allow bool, reason string, err error)) {
+	h.mailAccessPolicy = fn
 }
 
 // SetAuthEventHandler sets a callback for authentication events.
@@ -276,15 +305,32 @@ func (h *CommandHandler) handleRCPT(ctx context.Context, cmd *ParsedCommand) Res
 	}
 
 	// mail_access_mode enforcement — real delivery-path policy, not
-	// just a CRUD flag. Runs for every sender (authenticated or not);
-	// unauthenticated relay is already blocked above, so this is what
-	// closes the remaining two cases: (1) an external sender delivering
-	// INBOUND to a local internal_only domain, and (2) an authenticated
-	// local sender whose OWN domain is internal_only relaying OUTBOUND
-	// to an external recipient (the existing relay-protection block
-	// above only restricts unauthenticated senders, so authenticated
-	// outbound is otherwise unrestricted regardless of domain policy).
-	if h.mailAccessMode != nil && h.isLocalDomain != nil {
+	// just a CRUD flag.
+	//
+	// CANONICAL PATH (MAILBOX-ACCESS-MODE-PHASE1): when the
+	// mailbox-level policy checker is wired it REPLACES the legacy
+	// domain checker below. It classifies the sender by authenticated
+	// mailbox identity (never by MAIL FROM domain alone), evaluates
+	// the recipient's EFFECTIVE mailbox mode, and fails closed with a
+	// temporary failure when the policy cannot be evaluated.
+	if h.mailAccessPolicy != nil {
+		allow, reason, perr := h.mailAccessPolicy(ctx, h.session, address, rcptIsLocal)
+		if perr != nil {
+			if h.onAuthEvent != nil {
+				h.onAuthEvent("policy_unavailable", h.session.AuthUser,
+					fmt.Sprintf("mail access policy unavailable for %s", rcptDomain))
+			}
+			return Response{StatusServiceNotAvailable, "4.7.0 Mail access policy temporarily unavailable"}
+		}
+		if !allow {
+			if h.onAuthEvent != nil {
+				h.onAuthEvent("policy_denied", h.session.AuthUser,
+					fmt.Sprintf("mail access policy denied %s -> %s (%s)", h.session.MailFrom, address, reason))
+			}
+			return Response{StatusMailboxNotFound, "5.7.1 " + reason}
+		}
+	} else if h.mailAccessMode != nil && h.isLocalDomain != nil {
+		// LEGACY DOMAIN-LEVEL CHECK (deprecated, backward compatible).
 		senderDomain := ExtractDomain(h.session.MailFrom)
 		if rcptDomain != "" && rcptIsLocal {
 			mode, merr := h.mailAccessMode(ctx, rcptDomain)

@@ -82,16 +82,59 @@ func (n *noopMailSender) Send(to, subject, body string) error {
 	return nil
 }
 
-func initTransactionalMailSender(cfgSMTPHost string, cfgSMTPPort int, cfgHostname string, logger *zap.Logger) handlers.MailSender {
+// initTransactionalMailSender wires the shared first-party transactional
+// mail pipeline (signup OTP, password reset, support requests).
+//
+// Anonymous SMTP against the inbound MX port (cfgSMTPHost:cfgSMTPPort) is
+// correctly rejected by CoreMail's anti-relay policy for any recipient
+// outside the server's own domains — that rejection is the relay policy
+// working as designed, not a bug. First-party transactional mail to
+// external recipients therefore requires authenticating as a real local
+// account on the TLS submission port, which is what happens here whenever
+// submission credentials are configured; otherwise this falls back to the
+// legacy unauthenticated MX-port path for backward compatibility (which
+// will still be relay-rejected for external recipients — see
+// customer_signup_otp.go's Part 1 fix for why that no longer produces a
+// false "sent" response).
+func initTransactionalMailSender(cfgSMTPHost string, cfgSMTPPort int, cfgSubmissionHost string, cfgSubmissionPort int, cfgUsername, cfgPassword, cfgHostname string, logger *zap.Logger) handlers.MailSender {
+	if cfgUsername != "" && cfgPassword != "" {
+		// The authenticated client MUST connect using the server's real
+		// mail hostname, not cfgSubmissionHost/cfgSMTPHost — those are
+		// LISTEN bind addresses (commonly "0.0.0.0"), which is never a
+		// valid TLS ServerName: 0.0.0.0 doesn't appear in the
+		// certificate's SANs, so verification fails even though the TCP
+		// connection itself succeeds. auth.DialSMTPWithTLS uses the same
+		// host value for both the dial address and the TLS ServerName,
+		// so this must be the hostname the certificate was actually
+		// issued for (cfgHostname, e.g. "mail.orvix.email").
+		host := resolveHostname(cfgHostname)
+		port := cfgSubmissionPort
+		if port == 0 {
+			port = 587
+		}
+		// The envelope/header From MUST be the authenticated account's
+		// own address, not noreply@<cfgHostname>: cfgHostname is the MTA
+		// hostname (mail.orvix.email), which is neither the mailbox's
+		// domain nor DKIM-configured. CoreMail's relay policy correctly
+		// rejects a MAIL FROM that doesn't match the authenticated
+		// identity ("550 5.7.1 Sender not authorized"), and even if it
+		// didn't, mail.orvix.email has no DKIM key — cfgUsername (e.g.
+		// noreply@orvix.email) is both authorized and DKIM-signed.
+		from := cfgUsername
+		sender := newSMTPMailSender(host, port, cfgUsername, cfgPassword, from, logger)
+		logger.Info("transactional mail sender wired via authenticated SMTP submission", zap.String("host", host), zap.Int("port", port), zap.String("from", from))
+		return sender
+	}
+
+	from := fmt.Sprintf("noreply@%s", resolveHostname(cfgHostname))
 	host := cfgSMTPHost
 	port := cfgSMTPPort
 	if host == "" || port == 0 {
 		logger.Info("transactional mail sender: no SMTP configured — emails logged only")
 		return newNoopMailSender()
 	}
-	from := fmt.Sprintf("noreply@%s", resolveHostname(cfgHostname))
+	logger.Warn("transactional mail sender wired via UNAUTHENTICATED SMTP — external delivery will be rejected by the anti-relay policy; configure transactional submission credentials to enable real delivery", zap.String("host", host), zap.Int("port", port))
 	sender := newSMTPMailSender(host, port, "", "", from, logger)
-	logger.Info("transactional mail sender wired via SMTP", zap.String("host", host), zap.Int("port", port))
 	return sender
 }
 

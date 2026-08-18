@@ -2,13 +2,24 @@ package bulkprovision
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/orvix/orvix/internal/admin/domain"
 	"github.com/orvix/orvix/internal/admin/mailbox"
+	"github.com/orvix/orvix/internal/audit"
 	"github.com/orvix/orvix/internal/platform/kernel"
 )
+
+// DefaultBatchSize bounds how many rows Execute attempts before it
+// checkpoints. Kept small enough that a single batch comfortably fits
+// inside a job's lease/heartbeat window under real SMTP/DB latency.
+// DefaultBatchSize is a var, not a const, so tests can shrink it to
+// make batch-boundary/checkpoint behavior observable with a handful of
+// rows instead of needing thousands. Production code never mutates it.
+var DefaultBatchSize = 50
 
 type Service struct {
 	repo        *Repository
@@ -16,14 +27,102 @@ type Service struct {
 	accessMode  DomainAccessMode
 	idempotency *kernel.IdempotencyStore
 	outbox      *kernel.OutboxRepository
+	audit       *audit.ExtendedStore
 	clock       kernel.Clock
 }
 
-func NewService(repo *Repository, mailboxes MailboxCreator, accessMode DomainAccessMode, idempotency *kernel.IdempotencyStore, outbox *kernel.OutboxRepository, clock kernel.Clock) *Service {
+func NewService(repo *Repository, mailboxes MailboxCreator, accessMode DomainAccessMode, idempotency *kernel.IdempotencyStore, outbox *kernel.OutboxRepository, auditStore *audit.ExtendedStore, clock kernel.Clock) *Service {
 	if clock == nil {
 		clock = kernel.SystemClock{}
 	}
-	return &Service{repo: repo, mailboxes: mailboxes, accessMode: accessMode, idempotency: idempotency, outbox: outbox, clock: clock}
+	return &Service{repo: repo, mailboxes: mailboxes, accessMode: accessMode, idempotency: idempotency, outbox: outbox, audit: auditStore, clock: clock}
+}
+
+// recordAudit writes a best-effort, secret-free audit entry for a
+// NON-terminal bulk-import event (currently only "job created", which
+// precedes any mutation and so has nothing to roll back if it fails).
+// Terminal lifecycle events (completed/failed/cancelled) MUST go
+// through finalizeLifecycleTx instead — see its doc comment.
+func (s *Service) recordAudit(ctx context.Context, actorID uint, action string, job *Job, result, detail string) {
+	if s.audit == nil || job == nil {
+		return
+	}
+	_ = s.audit.Record(ctx, &audit.ExtendedEntry{
+		Actor: fmt.Sprintf("user:%d", actorID), ActorID: actorID,
+		Action: action, Target: fmt.Sprintf("bulk_import_job:%d", job.ID), TargetID: job.ID,
+		TenantID: job.TenantID, Result: result,
+		After: fmt.Sprintf("status=%s total=%d valid=%d invalid=%d created=%d failed=%d skipped=%d source_hash=%s %s",
+			job.Status, job.TotalRows, job.ValidRows, job.InvalidRows, job.CreatedCount, job.FailedCount, job.SkippedCount, job.SourceHash, detail),
+	})
+}
+
+// errLifecycleDurabilityUnavailable is returned instead of silently
+// completing a terminal job-status transition when the outbox and/or
+// audit dependency was not wired at construction. A nil dependency
+// must never silently disable durability evidence for a committed
+// business-state change — see PHASE R1-C requirement 4.
+var errLifecycleDurabilityUnavailable = errors.New("bulk import lifecycle durability (outbox/audit) not available")
+
+// finalizeLifecycleTx durably commits a terminal bulk-import job-status
+// transition together with its lifecycle outbox event and audit entry
+// IN ONE DATABASE TRANSACTION. If the outbox insert or the audit insert
+// fails, the whole transaction — including the job-status mutation
+// itself — rolls back, so the job is left in its prior, still-resumable
+// state rather than silently reporting success with no evidence.
+//
+// mutate performs the actual job-row UPDATE(s) using the given *sql.Tx
+// and must be the ONLY write inside the transaction besides the
+// outbox/audit inserts this function performs itself.
+func (s *Service) finalizeLifecycleTx(ctx context.Context, jobID, actorID uint, action, result, detail string, mutate func(tx *sql.Tx) error) (*Job, error) {
+	if s.outbox == nil || s.audit == nil {
+		return nil, kernel.Wrap(kernel.ErrCodeInternal, "bulk import lifecycle finalize", errLifecycleDurabilityUnavailable)
+	}
+	tx, err := s.repo.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, kernel.Wrap(kernel.ErrCodeInternal, "begin lifecycle transaction", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	if err := mutate(tx); err != nil {
+		return nil, err
+	}
+
+	job, err := s.repo.getJobTx(ctx, tx, jobID)
+	if err != nil {
+		return nil, kernel.Wrap(kernel.ErrCodeInternal, "reload job for lifecycle event", err)
+	}
+	if job == nil {
+		return nil, ErrJobNotFound
+	}
+
+	if err := s.outbox.Enqueue(ctx, tx, "bulkprovision."+action, fmt.Sprintf("%d", jobID), map[string]any{
+		"job_id": jobID, "tenant_id": job.TenantID, "status": job.Status,
+		"created": job.CreatedCount, "failed": job.FailedCount, "skipped": job.SkippedCount,
+		"source_hash": job.SourceHash,
+	}, s.clock.Now()); err != nil {
+		return nil, kernel.Wrap(kernel.ErrCodeInternal, "enqueue lifecycle outbox event", err)
+	}
+
+	if err := s.audit.RecordTx(ctx, tx, &audit.ExtendedEntry{
+		Actor: fmt.Sprintf("user:%d", actorID), ActorID: actorID,
+		Action: action, Target: fmt.Sprintf("bulk_import_job:%d", jobID), TargetID: jobID,
+		TenantID: job.TenantID, Result: result,
+		After: fmt.Sprintf("status=%s total=%d valid=%d invalid=%d created=%d failed=%d skipped=%d source_hash=%s %s",
+			job.Status, job.TotalRows, job.ValidRows, job.InvalidRows, job.CreatedCount, job.FailedCount, job.SkippedCount, job.SourceHash, detail),
+	}); err != nil {
+		return nil, kernel.Wrap(kernel.ErrCodeInternal, "record lifecycle audit entry", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, kernel.Wrap(kernel.ErrCodeInternal, "commit lifecycle transaction", err)
+	}
+	committed = true
+	return job, nil
 }
 
 // ValidationResult is the dry-run output: every row's outcome without
@@ -38,6 +137,11 @@ type ValidationResult struct {
 	// actually prevents overshoot under concurrency). -1 means
 	// unlimited.
 	CapacityRemaining int `json:"capacity_remaining"`
+	// SourceHash and SchemaVersion bind this result to the EXACT bytes
+	// that were validated. CreateJob persists both on the job; Execute
+	// refuses to run if the caller's source no longer matches.
+	SourceHash    string `json:"source_hash"`
+	SchemaVersion int    `json:"schema_version"`
 }
 
 // Validate performs dry-run validation: normalization, in-file and
@@ -45,7 +149,7 @@ type ValidationResult struct {
 // compatibility, and an advisory capacity estimate. It NEVER creates a
 // mailbox, a job row, or any other persistent state — pure read-only
 // analysis, safe to call repeatedly.
-func (s *Service) Validate(ctx context.Context, tenantID, domainID uint, domainName string, raw []RawRow) (*ValidationResult, error) {
+func (s *Service) Validate(ctx context.Context, tenantID, domainID uint, domainName, sourceHash string, raw []RawRow) (*ValidationResult, error) {
 	if len(raw) == 0 {
 		return nil, ErrEmptyFile
 	}
@@ -53,9 +157,29 @@ func (s *Service) Validate(ctx context.Context, tenantID, domainID uint, domainN
 		return nil, ErrTooManyRows
 	}
 
+	// Canonical domain operability guard (Phase 8 C2-R1). Read-only —
+	// Validate performs no mutation and takes no lock, matching its
+	// documented contract; the authoritative, lock-guarded re-check
+	// happens again at job creation and at every execution/resume/
+	// retry mutation boundary (mailbox.Service.CreateMailbox). This
+	// check exists so a disabled/suspended/locked/unknown/foreign-
+	// tenant domain produces a stable validation-time error instead of
+	// silently reporting every row "valid" against a domain that can
+	// never actually accept them. Reuses domain.StatusError — the
+	// same mapping mailbox creation and DKIM already use — rather
+	// than a new switch.
 	alloc, err := s.mailboxes.ResolveDomainAllocation(ctx, domainName, tenantID)
+	if err == sql.ErrNoRows {
+		return nil, domain.ErrDomainNotFound
+	}
 	if err != nil {
-		return nil, err
+		// Any other error (infrastructure/repository failure) fails
+		// the whole validation operation closed — never silently
+		// represented as an ordinary invalid row.
+		return nil, kernel.Wrap(kernel.ErrCodeInternal, "resolve domain for validation", err)
+	}
+	if statusErr := domain.StatusError(domain.DomainStatus(alloc.Status)); statusErr != nil {
+		return nil, statusErr
 	}
 
 	var accessMode domain.MailAccessMode = domain.MailAccessInternalExternal
@@ -66,11 +190,26 @@ func (s *Service) Validate(ctx context.Context, tenantID, domainID uint, domainN
 	}
 
 	seenInFile := make(map[string]int, len(raw)) // normalized email -> first row number
-	result := &ValidationResult{TotalRows: len(raw)}
+	result := &ValidationResult{TotalRows: len(raw), SourceHash: sourceHash, SchemaVersion: SchemaVersion}
 	now := s.clock.Now()
 
 	for _, rr := range raw {
-		row := Row{RowNumber: rr.RowNumber, Name: rr.Name, QuotaMB: rr.QuotaMB, CreatedAt: now, UpdatedAt: now}
+		row := Row{
+			RowNumber: rr.RowNumber, ExternalRef: rr.ExternalRef, Name: rr.Name, QuotaMB: rr.QuotaMB,
+			AccessMode: rr.AccessMode, CreatedAt: now, UpdatedAt: now,
+		}
+		if !rr.AccessMode.Valid() {
+			row.Email, _ = normalizeEmail(rr.Email)
+			row.Status = RowInvalid
+			row.ErrorCode = ErrCodeAccessModeIncompatible
+			row.ErrorDetail = fmt.Sprintf("%q is not a supported access mode", rr.AccessMode)
+			result.Rows = append(result.Rows, row)
+			result.InvalidRows++
+			continue
+		}
+		if row.AccessMode == "" {
+			row.AccessMode = AccessInherit
+		}
 		email, ok := normalizeEmail(rr.Email)
 		row.Email = email
 		if !ok {
@@ -166,11 +305,31 @@ func (s *Service) GetJobWithRows(ctx context.Context, jobID, tenantID uint) (*Jo
 	return job, rows, nil
 }
 
+// ListRowsPage is the bounded, paginated row-result read the HTTP
+// report endpoint uses.
+func (s *Service) ListRowsPage(ctx context.Context, jobID uint, limit, offset int) ([]Row, int, error) {
+	rows, total, err := s.repo.ListRowsPage(ctx, jobID, nil, limit, offset)
+	if err != nil {
+		return nil, 0, kernel.Wrap(kernel.ErrCodeInternal, "list import rows", err)
+	}
+	return rows, total, nil
+}
+
+// ListJobs is the bounded, paginated tenant job list the HTTP list
+// endpoint uses.
+func (s *Service) ListJobs(ctx context.Context, tenantID uint, limit, offset int) ([]Job, int, error) {
+	jobs, total, err := s.repo.ListJobs(ctx, tenantID, limit, offset)
+	if err != nil {
+		return nil, 0, kernel.Wrap(kernel.ErrCodeInternal, "list import jobs", err)
+	}
+	return jobs, total, nil
+}
+
 // CreateJob persists a validated import as a durable job (state
 // "ready" if every row validated, "failed" if none did) — this is the
 // hand-off point between the pure dry-run above and the stateful,
 // resumable job below.
-func (s *Service) CreateJob(ctx context.Context, tenantID, domainID, actorID uint, strategy Strategy, idempotencyKey string, result *ValidationResult) (*Job, error) {
+func (s *Service) CreateJob(ctx context.Context, tenantID, domainID, actorID uint, strategy Strategy, conflictPolicy ConflictPolicy, idempotencyKey string, result *ValidationResult) (*Job, error) {
 	if idempotencyKey != "" {
 		if existing, err := s.repo.GetJobByIdempotencyKey(ctx, tenantID, idempotencyKey); err == nil && existing != nil {
 			return existing, nil
@@ -179,29 +338,87 @@ func (s *Service) CreateJob(ctx context.Context, tenantID, domainID, actorID uin
 	if strategy != StrategyAtomic && strategy != StrategyPartial {
 		strategy = StrategyPartial
 	}
+	if !conflictPolicy.Valid() {
+		return nil, ErrInvalidConflictPolicy
+	}
 	now := s.clock.Now()
 	status := JobReady
 	if result.ValidRows == 0 {
 		status = JobFailed
 	}
 	job := &Job{
-		TenantID: tenantID, DomainID: domainID, Status: status, Strategy: strategy,
-		IdempotencyKey: idempotencyKey, TotalRows: result.TotalRows, ValidRows: result.ValidRows,
+		TenantID: tenantID, DomainID: domainID, Status: status, Strategy: strategy, ConflictPolicy: conflictPolicy,
+		IdempotencyKey: idempotencyKey, SourceHash: result.SourceHash, SchemaVersion: result.SchemaVersion,
+		TotalRows: result.TotalRows, ValidRows: result.ValidRows,
 		InvalidRows: result.InvalidRows, CreatedBy: actorID, CreatedAt: now, UpdatedAt: now,
 	}
 	if err := s.repo.CreateJob(ctx, job, result.Rows); err != nil {
+		// The initial GetJobByIdempotencyKey check above is inherently
+		// check-then-act: under real concurrency, two requests carrying
+		// the identical idempotency key can both pass that check before
+		// either has inserted. The schema's own unique index on
+		// (tenant_id, idempotency_key) then rejects whichever INSERT
+		// loses the race — that rejection is not a genuine server
+		// fault, it means a concurrent identical request just won.
+		// Recheck before reporting a false internal error, mirroring
+		// the same insert-then-reconcile pattern kernel.IdempotencyStore
+		// already uses for exactly this class of race.
+		if idempotencyKey != "" {
+			if existing, gerr := s.repo.GetJobByIdempotencyKey(ctx, tenantID, idempotencyKey); gerr == nil && existing != nil {
+				return existing, nil
+			}
+		}
+		// A domain-operability rejection (from the guard inside
+		// Repository.CreateJob's own transaction) is a real, typed
+		// error — surface it as-is, never flattened into a generic
+		// INTERNAL_ERROR the caller can't distinguish from a genuine
+		// repository fault.
+		if errors.Is(err, domain.ErrDomainNotFound) || errors.Is(err, domain.ErrDomainDisabled) ||
+			errors.Is(err, domain.ErrDomainSuspended) || errors.Is(err, domain.ErrDomainLocked) ||
+			errors.Is(err, domain.ErrDomainUnavailable) {
+			return nil, err
+		}
 		return nil, kernel.Wrap(kernel.ErrCodeInternal, "create import job", err)
 	}
-	return job, nil
+	if s.audit != nil {
+		s.recordAudit(ctx, actorID, "bulkprovision.job.created", job, "success", "")
+	}
+	// Return the DB-canonical row rather than the locally-constructed
+	// struct: this guarantees the WINNING request's response is
+	// byte-identical to what a losing, reconciled concurrent request
+	// above returns (both reads go through the same GetJob path), never
+	// diverging on timestamp serialization precision between the
+	// pre-insert Go value and its DB round-trip.
+	canonical, gerr := s.repo.GetJob(ctx, job.ID, tenantID)
+	if gerr != nil {
+		return nil, kernel.Wrap(kernel.ErrCodeInternal, "reload created import job", gerr)
+	}
+	return canonical, nil
 }
 
-// Execute runs a "ready" job. Atomic strategy: if ANY row fails to
-// create, every mailbox created earlier in this job is soft-deleted
-// (compensating rollback) and the job ends "failed" — no partial
-// state survives. Partial strategy: each row is independent; a
-// failure never affects sibling rows, and the job ends
+// ExecuteHooks lets a durable-job wrapper observe/steer batch-bounded
+// execution without this package depending on internal/platform/jobs.
+// BeforeBatch is called before every bounded batch; a non-nil error
+// (lease lost, worker asked to stop, heartbeat failed) halts Execute
+// IMMEDIATELY, leaving the job in JobRunning with its checkpoint
+// already persisted through the end of the PRIOR batch — safe to
+// resume by calling Execute again (a fresh lease will pick up exactly
+// where NextRowNumber left off; nothing already RowCreated is ever
+// re-attempted).
+type ExecuteHooks struct {
+	BeforeBatch func(ctx context.Context) error
+}
+
+// Execute runs a "ready" (fresh start) or "running" (resume-after-crash)
+// job in bounded batches, checkpointing after each one. Atomic strategy:
+// if ANY row fails to create, every mailbox created earlier in THIS
+// call is soft-deleted (compensating rollback) and the job ends
+// "failed" — no partial state survives. Partial strategy: each row is
+// independent; a failure never affects sibling rows, and the job ends
 // "partially_failed" if any row failed, "completed" otherwise.
-func (s *Service) Execute(ctx context.Context, jobID, tenantID, domainID uint, domainName string) (*Job, []Row, error) {
+// ConflictSkipExisting rows are neither a failure nor a creation: the
+// existing mailbox is left untouched and the row is recorded skipped.
+func (s *Service) Execute(ctx context.Context, jobID, tenantID, domainID uint, domainName, sourceHash string, hooks *ExecuteHooks) (*Job, []Row, error) {
 	job, err := s.repo.GetJob(ctx, jobID, tenantID)
 	if err != nil {
 		return nil, nil, err
@@ -209,68 +426,212 @@ func (s *Service) Execute(ctx context.Context, jobID, tenantID, domainID uint, d
 	if job == nil {
 		return nil, nil, ErrJobNotFound
 	}
-	if job.Status != JobReady {
-		return nil, nil, ErrJobNotReady
+	if job.SourceHash != "" && sourceHash != "" && job.SourceHash != sourceHash {
+		return nil, nil, ErrSourceHashMismatch
 	}
 	now := s.clock.Now()
-	if ok, err := s.repo.TransitionJobIfVersion(ctx, jobID, JobReady, JobRunning, job.Version, now); err != nil {
-		return nil, nil, kernel.Wrap(kernel.ErrCodeInternal, "start job", err)
-	} else if !ok {
-		return nil, nil, ErrVersionConflict
+	version := job.Version
+	// isResume distinguishes a fresh execution (JobReady) from a
+	// worker resuming after a crash/lease-loss/cooperative stop
+	// (JobRunning). It is captured BEFORE the switch below transitions
+	// job.Status, and is used to reconcile the one gap the checkpoint
+	// model cannot close by itself: a mailbox whose creation committed
+	// but whose own RowCreated write then failed (see the comment above
+	// UpdateRowResult(...RowCreated...) below). On a genuinely fresh
+	// run, hitting mailbox.ErrMailboxExists is a real conflict; on a
+	// resume, for a row still RowValid (never marked terminal), it can
+	// only mean this job's own earlier attempt already succeeded.
+	isResume := job.Status == JobRunning
+	switch job.Status {
+	case JobReady:
+		ok, terr := s.repo.TransitionJobIfVersion(ctx, jobID, JobReady, JobRunning, job.Version, now)
+		if terr != nil {
+			return nil, nil, kernel.Wrap(kernel.ErrCodeInternal, "start job", terr)
+		}
+		if !ok {
+			return nil, nil, ErrVersionConflict
+		}
+		version = job.Version + 1
+	case JobRunning:
+		// Resume: a prior attempt started and checkpointed but did not
+		// reach a terminal state (crash, lease loss, cooperative stop).
+	default:
+		return nil, nil, ErrJobNotReady
 	}
 
 	rows, err := s.repo.ListRows(ctx, jobID, []RowStatus{RowValid})
 	if err != nil {
 		return nil, nil, err
 	}
+	// Defense in depth: only ever attempt rows at or after the durable
+	// checkpoint, even though RowValid already excludes prior successes.
+	filtered := rows[:0]
+	for _, r := range rows {
+		if r.RowNumber >= job.NextRowNumber {
+			filtered = append(filtered, r)
+		}
+	}
+	rows = filtered
 
-	var created []uint // mailbox IDs created this run, for atomic-mode rollback
-	createdCount, failedCount := 0, 0
+	var created []uint // mailbox IDs created THIS call, for atomic-mode rollback
+	createdCount, failedCount, skippedCount := job.CreatedCount, job.FailedCount, job.SkippedCount
+	nextRowNumber := job.NextRowNumber
+	batchSize := DefaultBatchSize
 
-	for i := range rows {
-		row := &rows[i]
-		mailboxID, setupTokenHash, createErr := s.createOneMailbox(ctx, tenantID, domainName, row)
-		if createErr != nil {
-			failedCount++
-			_ = s.repo.UpdateRowResult(ctx, row.ID, RowFailed, ErrCodeCreateFailed, sanitizeErr(createErr), 0, "", now)
-			if job.Strategy == StrategyAtomic {
-				s.rollbackCreated(ctx, tenantID, created)
-				_ = s.repo.UpdateJobCounters(ctx, jobID, JobFailed, 0, failedCount, now)
-				finalJob, jerr := s.repo.GetJob(ctx, jobID, tenantID)
+	for start := 0; start < len(rows); start += batchSize {
+		if hooks != nil && hooks.BeforeBatch != nil {
+			if herr := hooks.BeforeBatch(ctx); herr != nil {
+				// Stop cleanly: whatever was checkpointed through the
+				// previous iteration already persisted. The job stays
+				// "running" and is safely resumable.
+				pausedJob, jerr := s.repo.GetJob(ctx, jobID, tenantID)
 				if jerr != nil {
 					return nil, nil, jerr
 				}
-				finalRows, _ := s.repo.ListRows(ctx, jobID, nil)
-				return finalJob, finalRows, nil
+				return pausedJob, nil, nil
 			}
-			continue
 		}
-		createdCount++
-		created = append(created, mailboxID)
-		_ = s.repo.UpdateRowResult(ctx, row.ID, RowCreated, "", "", mailboxID, setupTokenHash, now)
+		end := start + batchSize
+		if end > len(rows) {
+			end = len(rows)
+		}
+		for i := start; i < end; i++ {
+			row := &rows[i]
+			now = s.clock.Now()
+			mailboxID, setupTokenHash, createErr := s.createOneMailbox(ctx, tenantID, domainName, row)
+			if createErr != nil && isResume && errors.Is(createErr, mailbox.ErrMailboxExists) {
+				// Reconciliation: this row is still RowValid (Validate's
+				// own duplicate check already rules out a pre-existing
+				// conflict reaching this point as RowValid), and we are
+				// resuming — so the only honest explanation for the
+				// address already existing is that OUR OWN earlier
+				// attempt created it and then failed to record the row
+				// result (see the doc comment on the RowCreated write
+				// below). Look it up and record the real success instead
+				// of re-failing or re-skipping a row that actually
+				// succeeded.
+				if reconciledID, lerr := s.mailboxes.GetIDByEmail(ctx, row.Email); lerr == nil && reconciledID != 0 {
+					createdCount++
+					created = append(created, reconciledID)
+					if uerr := s.repo.UpdateRowResult(ctx, row.ID, RowCreated, "", "", reconciledID, "", now); uerr != nil {
+						return nil, nil, kernel.Wrap(kernel.ErrCodeInternal, "record reconciled created row", uerr)
+					}
+					nextRowNumber = row.RowNumber + 1
+					continue
+				}
+				// Lookup itself failed or found nothing — fall through to
+				// the normal conflict/failure handling below rather than
+				// silently swallowing the reconciliation attempt.
+			}
+			if createErr != nil {
+				if job.ConflictPolicy == ConflictSkipExisting && errors.Is(createErr, mailbox.ErrMailboxExists) {
+					skippedCount++
+					if uerr := s.repo.UpdateRowResult(ctx, row.ID, RowSkipped, "", "existing mailbox left unmodified", 0, "", now); uerr != nil {
+						return nil, nil, kernel.Wrap(kernel.ErrCodeInternal, "record skipped row", uerr)
+					}
+					nextRowNumber = row.RowNumber + 1
+					continue
+				}
+				failedCount++
+				if uerr := s.repo.UpdateRowResult(ctx, row.ID, RowFailed, ErrCodeCreateFailed, sanitizeErr(createErr), 0, "", now); uerr != nil {
+					return nil, nil, kernel.Wrap(kernel.ErrCodeInternal, "record failed row", uerr)
+				}
+				if job.Strategy == StrategyAtomic {
+					s.rollbackCreated(ctx, tenantID, created)
+					finalJob, ferr := s.finalizeLifecycleTx(ctx, jobID, job.CreatedBy, "job.failed", "failed", "atomic rollback", func(tx *sql.Tx) error {
+						return s.repo.UpdateJobCountersTx(ctx, tx, jobID, JobFailed, 0, failedCount, skippedCount, now)
+					})
+					if ferr != nil {
+						return nil, nil, ferr
+					}
+					finalRows, rerr := s.repo.ListRows(ctx, jobID, nil)
+					if rerr != nil {
+						return nil, nil, rerr
+					}
+					return finalJob, finalRows, nil
+				}
+				nextRowNumber = row.RowNumber + 1
+				continue
+			}
+			createdCount++
+			created = append(created, mailboxID)
+			// The mailbox mutation ITSELF already committed via the
+			// canonical mailbox service's own transaction by this point
+			// (createOneMailbox returned success). If recording the row
+			// result fails here, we must not silently pretend nothing
+			// happened: return the error so this call stops WITHOUT
+			// checkpointing this batch. On resume, createOneMailbox's
+			// mailbox.ErrMailboxExists path (defense-in-depth) prevents
+			// re-creating the same address a second time; ConflictFail
+			// jobs would then need administrator remediation for this one
+			// row, which is the honest partial-success reporting model
+			// this feature specifies rather than a fabricated atomic
+			// cross-service transaction.
+			if uerr := s.repo.UpdateRowResult(ctx, row.ID, RowCreated, "", "", mailboxID, setupTokenHash, now); uerr != nil {
+				return nil, nil, kernel.Wrap(kernel.ErrCodeInternal, "record created row (mailbox already committed)", uerr)
+			}
+			nextRowNumber = row.RowNumber + 1
+		}
+
+		// Checkpoint after the batch, guarded by the version WE started
+		// this call believing was current. If it fails, another actor
+		// (most likely a concurrent Cancel, or a second worker that
+		// re-claimed a lease we lost) changed the job first — stop
+		// immediately rather than race it.
+		ok, cerr := s.repo.CheckpointBatch(ctx, jobID, version, createdCount, failedCount, skippedCount, nextRowNumber, s.clock.Now())
+		if cerr != nil {
+			return nil, nil, kernel.Wrap(kernel.ErrCodeInternal, "checkpoint import batch", cerr)
+		}
+		if !ok {
+			pausedJob, jerr := s.repo.GetJob(ctx, jobID, tenantID)
+			if jerr != nil {
+				return nil, nil, jerr
+			}
+			return pausedJob, nil, nil
+		}
+		version++
 	}
 
 	finalStatus := JobCompleted
 	if failedCount > 0 {
 		finalStatus = JobPartiallyFailed
 	}
-	if err := s.repo.UpdateJobCounters(ctx, jobID, finalStatus, createdCount, failedCount, now); err != nil {
-		return nil, nil, err
+	action := "job.completed"
+	if finalStatus == JobPartiallyFailed {
+		action = "job.partially_failed"
 	}
-	if s.outbox != nil {
-		_ = s.outbox.Enqueue(ctx, s.repo.db, "bulkprovision.job.completed", fmt.Sprintf("%d", jobID), map[string]any{
-			"created": createdCount, "failed": failedCount, "strategy": job.Strategy,
-		}, now)
+	finalJob, ferr := s.finalizeLifecycleTx(ctx, jobID, job.CreatedBy, action, string(finalStatus), "", func(tx *sql.Tx) error {
+		return s.repo.UpdateJobCountersTx(ctx, tx, jobID, finalStatus, createdCount, failedCount, skippedCount, s.clock.Now())
+	})
+	if ferr != nil {
+		// The job-status transition (and its outbox/audit evidence) did
+		// NOT commit: it is left exactly as it was before this call (see
+		// finalizeLifecycleTx), which for a job entering this block is
+		// JobRunning with its checkpoint already durable from the last
+		// successful CheckpointBatch. A subsequent Execute call resumes
+		// cleanly: ListRows(RowValid) filtered by the persisted
+		// NextRowNumber returns nothing left to process, and this same
+		// finalize step simply runs again — never re-creating a mailbox.
+		return nil, nil, ferr
 	}
-
-	finalJob, err := s.repo.GetJob(ctx, jobID, tenantID)
-	if err != nil {
-		return nil, nil, err
+	finalRows, rerr := s.repo.ListRows(ctx, jobID, nil)
+	if rerr != nil {
+		return nil, nil, rerr
 	}
-	finalRows, _ := s.repo.ListRows(ctx, jobID, nil)
 	return finalJob, finalRows, nil
 }
 
+// createOneMailbox creates one mailbox via the canonical
+// internal/admin/mailbox.Service. It never accepts or handles a
+// plaintext password from the import: a cryptographically random
+// password is generated and immediately discarded, and the mailbox is
+// created with ForcePasswordChange so the ONLY way to obtain a working
+// credential is the platform's existing forgot-password/activation
+// flow (internal/api/handlers/customer_auth.go) — the "canonical
+// activation/reset-password flow" fallback this package deliberately
+// uses instead of fabricating a one-time encrypted-credential-artifact
+// system this repository has no general-purpose secret-encryption
+// service to back safely.
 func (s *Service) createOneMailbox(ctx context.Context, tenantID uint, domainName string, row *Row) (mailboxID uint, setupTokenHash string, err error) {
 	password, err := generateDiscardedPassword()
 	if err != nil {
@@ -280,18 +641,19 @@ func (s *Service) createOneMailbox(ctx context.Context, tenantID uint, domainNam
 	if !strings.Contains(email, "@") {
 		email = email + "@" + domainName
 	}
+	mode := string(row.AccessMode)
+	if mode == "" {
+		mode = string(AccessInherit)
+	}
 	resp, err := s.mailboxes.CreateMailbox(ctx, mailbox.CreateMailboxRequest{
-		Email: email, Password: password, Name: row.Name, QuotaMB: row.QuotaMB, ForcePasswordChange: true,
+		Email: email, Password: password, Name: row.Name, QuotaMB: row.QuotaMB,
+		ForcePasswordChange: true, MailAccessMode: &mode,
 	}, tenantID)
 	password = "" // discard immediately; never referenced again
 	if err != nil {
 		return 0, "", err
 	}
-	_, hash, tokErr := generateSetupToken()
-	if tokErr != nil {
-		return resp.Mailbox.ID, "", nil // mailbox created; token generation failure is non-fatal to the row
-	}
-	return resp.Mailbox.ID, hash, nil
+	return resp.Mailbox.ID, "", nil
 }
 
 // rollbackCreated compensates for atomic-strategy failures by
@@ -323,14 +685,32 @@ func (s *Service) Cancel(ctx context.Context, jobID, tenantID uint) (*Job, error
 		return nil, ErrJobNotCancellable
 	}
 	now := s.clock.Now()
-	ok, err := s.repo.TransitionJobIfVersion(ctx, jobID, job.Status, JobCancelled, job.Version, now)
-	if err != nil {
-		return nil, kernel.Wrap(kernel.ErrCodeInternal, "cancel job", err)
+	var transitioned bool
+	finalJob, ferr := s.finalizeLifecycleTx(ctx, jobID, 0, "job.cancelled", "cancelled", "", func(tx *sql.Tx) error {
+		ok, terr := s.repo.TransitionJobIfVersionTx(ctx, tx, jobID, job.Status, JobCancelled, job.Version, now)
+		if terr != nil {
+			return terr
+		}
+		transitioned = ok
+		if !ok {
+			return ErrVersionConflict
+		}
+		return nil
+	})
+	if ferr != nil {
+		if errors.Is(ferr, ErrVersionConflict) {
+			return nil, ErrVersionConflict
+		}
+		if !transitioned {
+			// The transition itself never happened (lost the race, or the
+			// lifecycle-evidence write failed before ever attempting it) —
+			// the job is left exactly as GetJob already showed it: still
+			// cancellable/retryable, never a false "cancelled".
+			return nil, kernel.Wrap(kernel.ErrCodeInternal, "cancel job", ferr)
+		}
+		return nil, kernel.Wrap(kernel.ErrCodeInternal, "cancel job", ferr)
 	}
-	if !ok {
-		return nil, ErrVersionConflict
-	}
-	return s.repo.GetJob(ctx, jobID, tenantID)
+	return finalJob, nil
 }
 
 // RetryFailedRows re-attempts only the rows left in RowFailed from a
@@ -363,25 +743,32 @@ func (s *Service) RetryFailedRows(ctx context.Context, jobID, tenantID uint, dom
 		mailboxID, setupTokenHash, createErr := s.createOneMailbox(ctx, tenantID, domainName, row)
 		if createErr != nil {
 			stillFailed++
-			_ = s.repo.UpdateRowResult(ctx, row.ID, RowFailed, ErrCodeCreateFailed, sanitizeErr(createErr), 0, "", now)
+			if uerr := s.repo.UpdateRowResult(ctx, row.ID, RowFailed, ErrCodeCreateFailed, sanitizeErr(createErr), 0, "", now); uerr != nil {
+				return nil, nil, kernel.Wrap(kernel.ErrCodeInternal, "record still-failed retry row", uerr)
+			}
 			continue
 		}
 		newlyCreated++
-		_ = s.repo.UpdateRowResult(ctx, row.ID, RowCreated, "", "", mailboxID, setupTokenHash, now)
+		if uerr := s.repo.UpdateRowResult(ctx, row.ID, RowCreated, "", "", mailboxID, setupTokenHash, now); uerr != nil {
+			return nil, nil, kernel.Wrap(kernel.ErrCodeInternal, "record retried created row (mailbox already committed)", uerr)
+		}
 	}
 
 	finalStatus := JobCompleted
 	if stillFailed > 0 {
 		finalStatus = JobPartiallyFailed
 	}
-	if err := s.repo.UpdateJobCounters(ctx, jobID, finalStatus, job.CreatedCount+newlyCreated, stillFailed, now); err != nil {
-		return nil, nil, err
+	finalCreated := job.CreatedCount + newlyCreated
+	finalJob, ferr := s.finalizeLifecycleTx(ctx, jobID, job.CreatedBy, "job.retried", string(finalStatus), fmt.Sprintf("retry: %d newly created, %d still failed", newlyCreated, stillFailed), func(tx *sql.Tx) error {
+		return s.repo.UpdateJobCountersTx(ctx, tx, jobID, finalStatus, finalCreated, stillFailed, job.SkippedCount, now)
+	})
+	if ferr != nil {
+		return nil, nil, ferr
 	}
-	finalJob, err := s.repo.GetJob(ctx, jobID, tenantID)
-	if err != nil {
-		return nil, nil, err
+	allRows, rerr := s.repo.ListRows(ctx, jobID, nil)
+	if rerr != nil {
+		return nil, nil, rerr
 	}
-	allRows, _ := s.repo.ListRows(ctx, jobID, nil)
 	return finalJob, allRows, nil
 }
 

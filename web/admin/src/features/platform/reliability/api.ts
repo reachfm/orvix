@@ -5,7 +5,7 @@ import type {
   RestoreJobSubmitResponse, RestoreJobResult,
   UpdateStatus, UpdateHistoryRow, PreflightResult, UpdateCheckResult, ChangelogEntry,
   Alert, MonitoringSnapshot, Capacity, MonitoringProvidersResponse, ListAlertDeliveriesResponse,
-  ListStorageVolumesResponse, ClusterStatus,
+  ListStorageVolumesResponse, ClusterStatus, MonitoringHealth,
 } from "./contract";
 
 // Backups
@@ -67,6 +67,13 @@ export const getMonitoringProviders = () => request<MonitoringProvidersResponse>
 export const listAlertDeliveries = () => request<ListAlertDeliveriesResponse>("/monitoring/alert-deliveries");
 export const resolveMonitoringAlert = (id: number) =>
   request<{ status: string; id: number }>(`/monitoring/alerts/${id}/resolve`, { method: "POST" });
+
+// Live runtime health for the Health page (GET /monitoring/health,
+// platformMW-gated). Previously SystemHealth.tsx called fetch()
+// directly, bypassing the shared CSRF/auth client — the health payload
+// is JSON through the shared transport now.
+export const getMonitoringHealth = () =>
+  request<MonitoringHealth>(`/monitoring/health`);
 
 // Storage
 export const listStorageVolumes = () => request<ListStorageVolumesResponse>("/admin/storage/volumes");
