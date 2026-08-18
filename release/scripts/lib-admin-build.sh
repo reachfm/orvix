@@ -35,7 +35,15 @@ verify_admin_ops_assets() {
         return 1
     fi
     local marker
-	for marker in "/api/v1/admin/backups" "/api/v1/monitoring/health"; do
+    # Stable API-path string literals that survive JS minification, so a
+    # build that dropped the ops pages fails instead of shipping silently.
+    # NOTE: SystemHealth now reads /monitoring/health through the canonical
+    # typed client (shared CSRF/auth transport, which composes the
+    # /api/v1 prefix at runtime) — the literal in the bundle is therefore
+    # "/monitoring/health", NOT the fully-qualified "/api/v1/monitoring/health"
+    # the old direct-fetch implementation contained. The /api/v1/admin/backups
+    # literal still exists because downloadBackupUrl() builds full hrefs.
+	for marker in "/api/v1/admin/backups" "/monitoring/health"; do
         if ! grep -qF -- "$marker" "$assets_dir"/*.js 2>/dev/null; then
             echo "verify_admin_ops_assets: built admin missing expected ops module marker: $marker" >&2
             return 1
