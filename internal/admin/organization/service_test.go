@@ -135,8 +135,8 @@ func TestCreateOrganizationWithOwner_AtomicAndOwnerInvitation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create with owner: %v", err)
 	}
-	if org.ID == 0 || !org.Active {
-		t.Fatalf("org must be active with a designated owner invitation: %+v", org)
+	if org.ID == 0 || org.Active {
+		t.Fatalf("org must start pending_activation (active=false) with a designated owner invitation: %+v", org)
 	}
 	if inv == nil || inv.OrganizationID != org.ID || inv.Role != "tenant_admin" || inv.Status != InvitationPending {
 		t.Fatalf("owner invitation must be tenant_admin/pending for the org: %+v", inv)

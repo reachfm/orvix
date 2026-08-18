@@ -59,7 +59,20 @@ func (h *Handler) CreateInvitation(c fiber.Ctx) error {
 	userID, _ := c.Locals("user_id").(uint)
 	inv, token, err := h.orgAdminSvc.CreateInvitation(c.Context(), tenantID, userID, req.Email, req.Role, 7)
 	if err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+		switch err {
+		case organization.ErrOrganizationNotFound:
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "organization not found", "code": string(kernel.ErrCodeNotFound)})
+		case organization.ErrPendingInvitationExists:
+			return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": "a pending invitation already exists for this email", "code": string(kernel.ErrCodeConflict)})
+		case organization.ErrInvitationNotFound, organization.ErrInvitationRevoked:
+			return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": err.Error(), "code": string(kernel.ErrCodeStateTransition)})
+		}
+		// Invalid role / invalid email: a stable validation failure, never
+		// a raw service error string.
+		if strings.Contains(err.Error(), "role") || strings.Contains(err.Error(), "email") {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error(), "code": string(kernel.ErrCodeValidation)})
+		}
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to create invitation", "code": string(kernel.ErrCodeInternal)})
 	}
 	h.writeAuditLog(c, "invitation.create", fmt.Sprintf("tenant:%d email:%s", tenantID, req.Email))
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"invitation": inv, "token": token})

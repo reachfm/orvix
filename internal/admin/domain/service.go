@@ -406,7 +406,9 @@ func (s *Service) ListDKIMHistory(ctx context.Context, id, tenantID uint) ([]DKI
 // verification of already-queued mail and for an eventual restore),
 // clears the domain's dkim_enabled flag, and records the revocation in
 // the selector history. A domain with no configured DKIM returns
-// ErrDKIMNotConfigured.
+// ErrDKIMNotConfigured. Revoking an ALREADY-revoked (disabled) config is
+// an idempotent success with NO new mutation: no duplicate history entry,
+// no duplicate audit row, no key rotation, no DNS change.
 func (s *Service) RevokeDKIM(ctx context.Context, id, tenantID uint) error {
 	d, err := s.repo.GetByID(ctx, id, tenantID)
 	if err != nil {
@@ -430,6 +432,12 @@ func (s *Service) RevokeDKIM(ctx context.Context, id, tenantID uint) error {
 	}
 	if existing == nil {
 		return ErrDKIMNotConfigured
+	}
+	if !existing.Enabled {
+		// Already revoked: the real state is already what this endpoint
+		// promises. Commit nothing — a repeated revoke must not pile up
+		// history/audit rows claiming a change that did not happen.
+		return tx.Commit()
 	}
 
 	existing.Enabled = false

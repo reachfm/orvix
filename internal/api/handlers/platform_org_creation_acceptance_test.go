@@ -11,6 +11,9 @@ package handlers_test
 //   - tenant + subscription + owner invitation created in one flow;
 //   - owner invitation is the real invitation/activation model
 //     (tenant_admin role, pending status, hashed token, expiry);
+//   - pending_activation lifecycle: the org starts active=false and is
+//     activated only when the owner invitation is accepted
+//     (POST /auth/invitations/accept);
 //   - Idempotency-Key required with replay returning the stored result;
 //   - duplicate slug → stable 409 conflict.
 
@@ -54,8 +57,13 @@ func TestPlatformCreateOrganization_PSAValidCreate(t *testing.T) {
 	if out.Organization.ID == 0 || out.Organization.Slug != "psa-created-org" {
 		t.Fatalf("unexpected organization: %+v", out.Organization)
 	}
-	if !out.Organization.Active {
-		t.Fatal("created organization must be active for the invitation/activation model")
+	// Lifecycle: a PSA-created organization is NOT active until its owner
+	// redeems the invitation (pending_activation). An ownerless ACTIVE
+	// organization must never exist — the org row + required owner
+	// invitation commit together, and only invitation acceptance
+	// (AcceptInvitation) flips tenants.active to 1.
+	if out.Organization.Active {
+		t.Fatal("PSA-created organization must start pending_activation (active=false) until the owner accepts")
 	}
 	// The owner invitation is the real activation path.
 	if out.Invitation.Email != "owner@psa-created.test" || out.Invitation.Role != "tenant_admin" {

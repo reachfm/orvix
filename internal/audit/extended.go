@@ -3,8 +3,10 @@ package audit
 import (
 	"context"
 	"database/sql"
+	"encoding/csv"
 	"encoding/json"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
@@ -316,4 +318,40 @@ func ActorEntry(c fiber.Ctx, action, target, result string, targetID uint) *Exte
 		UserAgent: c.Get("User-Agent"),
 		Timestamp: time.Now().UTC(),
 	}
+}
+
+// ExportTo writes the extended store's search result to w in the given
+// format. This is the canonical audit export: it reads the SAME orvix_audit
+// rows the list and detail routes serve, so an export can never disagree
+// with the platform audit page (the legacy coremail_audit exporter remains
+// only as a fallback for legacy consumers).
+func (s *ExtendedStore) ExportTo(ctx context.Context, q *ExtendedQuery, format ExportFormat, w io.Writer) error {
+	entries, _, err := s.Search(ctx, q)
+	if err != nil {
+		return err
+	}
+	switch format {
+	case ExportCSV:
+		cw := csv.NewWriter(w)
+		defer cw.Flush()
+		if err := cw.Write([]string{"id", "timestamp", "actor", "actor_id", "actor_role", "tenant_id", "action", "target", "target_id", "result", "reason", "request_id", "ip"}); err != nil {
+			return err
+		}
+		for _, e := range entries {
+			if err := cw.Write([]string{
+				fmt.Sprintf("%d", e.ID),
+				e.Timestamp.Format(time.RFC3339),
+				e.Actor, fmt.Sprintf("%d", e.ActorID), e.ActorRole, fmt.Sprintf("%d", e.TenantID),
+				e.Action, e.Target, fmt.Sprintf("%d", e.TargetID), e.Result, e.Reason, e.RequestID, e.IP,
+			}); err != nil {
+				return err
+			}
+		}
+	case ExportJSON:
+		enc := json.NewEncoder(w)
+		return enc.Encode(entries)
+	default:
+		return fmt.Errorf("unsupported export format: %s", format)
+	}
+	return nil
 }

@@ -188,3 +188,20 @@ Executed after Phase 1 (backend) on the same branch. Starting SHA:
   `TestPlatformBillingOverview_EnvelopeShapePins` (platform side),
   `TestAuditLogList_ResultFilterLimitClampAndDetailShape`, and the
   platform create/groups/DKIM shape tests.
+
+### 14.3 Blocker reviews (Phase 2 API Platform, second pass)
+
+Starting SHA: `29d7877e0e5dd1986576d215862cd2c12ba8f4ec`.
+
+| ID | Blocker finding (proved from source) | Fix (this pass) | Status |
+|---|---|---|---|
+| B-A1 (owner lifecycle) | PSA-created organizations (`POST /platform/organizations`) were created `tenants.active=1` with only a pending owner invitation — an ownerless ACTIVE org. The org-creation lifecycle test even pinned the wrong expectation (`Active==true`) | PSA orgs now start `pending_activation` (`active=0`) + REQUIRED owner invitation; activated ONLY by the new public `POST /auth/invitations/accept`; detail reports `status_label: pending_activation`; existing tests updated to pin the correct lifecycle | FIXED |
+| B-A2 (invitation accept) | No HTTP route could redeem an invitation token — `AcceptInvitation` was dead code, so the owner could never activate | New public `POST /auth/invitations/accept` (token + password): creates the member (role/tenant from invitation row), atomically claims the invitation, activates the org (respecting open suspensions), audits. Stable codes: 404 `NOT_FOUND` / 409 `INVALID_STATE_TRANSITION` / 409 `CONFLICT` | FIXED |
+| B-A4 (duplicate invites) | Two pending invitations for the same email were possible (no guard), leaving two live tokens where one redemption silently orphaned the other | `POST /enterprise/invitations` now rejects a duplicate pending email with 409 `CONFLICT` "a pending invitation already exists for this email"; resend covers the fresh-share use case by rotating the token | FIXED |
+| B-B2 (tenant audit page) | `GET /enterprise/audit/logs` read the legacy `coremail_audit` store and returned a bare array — the tenant page saw different actions than the platform page under a second incompatible contract | Reads the canonical `orvix_audit`, tenant-scoped, with the same `{entries, total, limit, offset}` envelope + rich fields as `GET /audit/logs`; filters action/actor/target/result/since/until + pagination. Frontend `api.listAuditLogs` unwraps `.entries` (compat wrapper) | FIXED |
+| B-C1 (invitation delivery honesty) | Invitation delivery is inviter-mediated (the one-time token is returned to the inviter, who shares it) — no mail submission is claimed, so there is no false-success class bug; resend rotates the token and returns it once | Verified honest; OpenAPI + matrices document the delivery model explicitly (inviter shares the token; UI must render it with a copy action — API_READY_FRONTEND_PENDING) | VERIFIED (no fix) |
+
+Verified consistent (no drift): billing state remains real-data-only with
+honest provider state; invitation revoke/expiry semantics unchanged;
+`requireTenantActive` continues to gate the console so a
+pending_activation org cannot be used before its owner activates.

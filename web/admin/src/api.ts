@@ -460,8 +460,16 @@ export const api = {
   deleteEnterpriseApiKey: (id: number) =>
     request(`/enterprise/api-keys/${id}`, { method: "DELETE" }),
 
-  // Audit logs
-  listAuditLogs: () => request<any[]>("/enterprise/audit/logs"),
+  // Audit logs — the tenant-facing audit page reads the CANONICAL
+  // {entries, total, limit, offset} envelope (same store + contract as the
+  // platform audit page). The wrapper unwraps .entries so existing
+  // consumers keep receiving the entry array; new UI should use
+  // features/platform/audit/api.ts for the full paginated envelope.
+  listAuditLogs: async (): Promise<any[]> => {
+    const data = await request<any>("/enterprise/audit/logs");
+    if (Array.isArray(data)) return data; // legacy bare-array fallback
+    return data?.entries ?? [];
+  },
 
   // Sessions
   listSessions: () => request<any>("/account/sessions"),

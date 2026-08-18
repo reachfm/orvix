@@ -91,10 +91,16 @@ func (s *Service) CreateOrganization(ctx context.Context, req CreateOrganization
 // the audit record commit or roll back together). It is the platform
 // super-admin organization-creation path: the PSA never invents an owner
 // user or password — the initial tenant_admin owner is established through
-// the same real invitation/activation model members use, so an organization
-// can never be created ownerless AND active. The owner invitation is
-// REQUIRED: a PSA-created organization without a designated owner is
-// rejected before any row is written.
+// the same real invitation/activation model members use.
+//
+// LIFECYCLE: the organization is created in pending_activation state
+// (tenants.active = 0) with a REQUIRED pending tenant_admin owner
+// invitation. It becomes active ONLY when that invitation is redeemed
+// (AcceptInvitation), so an ownerless organization can never appear as a
+// fully operational active customer tenant. The platform console sees
+// active=false + a pending owner invitation until activation. A
+// PSA-created organization without a designated owner is rejected before
+// any row is written.
 //
 // The returned rawToken is the one-time invitation token (shown once at
 // creation); only its SHA-256 hash is persisted.
@@ -138,7 +144,7 @@ func (s *Service) CreateOrganizationWithOwner(ctx context.Context, req CreateOrg
 	}
 	o := &Organization{
 		Name: req.Name, Slug: req.Slug, Domain: req.Domain,
-		Plan: req.Plan, MaxDomains: req.MaxDomains, MaxMailboxes: req.MaxMailboxes, Active: true,
+		Plan: req.Plan, MaxDomains: req.MaxDomains, MaxMailboxes: req.MaxMailboxes, Active: false,
 	}
 	inv, rawToken, err := newInvitationToken(0, ownerEmail, "tenant_admin", 7)
 	if err != nil {
@@ -211,6 +217,21 @@ func (s *Service) SetOrganizationActive(ctx context.Context, id uint, active boo
 	if err != nil {
 		return err
 	}
+	// No ownerless ACTIVE organization — the same invariant the PSA
+	// creation lifecycle enforces. An organization with zero active
+	// administrators must not be flipped operational by a manual
+	// activation: it has nobody to administer it, and the owner-invitation
+	// acceptance path (AcceptInvitation) is the only sanctioned way to
+	// bring a pending organization online. Disabling is always allowed.
+	if active {
+		admins, aerr := s.repo.CountAdmins(ctx, id)
+		if aerr != nil {
+			return aerr
+		}
+		if admins == 0 {
+			return ErrOrganizationRequiresOwner
+		}
+	}
 	action := "organization.disable"
 	if active {
 		action = "organization.enable"
@@ -230,6 +251,12 @@ func (s *Service) GetOrganizationDetail(ctx context.Context, id uint) (*Organiza
 	detail := &OrganizationDetail{Organization: *o}
 	if o.Active {
 		detail.StatusLabel = "active"
+	} else if pending, perr := s.repo.HasPendingOwnerInvitation(ctx, id); perr == nil && pending {
+		// PSA-created organization awaiting its owner's acceptance: the
+		// org is intentionally NOT operational until the owner invitation
+		// is redeemed. Distinct from "disabled" (a deliberate operator
+		// suspension) so the console can render the true lifecycle state.
+		detail.StatusLabel = "pending_activation"
 	} else {
 		detail.StatusLabel = "disabled"
 	}

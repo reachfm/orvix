@@ -8,6 +8,7 @@ import (
 	"github.com/orvix/orvix/internal/admin/organization"
 	"github.com/orvix/orvix/internal/auth"
 	"github.com/orvix/orvix/internal/billing"
+	"github.com/orvix/orvix/internal/platform/kernel"
 	"go.uber.org/zap"
 )
 
@@ -163,7 +164,16 @@ func (h *Handler) SetOrganizationActive(c fiber.Ctx) error {
 	}
 
 	if err := h.orgAdminSvc.SetOrganizationActive(c.Context(), id, req.Active, req.Reason); err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+		if err == organization.ErrOrganizationNotFound {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "organization not found", "code": string(kernel.ErrCodeNotFound)})
+		}
+		if err == organization.ErrOrganizationRequiresOwner {
+			return c.Status(fiber.StatusConflict).JSON(fiber.Map{
+				"error": "organization must have an active administrator before it can be activated",
+				"code":  string(kernel.ErrCodeConflict),
+			})
+		}
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "internal error"})
 	}
 	return c.JSON(fiber.Map{"status": "ok"})
 }

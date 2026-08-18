@@ -375,6 +375,35 @@ shapes (428 `PRECONDITION_FAILED`, 409 `CONFLICT`, 400
 - Capability matrix updated (231 routes; this section's counts table).
 - Contract-shape tests added (`platform_contract_shape_acceptance_test.go`).
 
+### 10.3 Blocker reviews (Phase 2 API Platform, second pass)
+
+Starting SHA: `29d7877e0e5dd1986576d215862cd2c12ba8f4ec`. Three
+mission-required deep audits were run against source; two required
+backend fixes, one required an idempotency correction.
+
+| ID | Blocker finding (proved from source) | Fix (this pass) | Status |
+|---|---|---|---|
+| B-A1 (org lifecycle) | `POST /platform/organizations` created the tenant row with `tenants.active=1` BEFORE any owner user existed — an ownerless ACTIVE organization, violating the owner-required lifecycle | PSA-created orgs now start `pending_activation` (`active=0`) with a REQUIRED pending tenant_admin owner invitation; the org becomes operational ONLY when the owner redeems the invitation via the new public `POST /auth/invitations/accept` (user created as tenant_admin + org activated in ONE transaction, honoring open suspensions). `GET /platform/organizations/:id/detail` reports `status_label: pending_activation` | FIXED |
+| B-A2 (no accept path) | `AcceptInvitation` existed in the service but was DEAD CODE — no route could redeem the one-time token, so the owner could never activate | New public route `POST /auth/invitations/accept` (throttled per-IP like other credential endpoints): token + password → user created (email from invitation row only), invitation atomically claimed (`WHERE status='pending'`), org activated, audited. Stable codes: 404 `NOT_FOUND` (unknown token), 409 `INVALID_STATE_TRANSITION` (revoked/expired/already-used), 409 `CONFLICT` (existing account / platform identity) | FIXED |
+| B-A3 (activation guard) | `POST /platform/organizations/:id/active` let the PSA force-activate an ownerless org, re-creating the violation through the back door | `SetOrganizationActive` now refuses `active=true` when the org has zero active administrators → 409 `CONFLICT` (`ErrOrganizationRequiresOwner`); disabling stays allowed | FIXED |
+| B-A4 (duplicate invites) | `org_invitations` had no unique constraint and `POST /enterprise/invitations` had no pre-check — two pending invitations for one email meant two live tokens, one silently orphaned on redemption | `ExistsPendingInvitation` pre-check in the service + stable 409 `CONFLICT` "a pending invitation already exists for this email" (resend rotates the token for a fresh share instead) | FIXED |
+| B-B1 (audit export) | `GET /audit/logs/export` read the LEGACY `coremail_audit` store while list/detail read the canonical `orvix_audit` — exports disagreed with the platform audit page | `ExportAuditLogs` now reads the extended store (`ExtendedStore.ExportTo`, JSON/CSV with the same rich fields); legacy exporter remains only as a fallback | FIXED |
+| B-B2 (tenant audit page) | `GET /enterprise/audit/logs` read the legacy store and returned a bare array — the tenant page saw different actions than the platform page, under a second incompatible contract | Now reads the canonical `orvix_audit`, tenant-scoped, with the SAME `{entries, total, limit, offset}` envelope and rich entry fields as `GET /audit/logs`; filters action/actor/target/result/since/until + limit/offset/page. Frontend `api.listAuditLogs` unwraps `.entries` for compatibility | FIXED |
+| B-B3 (dual-write agreement) | `writeAuditLog`'s legacy-side write omitted `tenant_id` and `role`, so the two stores disagreed on every handler-level action | Legacy mirror now carries role + tenant_id (fields agree with the canonical extended write); extended write additionally populates `request_id` from `X-Request-ID`/`X-Correlation-ID`. Canonical source: `orvix_audit`; `coremail_audit` = legacy compatibility mirror | FIXED |
+| B-C1 (DKIM revoke idempotency) | Repeat `POST /platform/domains/:tenant_id/:id/dkim/revoke` re-wrote the selector history and audit rows although the documented contract promised a no-op success | `RevokeDKIM` now commits without mutation when the config is already disabled — a repeat revoke is a true no-op success, never a duplicate history/audit record | FIXED |
+
+Verified SAFE (no change required): DKIM revoke never exposes key
+material, never generates a new key, never rotates the selector, never
+mutates public DNS, is tenant-scoped (cross-tenant → 404), and its
+`{status, domain_id, revoked}` response states the real resulting state.
+Billing overview/state expose only real data with honest
+`payment_provider` state (no MRR/cards/paid-invoice fabrication, integer
+minor units). Route ownership holds: `platformMW` (PSA + CSRF) on every
+`/platform/*` route, `enterpriseRead` (tenant family + tenant context) on
+every `/enterprise/*` route, RoleUser denied everywhere administrative,
+and the new accept route is public by design (the token is the
+credential).
+
 ## 11. Frontend handoff notes (for Frontend Developer)
 
 1. **Organizations**: wire create-org form → `POST /platform/organizations` (R-1). Owner email required; response includes the one-time invitation token — show it once with copy button.

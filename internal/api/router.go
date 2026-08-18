@@ -1223,6 +1223,13 @@ func (r *Router) setupRoutes() {
 	loginGroup.Post("/signup/resend", r.authThrottle(), r.h.SignupResend)
 	loginGroup.Post("/signup/verify", r.authThrottle(), r.h.SignupVerify)
 
+	// Invitation acceptance (public — no auth middleware): the invited
+	// member has no account yet, and for a PSA-created organization the
+	// owner invitation IS the activation credential. The one-time token is
+	// in the body, so the IP budget (authThrottleIP) applies — same class
+	// as MFA verify / password reset.
+	loginGroup.Post("/invitations/accept", r.authThrottleIP(), r.h.AcceptInvitationHTTP)
+
 	// H-6: /admin/login is the admin SPA's form target. It was registered on
 	// the ROOT app, outside the API group, and so carried no limiter at all —
 	// unbounded password guessing against the highest-value accounts on the

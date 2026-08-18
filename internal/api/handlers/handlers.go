@@ -3919,33 +3919,23 @@ func (h *Handler) UpdateFeatureFlag(c fiber.Ctx) error {
 func (h *Handler) writeAuditLog(c fiber.Ctx, action, resource string) {
 	userID, _ := c.Locals("user_id").(uint)
 	ip := c.IP()
+	role, _ := c.Locals("role").(string)
+	tenantID, _ := c.Locals("tenant_id").(uint)
 
-	if h.auditStore == nil {
+	if h.auditStore == nil && h.auditExtended == nil {
 		h.logger.Error("audit store unavailable")
 		return
 	}
-	if err := h.auditStore.Record(c.Context(), &audit.Entry{
-		Actor:     fmt.Sprintf("user:%d", userID),
-		Action:    action,
-		Target:    resource,
-		Result:    "success",
-		IP:        ip,
-		UserAgent: c.Get("User-Agent"),
-	}); err != nil {
-		h.logger.Error("failed to write audit log", zap.Error(err))
-	}
 
-	// Dual-write to the extended audit store (orvix_audit) so the
-	// platform Audit Log surface — which serves the rich ExtendedEntry
-	// contract with actor_id/actor_role/tenant_id/filtering/pagination —
-	// contains the SAME action set the legacy coremail_audit store has
-	// (queue operations, invitations, members, ownership, API keys,
-	// platform billing adjustments, …). Best-effort: a failure here is
-	// logged and never blocks the business action; the legacy write
-	// above remains the authoritative fallback for legacy consumers.
+	// Canonical write: orvix_audit (extended store) — the store the
+	// Platform Audit page, the tenant audit page, the detail view, and
+	// the export ALL read. This is the source of truth for every
+	// product-facing audit surface.
 	if h.auditExtended != nil {
-		role, _ := c.Locals("role").(string)
-		tenantID, _ := c.Locals("tenant_id").(uint)
+		requestID := strings.TrimSpace(c.Get("X-Request-ID"))
+		if requestID == "" {
+			requestID = strings.TrimSpace(c.Get("X-Correlation-ID"))
+		}
 		if err := h.auditExtended.Record(c.Context(), &audit.ExtendedEntry{
 			Actor:     fmt.Sprintf("user:%d", userID),
 			ActorID:   userID,
@@ -3954,10 +3944,32 @@ func (h *Handler) writeAuditLog(c fiber.Ctx, action, resource string) {
 			Action:    action,
 			Target:    resource,
 			Result:    "success",
+			RequestID: requestID,
 			IP:        ip,
 			UserAgent: c.Get("User-Agent"),
 		}); err != nil {
 			h.logger.Error("failed to write extended audit log", zap.Error(err))
+		}
+	}
+
+	// Legacy mirror: coremail_audit. Kept ONLY for legacy consumers
+	// (admin/audit-logs page, dashboard recent activity, compliance
+	// queries) that predate the extended store; the fields mirror the
+	// canonical write (role + tenant_id now included so the two stores
+	// agree). Best-effort: a failure here is logged and never blocks the
+	// business action.
+	if h.auditStore != nil {
+		if err := h.auditStore.Record(c.Context(), &audit.Entry{
+			Actor:     fmt.Sprintf("user:%d", userID),
+			Role:      role,
+			Action:    action,
+			Target:    resource,
+			Result:    "success",
+			IP:        ip,
+			UserAgent: c.Get("User-Agent"),
+			TenantID:  tenantID,
+		}); err != nil {
+			h.logger.Error("failed to write legacy audit log", zap.Error(err))
 		}
 	}
 }
