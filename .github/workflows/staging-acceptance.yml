@@ -427,7 +427,12 @@ jobs:
             [ -f "$d/index.html" ] && ADMIN_DIR="$d" && break
           done
           [ -n "$ADMIN_DIR" ] || { echo "installed admin UI not found"; exit 1; }
-          for marker in "/api/v1/admin/backups" "/api/v1/monitoring/health"; do
+          # Stable API-path string literals that survive JS minification.
+          # SystemHealth reads /monitoring/health through the canonical
+          # typed client (the shared transport composes the /api/v1 prefix
+          # at runtime), so the bundle literal is "/monitoring/health",
+          # not the fully-qualified old direct-fetch string.
+          for marker in "/api/v1/admin/backups" "/monitoring/health"; do
             grep -rqF "$marker" "$ADMIN_DIR"/assets/*.js 2>/dev/null || { echo "ops UI missing marker: $marker"; exit 1; }
           done
           echo "operations_ui=PASS" >> "$RESULTS_FILE"
