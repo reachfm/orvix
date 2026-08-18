@@ -1,7 +1,7 @@
 # Platform Console Capability Matrix
 
 Complete audit of every route gated with `platformMW[0], platformMW[1]`
-in `internal/api/router.go` (231 route registrations, verified by
+in `internal/api/router.go` (235 route registrations, verified by
 `internal/api/capability_matrix_test.go` against the branch head this
 document was written against â€” updated for the Milestone 13-15 DR,
 retention, platform billing, and signed-update-artifact routes, plus
@@ -395,7 +395,7 @@ real defect in the document itself, not just a typo, and
 second "## Summary counts" heading, or a route missing from either
 side, is ever reintroduced.
 
-Route-level, not row-level â€” several rows above group multiple route
+Route-level, not row-level — several rows above group multiple route
 registrations under one disposition (the 9 legacy `/backups*`
 `LegacyGone` routes, the 5 `/console/internal/*` routes, the 4
 `/admin/mfa/*` routes, the `GET /admin/fs/browse`+`GET /admin/fs/read`
@@ -405,19 +405,19 @@ above (not carried over from an earlier draft) and is enforced equal
 to the router's actual route set by
 `internal/api/capability_matrix_test.go`, which parses
 `platformMW[0], platformMW[1]` registrations straight out of
-`router.go` â€” currently 231 â€” and parses every `` `METHOD /path` ``
+`router.go` — currently 235 — and parses every `` `METHOD /path` ``
 occurrence and its row's disposition straight out of this document.
 
 | Disposition | Routes |
 |---|---|
-| UI_SUPPORTED | 182 |
+| UI_SUPPORTED | 186 (was 182; +4 Platform Support Inbox routes added in FINAL-ENTERPRISE-COMPLETION R-7) |
 | READ_ONLY_STATUS | 4 |
 | MACHINE_ONLY | 3 |
 | DEPRECATED | 12 |
 | DUPLICATE_SUPERSEDED_ROUTE | 18 |
 | MISSING_UI | 12 |
 | MISSING_BACKEND | 0 (the one MISSING_BACKEND case — platform-initiated organization creation — is documented under Organizations; it is now a real route, closed by the Enterprise Completion Pass) |
-| **Total** | **231** |
+| **Total** | **235** (was 231; +4 Platform Support Inbox routes) |
 
 Phase 3 (Frontend) re-disposition: every route whose page/action the
 Enterprise Product Completion Pass frontend agent completed (or that
