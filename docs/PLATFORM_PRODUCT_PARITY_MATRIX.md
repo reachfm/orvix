@@ -406,12 +406,13 @@ credential).
 
 ## 11. Frontend handoff notes (for Frontend Developer)
 
-1. **Organizations**: wire create-org form → `POST /platform/organizations` (R-1). Owner email required; response includes the one-time invitation token — show it once with copy button.
+1. **Organizations**: wire create-org form → `POST /platform/organizations` (R-1). Owner email required; response includes the one-time invitation token — show it once with copy button. The org starts **pending_activation** (`active: false` + pending owner invitation): render the detail's `status_label: pending_activation` state, and after the owner redeems `POST /auth/invitations/accept`, the org becomes `active`.
 2. **Platform Billing**: render overview card from R-3; keep "provider not configured" honesty; never show cards/MRR.
 3. **Groups**: wire create/delete/add-member/remove-member against R-2 routes; delete requires typed confirm.
 4. **Domains**: wire DKIM revoke (R-4) next to generate/rotate.
-5. **Audit Log**: current page already expects the fixed `{entries,total}` shape; wire export button (blob download) for `GET /audit/logs/export`.
+5. **Audit Log**: current page already expects the fixed `{entries,total}` shape; wire export button (blob download) for `GET /audit/logs/export`. NOTE: `features/platform/security/api.ts listAuditLogs` (used by `AuditPanel.tsx`) still types `/audit/logs` as a bare `AuditEntry[]` — the route returns the `{entries, total, limit, offset}` envelope, so this panel renders empty. Point it at `features/platform/audit/api.ts` (envelope-aware) or unwrap `.entries` — API_READY_FRONTEND_PENDING.
 6. **Mail Queue**: add History/Export/Bulk Action UI against existing routes (backend complete).
 7. **Backups**: add schedule edit UI against existing `POST /admin/backups/schedule`.
 8. **SystemHealth.tsx**: replace direct `fetch("/api/v1/monitoring/health")` with the shared client (DIRECT_FETCH_BYPASS).
-9. Do NOT wire: `POST /firewall/rules` (410 by design), `POST /updates/apply/:module` (stub — use `/update/run`), `/admin/fs/*` (machine-only), `POST /guardian/analyze` (machine-only), signed artifact apply/rollback (operator/machine-only, external coordinator required).
+9. **Organization activation (new, R-1 lifecycle)**: after a PSA creates an org, the owner redeems the one-time token at `POST /auth/invitations/accept` (token + password). Build the accept page (public), then redirect to login. Duplicate acceptance returns 409 `INVALID_STATE_TRANSITION`; unknown tokens 404 `NOT_FOUND`.
+10. Do NOT wire: `POST /firewall/rules` (410 by design), `POST /updates/apply/:module` (stub — use `/update/run`), `/admin/fs/*` (machine-only), `POST /guardian/analyze` (machine-only), signed artifact apply/rollback (operator/machine-only, external coordinator required).
