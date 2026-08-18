@@ -545,31 +545,25 @@ components:
           type: string
           enum: [low, normal, high, urgent]
         assigned_to_id:
-          type: integer
+          type: [integer, "null"]
           format: int64
-          nullable: true
         last_reply_at:
-          type: string
+          type: [string, "null"]
           format: date-time
-          nullable: true
         last_reply_by:
-          type: string
+          type: [string, "null"]
           enum: [tenant, platform, ""]
-          nullable: true
         closed_at:
-          type: string
+          type: [string, "null"]
           format: date-time
-          nullable: true
         resolved_at:
-          type: string
+          type: [string, "null"]
           format: date-time
-          nullable: true
         delivery_status:
           type: string
           enum: [pending, sent, failed, disabled]
         delivery_error:
-          type: string
-          nullable: true
+          type: [string, "null"]
     SupportTicketMessage:
       type: object
       properties:
