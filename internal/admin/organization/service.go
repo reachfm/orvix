@@ -113,6 +113,17 @@ func (s *Service) CreateOrganizationWithOwner(ctx context.Context, req CreateOrg
 	if exists {
 		return nil, nil, "", ErrOrganizationExists
 	}
+	// The tenants table enforces UNIQUE(domain). Distinguish a domain
+	// collision from a slug collision so the client gets a truthful
+	// conflict, not a misleading "slug already exists". The empty
+	// domain (a PSA creation without one) is included: at most one
+	// tenant may carry it, and the second no-domain creation is a
+	// genuine conflict on the same column.
+	if domainExists, dErr := s.repo.ExistsByDomain(ctx, req.Domain, 0); dErr != nil {
+		return nil, nil, "", dErr
+	} else if domainExists {
+		return nil, nil, "", ErrOrganizationDomainExists
+	}
 	if req.Name == "" {
 		req.Name = req.Slug
 	}
@@ -461,6 +472,7 @@ func (s *Service) mutateWithAudit(ctx context.Context, entry *audit.ExtendedEntr
 }
 
 var (
-	ErrOrganizationNotFound = fmt.Errorf("organization not found")
-	ErrOrganizationExists   = fmt.Errorf("organization already exists")
+	ErrOrganizationNotFound     = fmt.Errorf("organization not found")
+	ErrOrganizationExists       = fmt.Errorf("organization already exists")
+	ErrOrganizationDomainExists = fmt.Errorf("an organization with this domain already exists")
 )

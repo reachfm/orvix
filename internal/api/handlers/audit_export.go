@@ -6,6 +6,7 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/orvix/orvix/internal/audit"
+	"github.com/orvix/orvix/internal/platform/kernel"
 )
 
 func (h *Handler) ExportAuditLogs(c fiber.Ctx) error {
@@ -30,7 +31,7 @@ func (h *Handler) ExportAuditLogs(c fiber.Ctx) error {
 func (h *Handler) GetAuditEntry(c fiber.Ctx) error {
 	id, err := strconv.ParseInt(c.Params("id"), 10, 64)
 	if err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid id"})
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid id", "code": string(kernel.ErrCodeValidation)})
 	}
 	// Prefer the extended store so the detail contract matches the
 	// list contract (actor_id/actor_role/tenant_id/ip/user_agent/…).

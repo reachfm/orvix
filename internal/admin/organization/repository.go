@@ -187,6 +187,17 @@ func (r *OrganizationRepo) ExistsBySlug(ctx context.Context, slug string, exclud
 	return count > 0, err
 }
 
+// ExistsByDomain reports whether any non-deleted tenant carries the
+// given domain. The tenants table enforces UNIQUE(domain), so this is
+// the truthful pre-check behind the PSA organization-creation contract
+// (a domain collision is a distinct conflict from a slug collision).
+func (r *OrganizationRepo) ExistsByDomain(ctx context.Context, domain string, excludeID uint) (bool, error) {
+	var count int64
+	err := r.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM tenants WHERE domain="+r.dialect.Placeholder(1)+" AND id!="+r.dialect.Placeholder(2)+" AND deleted_at IS NULL", domain, excludeID).Scan(&count)
+	return count > 0, err
+}
+
 // CountAdmins counts active, non-deleted tenant administrator users for a
 // specific tenant. platform_super_admin (tenant_id IS NULL) is never
 // counted. Legacy admin/superadmin roles remain included for

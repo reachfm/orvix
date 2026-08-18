@@ -68,6 +68,10 @@ func (h *Handler) CreatePlatformOrganization(c fiber.Ctx) error {
 	if h.platformAdminSvc == nil {
 		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "platform admin service not available"})
 	}
+	// Sensitive mutation: the live response carries a one-time invite
+	// token, so it must never be cached (applies to the live response
+	// AND any idempotent replay).
+	c.Set("Cache-Control", "no-store")
 	var req platformSvc.CreateOrganizationRequest
 	if err := c.Bind().JSON(&req); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request body"})
@@ -81,6 +85,9 @@ func (h *Handler) CreatePlatformOrganization(c fiber.Ctx) error {
 		if err != nil {
 			if err == organization.ErrOrganizationExists {
 				return 0, nil, nil, kernel.NewError(kernel.ErrCodeConflict, "an organization with this slug already exists")
+			}
+			if err == organization.ErrOrganizationDomainExists {
+				return 0, nil, nil, kernel.NewError(kernel.ErrCodeConflict, "an organization with this domain already exists")
 			}
 			if strings.Contains(err.Error(), "owner_email") {
 				return 0, nil, nil, kernel.NewError(kernel.ErrCodeValidation, err.Error())

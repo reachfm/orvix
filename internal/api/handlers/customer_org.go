@@ -8,6 +8,7 @@ import (
 	"github.com/gofiber/fiber/v3"
 	"github.com/orvix/orvix/internal/admin/organization"
 	"github.com/orvix/orvix/internal/auth"
+	"github.com/orvix/orvix/internal/platform/kernel"
 )
 
 func (h *Handler) GetCurrentOrganization(c fiber.Ctx) error {
@@ -94,21 +95,29 @@ func (h *Handler) ResendInvitation(c fiber.Ctx) error {
 	if h.orgAdminSvc == nil {
 		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "organization service not available"})
 	}
+	// Sensitive response: the re-issued one-time token must never be
+	// cached by a browser or intermediary.
+	c.Set("Cache-Control", "no-store")
 	idStr := c.Params("id")
 	id, err := strconv.ParseUint(idStr, 10, 64)
 	if err != nil || id == 0 {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid invitation id"})
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid invitation id", "code": string(kernel.ErrCodeValidation)})
 	}
 	tenantID, err := auth.RequireTenantID(c)
 	if err != nil {
-		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "tenant context required"})
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "tenant context required", "code": string(kernel.ErrCodeForbidden)})
 	}
 	inv, token, err := h.orgAdminSvc.RotateInvitationToken(c.Context(), uint(id), tenantID)
 	if err != nil {
 		if err == organization.ErrInvitationNotFound {
-			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "invitation not found"})
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "invitation not found", "code": string(kernel.ErrCodeNotFound)})
 		}
-		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": err.Error()})
+		// Non-pending invitation (accepted/revoked/expired): a stable
+		// INVALID_STATE_TRANSITION code, never the raw service error.
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{
+			"error": "only pending invitations can be re-issued",
+			"code":  string(kernel.ErrCodeStateTransition),
+		})
 	}
 	h.writeAuditLog(c, "invitation.resend", fmt.Sprintf("id:%d", id))
 	return c.JSON(fiber.Map{"invitation": inv, "token": token, "warning": "This new token replaces the previous one. Save it now - it will not be shown again."})
